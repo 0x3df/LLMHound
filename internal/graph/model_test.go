@@ -223,6 +223,72 @@ func TestAccessIsOperationScopedVantageToTarget(t *testing.T) {
 	}
 }
 
+func TestCorrelationEvidenceAndEdgeValidation(t *testing.T) {
+	obs := observation(t)
+	s := service(t, "scope", graph.MCPServer, "https://example.com")
+	c, _ := graph.ExistingComputerByID("native-existing")
+	if _, err := graph.ExistingComputerByName("", "HOST.LAB.LOCAL"); err == nil {
+		t.Fatal("empty native ID accepted")
+	}
+	fallbackTarget, _ := graph.ParseTarget("example.com")
+	fallback, _ := graph.NewNetworkEndpointIdentity("scope", fallbackTarget)
+	for _, tc := range []struct {
+		start, end graph.Reference
+		decision   graph.Correlation
+	}{
+		{s.Reference(), c, graph.Correlation{}},
+		{s.Reference(), c, graph.Correlation{MatchMethod: "mapping", MatchValue: "example.com", Confidence: "exact", FallbackReason: "ambiguous"}},
+		{s.Reference(), fallback.Reference(), graph.Correlation{}},
+		{s.Reference(), fallback.Reference(), graph.Correlation{FallbackReason: "unresolved", MatchMethod: "mapping"}},
+		{fallback.Reference(), c, graph.Correlation{MatchMethod: "mapping", MatchValue: "example.com", Confidence: "exact"}},
+	} {
+		if _, err := graph.NewObservedAtEdge(tc.start, tc.end, obs, tc.decision); err == nil {
+			t.Fatal("invalid correlation edge accepted")
+		}
+	}
+	decision := graph.Correlation{FallbackReason: "ambiguous", CandidateIDs: []string{"candidate-a", "candidate-b"}}
+	e, err := graph.NewObservedAtEdge(s.Reference(), fallback.Reference(), obs, decision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision.CandidateIDs[0] = "mutated"
+	copy, ok := e.Correlation()
+	if !ok || copy.CandidateIDs[0] != "candidate-a" {
+		t.Fatal("input correlation slice not copied")
+	}
+	copy.CandidateIDs[0] = "mutated"
+	original, _ := e.Correlation()
+	if original.CandidateIDs[0] != "candidate-a" {
+		t.Fatal("output correlation slice not copied")
+	}
+	if _, ok := e.AccessEvidence(); ok {
+		t.Fatal("topology has access claim")
+	}
+	if !reflect.DeepEqual(e.Observation(), obs) {
+		t.Fatal("edge provenance changed")
+	}
+	backend := service(t, "scope", graph.OllamaInstance, "https://example.com/other")
+	topology, err := graph.NewTopologyEdge(graph.UsesBackend, s.Reference(), backend.Reference(), obs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := topology.Correlation(); ok {
+		t.Fatal("unrelated topology has correlation claim")
+	}
+	otherScope := service(t, "other", graph.MCPServer, "https://example.com")
+	if _, err := graph.NewTopologyEdge(graph.UsesBackend, s.Reference(), otherScope.Reference(), obs); err == nil {
+		t.Fatal("cross-scope edge accepted")
+	}
+	bad := obs
+	bad.ScanID = ""
+	if _, err := graph.NewTopologyEdge(graph.UsesBackend, s.Reference(), backend.Reference(), bad); err == nil {
+		t.Fatal("missing edge provenance accepted")
+	}
+	if _, err := graph.NewObservedAtEdge(s.Reference(), fallback.Reference(), bad, graph.Correlation{FallbackReason: "unresolved"}); err == nil {
+		t.Fatal("missing correlation provenance accepted")
+	}
+}
+
 func TestCoverageAndOriginalProvenance(t *testing.T) {
 	obs := observation(t)
 	id := service(t, "scope", graph.MCPServer, "https://example.com/mcp")
@@ -243,7 +309,8 @@ func TestCoverageAndOriginalProvenance(t *testing.T) {
 		func(o *graph.Observation) { o.CollectorVersion = "" }, func(o *graph.Observation) { o.EvidenceID = "" },
 		func(o *graph.Observation) { o.Source = "" }, func(o *graph.Observation) { o.Surface = "" },
 		func(o *graph.Observation) { o.ObservedAt = time.Time{} }, func(o *graph.Observation) { o.Vantage = graph.Identity{} },
-		func(o *graph.Observation) { o.Coverage = "unknown" }, func(o *graph.Observation) { o.Coverage = graph.CoverageFailed },
+		func(o *graph.Observation) { o.Coverage = "unknown" },
+		func(o *graph.Observation) { o.ObservedAt = o.ObservedAt.In(time.FixedZone("offset", 3600)) }, func(o *graph.Observation) { o.Coverage = graph.CoverageFailed },
 		func(o *graph.Observation) { o.Vantage, _ = graph.NewVantageIdentity("other", "scanner") },
 	} {
 		bad := obs

@@ -22,10 +22,16 @@ if ! grep -q '^COMPOSE_PROJECT_NAME=llmhound-m0-lab$' .env; then
     exit 1
 fi
 
-echo "pulling pinned images (BLOODHOUND_TAG, postgres:18) ..."
-# Non-fatal: images may already be cached locally; a flaky pull must not wedge
-# the lab start. Compose verifies the tag exists when creating containers.
-docker compose pull --quiet || echo "pull failed; continuing with local images"
+echo "ensuring pinned images are present (BLOODHOUND_TAG, postgres:18) ..."
+# Pull only when an image is missing locally: a pull of cached images can hang
+# on a flaky registry connection and wedge the lab start. Compose itself
+# verifies the tag exists when creating containers.
+if ! docker image inspect "docker.io/specterops/bloodhound:${BLOODHOUND_TAG:-9.7.1}" >/dev/null 2>&1 \
+   || ! docker image inspect docker.io/library/postgres:18 >/dev/null 2>&1; then
+    docker compose pull --quiet || echo "pull failed; continuing with local images"
+else
+    echo "images already cached locally; skipping pull"
+fi
 
 docker compose up -d
 echo "waiting for BloodHound CE API ..."

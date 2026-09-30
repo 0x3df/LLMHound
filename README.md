@@ -20,7 +20,8 @@ targets → network scan → OpenGraph payload + evidence sidecar → AI service
 ```
 
 > [!NOTE]
-> **Status: revised design draft.** Nothing is implemented yet. The design is
+> **Status: early development.** Only internal graph-identity and correlation
+> primitives exist; there is no usable CLI or collector yet. The design is
 > [`docs/plans/2026-09-29-llmhound-design.md`](docs/plans/2026-09-29-llmhound-design.md);
 > see [Roadmap](#roadmap) for what ships when. Commands and flags below are
 > planned and may change.
@@ -102,9 +103,10 @@ Targets **BloodHound CE with PostgreSQL**. Support requires validation of the
 exact CE version, OpenGraph schema, and API capabilities; a version number
 alone is not a compatibility guarantee.
 
-- **Extension schema.** `extension/schema.json` uses clean node and edge
-  names such as `OllamaInstance` and `ProvidesModel`. Any required collision
-  qualification is an adapter concern, validated against the target CE schema.
+- **Extension schema.** `extension/schema.json` uses `LLMHound_`-prefixed
+  kinds such as `LLMHound_OllamaInstance` and `LLMHound_ProvidesModel`, as
+  required by the validated CE release (see the
+  [graph model](docs/reference/graph-model.md#naming-contract)).
   All v1 edges are non-traversable.
 - **Attached to your AD Computers.** `ObservedAt` links a service to the
   existing AD `Computer` it was correlated to, or to a fallback

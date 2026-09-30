@@ -197,6 +197,12 @@ not permission to fetch arbitrary URLs.
 | **M4** _(future)_ | Credential-driven enumeration and access evidence                                                                                                      |
 | **M5** _(future)_ | Node/edge description docs and an OpenGraph community library listing                                                                                  |
 
+## Development validation
+
+The [Go CI operator guide](docs/reference/go-ci.md) describes automated PR
+checks, the module-free M0 bootstrap distinction, and how to trigger real
+checks on existing QA PRs without changing their code.
+
 ## Licensing
 
 LLMHound is original code written from scratch. Reference projects

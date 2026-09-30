@@ -80,7 +80,9 @@ same address.
 CIDRs must have no host bits set (use `192.0.2.0/24`, not `192.0.2.1/24`); every
 address is included, with no network/broadcast omission. IPv4-mapped prefixes,
 scoped IPv6, unspecified/multicast target addresses, URLs, ports, credentials,
-single-label hosts, wildcards, and invalid numeric IP spellings are rejected.
+single-label hosts, wildcards, and invalid numeric IP spellings are rejected;
+a name whose final label is all digits or starts with `0x` (for example
+`0x7f.0.0.1`) is treated as a numeric IP spelling, not an FQDN.
 Loopback/private/documentation addresses are allowed for offline review; this is
 not permission to scan them. Hostname exclusions are exact, not DNS suffixes:
 excluding `example.test` does not exclude `ai.example.test`. CIDR exclusions

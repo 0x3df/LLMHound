@@ -135,6 +135,26 @@ func TestPrepareExpansionBoundary(t *testing.T) {
 	}
 }
 
+func TestPrepareRejectsAlternateNumericIPv4Spellings(t *testing.T) {
+	for _, value := range []string{"0x7f.0.0.1", "0x7f000001.0", "127.0.0.0x1", "0X7F.0.0.1", "127.0.0.0X1", "10.0.0.1."} {
+		t.Run(value, func(t *testing.T) {
+			if got, err := Prepare(Input{Entries: []string{value}, MaxTargets: 10}); err == nil || got != nil {
+				t.Fatalf("accepted %q as %v", value, got)
+			}
+			if got, err := Prepare(Input{Entries: []string{"ai.example.test"}, Exclude: []string{value}, MaxTargets: 10}); err == nil || got != nil {
+				t.Fatalf("accepted exclusion %q: %v", value, got)
+			}
+			if got, err := NormalizeHost(value); err == nil {
+				t.Fatalf("normalized %q to %q", value, got)
+			}
+		})
+	}
+	got, err := Prepare(Input{Entries: []string{"0x7f.example.test", "host.0x7f.test", "123.example.test"}, MaxTargets: 10})
+	if err != nil || !reflect.DeepEqual(got, []string{"0x7f.example.test", "123.example.test", "host.0x7f.test"}) {
+		t.Fatalf("hex-like non-final labels: %v %v", got, err)
+	}
+}
+
 func TestNormalizeHost(t *testing.T) {
 	for in, want := range map[string]string{"API.Example.Test.": "api.example.test", "::ffff:192.0.2.1": "192.0.2.1", "2001:0DB8::1": "2001:db8::1"} {
 		got, err := NormalizeHost(in)

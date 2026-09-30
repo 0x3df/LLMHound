@@ -238,13 +238,8 @@ func NormalizeHost(value string) (string, error) {
 	if len(name) > 253 || !strings.Contains(name, ".") {
 		return "", fmt.Errorf("target must be an IP literal, CIDR, or fully qualified ASCII hostname")
 	}
-	numeric := true
-	for _, c := range name {
-		if (c < '0' || c > '9') && c != '.' {
-			numeric = false
-		}
-	}
-	if numeric {
+	tld := name[strings.LastIndexByte(name, '.')+1:]
+	if strings.HasPrefix(tld, "0x") || strings.Trim(tld, "0123456789") == "" {
 		return "", fmt.Errorf("invalid numeric IP address")
 	}
 	for _, label := range strings.Split(name, ".") {

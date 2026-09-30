@@ -41,21 +41,24 @@ briefly changes the PR's state; coordinate with its active pipeline monitor.
 Do not run `update-branch`, rebase, force-push, add empty commits, or restart
 product validation as a substitute.
 
-For the existing CLI and graph PRs, respectively:
+For the existing CLI and graph PRs, respectively (run from this repository;
+`gh-axi pr` takes a numeric identifier, extracted here from each full URL):
 
 ```bash
-gh-axi pr close https://github.com/0x3df/LLMHound/pull/2
-gh-axi pr reopen https://github.com/0x3df/LLMHound/pull/2
-gh-axi pr close https://github.com/0x3df/LLMHound/pull/3
-gh-axi pr reopen https://github.com/0x3df/LLMHound/pull/3
+for pr in https://github.com/0x3df/LLMHound/pull/2 \
+          https://github.com/0x3df/LLMHound/pull/3; do
+  gh-axi pr close "${pr##*/}" && gh-axi pr reopen "${pr##*/}"
+done
 ```
 
 Inspect real checks and the corresponding run/logs; let each PR's existing
 pipeline monitor evaluate that evidence:
 
 ```bash
-gh-axi pr checks https://github.com/0x3df/LLMHound/pull/2
-gh-axi pr checks https://github.com/0x3df/LLMHound/pull/3
+for pr in https://github.com/0x3df/LLMHound/pull/2 \
+          https://github.com/0x3df/LLMHound/pull/3; do
+  gh-axi pr checks "${pr##*/}"
+done
 gh-axi run list --workflow go.yml --event pull_request
 gh-axi run view <run-id> --log
 ```

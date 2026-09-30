@@ -1,0 +1,65 @@
+name: Go CI
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  module:
+    name: Detect Go module (bootstrap only if absent)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      present: ${{ steps.module.outputs.present }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Detect root module
+        id: module
+        shell: bash
+        run: |
+          if [[ -f go.mod ]]; then
+            echo 'present=true' >> "$GITHUB_OUTPUT"
+            echo 'Root go.mod found; Go validation is required.' >> "$GITHUB_STEP_SUMMARY"
+          elif [[ -n "$(git ls-files -- '*.go' '**/go.mod')" ]]; then
+            echo '::error::Go files exist but root go.mod is missing; refusing bootstrap-only validation.'
+            exit 1
+          else
+            echo 'present=false' >> "$GITHUB_OUTPUT"
+            echo 'Bootstrap only: no root go.mod or tracked Go files. Go validation is skipped, not passed. This is not product CI evidence.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  go:
+    name: Go format, race tests, vet, build
+    needs: module
+    if: needs.module.outputs.present == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Check formatting
+        shell: bash
+        run: |
+          unformatted=$(git ls-files -z -- '*.go' | xargs -0 -r gofmt -l)
+          if [[ -n "$unformatted" ]]; then
+            printf '%s\n' "$unformatted"
+            echo '::error::Run gofmt on the files listed above.'
+            exit 1
+          fi
+      - name: Test with race detector
+        run: go test -race ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Build
+        run: go build ./...
+      - name: Build without cgo
+        run: CGO_ENABLED=0 go build ./...

@@ -30,7 +30,8 @@ Goal: eventually listed on the SpecterOps OpenGraph community library page
 | `docs/reference/collector-capabilities.md` | Per-surface allowlisted checks and per-check outcome contract. |
 | `docs/reference/ce-compatibility.md` | M0 spike questions and recorded CE answers. |
 | `docs/reference/saved-queries.md` | Starter saved queries (drive which properties must be queryable). |
-| `README.md` | Public-facing overview (library-page ready). |
+| `README.md` | Public-facing overview; implemented CLI vs planned collector behavior. |
+| `docs/reference/configuration.md` | Working M1 CLI/configuration/target-input contract, limits, build and test commands. |
 | `docs/plans/.future/` | Parked ideas only. Not a roadmap; nothing there is in scope. |
 | `extension/schema.json`, `extension/saved_searches/` | Not yet created (M1/M3). |
 
@@ -96,7 +97,8 @@ Goal: eventually listed on the SpecterOps OpenGraph community library page
 0. **M0 — CE compatibility spike:** pinned CE in docker-compose; toy
    extension + payload; answer the questions in `ce-compatibility.md`
    (kind namespacing, multi-label, property types, non-traversable edges,
-   `source_kind` cleanup, property-matched edges to `Computer`). *Next up.*
+   `source_kind` cleanup, property-matched edges to `Computer`). Spike results
+   and repeatable checks are recorded in `docs/reference/ce-compatibility.md` and `lab/`.
 1. **M1 — Skeleton + graph + emitter:** CLI (cobra), `llmhound.yaml` loader,
    targets, graph model, OpenGraph emitter + evidence sidecar,
    `extension/schema.json`, `LICENSE`, golden-file tests.
@@ -116,7 +118,10 @@ Goal: eventually listed on the SpecterOps OpenGraph community library page
 
 - Repo: `~/Projects/LLMHound` (a legacy symlink `~/Projects/AIHound` →
   `LLMHound` may exist; the directory was renamed mid-session).
-- Branch `main`; small committed steps; docs live under `docs/`.
+- Integration branch `QA` for implementation; PRs target `QA`, not `main`.
+  Small committed steps; docs live under `docs/`.
+- CLI/input implementation and verification: `docs/reference/configuration.md`.
+  `targets` is offline; scan/plan/upload remain honest stubs until their milestones.
 - Discovery ports/paths are data-driven fingerprint definitions (embedded,
   overridable). Baseline: Ollama 11434, vLLM 8000, MLflow 5000, Jupyter 8888,
   Qdrant 6333, Open WebUI 3000/8080, LiteLLM 4000, MCP/A2A on 80/443/8080 +

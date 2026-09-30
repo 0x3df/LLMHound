@@ -1,0 +1,99 @@
+{
+  "schema": {
+    "name": "LLMHound",
+    "display_name": "LLMHound (M0 spike v2)",
+    "version": "v0.0.2",
+    "namespace": "LLMHound"
+  },
+  "node_kinds": [
+    {
+      "name": "LLMHound_CollectionVantage",
+      "display_name": "Collection Vantage",
+      "description": "M0 spike only: configured scanner/network context from which observations were made. Not an attacker principal.",
+      "is_display_kind": true,
+      "icon": "network-wired",
+      "color": "#6366F1"
+    },
+    {
+      "name": "LLMHound_NetworkEndpoint",
+      "display_name": "Network Endpoint",
+      "description": "M0 spike only: fallback node for an observed IP/FQDN target that did not correlate to an existing AD Computer.",
+      "is_display_kind": true,
+      "icon": "server",
+      "color": "#64748B"
+    },
+    {
+      "name": "LLMHound_OllamaInstance",
+      "display_name": "Ollama Instance",
+      "description": "M0 spike only: fingerprinted Ollama service endpoint.",
+      "is_display_kind": true,
+      "icon": "cube",
+      "color": "#F97316"
+    },
+    {
+      "name": "LLMHound_MCPServer",
+      "display_name": "MCP Server",
+      "description": "M0 spike only: fingerprinted Model Context Protocol server endpoint.",
+      "is_display_kind": true,
+      "icon": "plug",
+      "color": "#10B981"
+    },
+    {
+      "name": "LLMHound_MCPTool",
+      "display_name": "MCP Tool",
+      "description": "M0 spike only: tool advertised by an MCP server.",
+      "is_display_kind": false
+    },
+    {
+      "name": "LLMHound_AIModel",
+      "display_name": "AI Model",
+      "description": "M0 spike only: model served or advertised by an AI service.",
+      "is_display_kind": false
+    },
+    {
+      "name": "LLMHound_AIService",
+      "display_name": "AI Service",
+      "description": "M0 spike only: umbrella label intended as an extra kind on concrete service nodes; carries no identity of its own.",
+      "is_display_kind": false
+    },
+    {
+      "name": "LLMHound_M0UpsertProbe",
+      "display_name": "M0 Upsert Probe",
+      "description": "M0 spike only: probe node for upsert/rescan behavior tests. Spike-only kind, not part of the real graph model.",
+      "is_display_kind": false
+    },
+    {
+      "name": "LLMHound_M0TraversableProbe",
+      "display_name": "M0 Traversability Probe",
+      "description": "M0 spike only: node kind used by the traversability control edge. Spike-only kind, not part of the real graph model.",
+      "is_display_kind": false
+    }
+  ],
+  "relationship_kinds": [
+    {
+      "name": "LLMHound_ObservedAt",
+      "description": "M0 spike only: fingerprinted service was observed through this target (correlated Computer or fallback NetworkEndpoint).",
+      "is_traversable": false
+    },
+    {
+      "name": "LLMHound_UnauthenticatedAccess",
+      "description": "M0 spike only: a specific enumeration operation succeeded without credentials from the recorded vantage.",
+      "is_traversable": false
+    },
+    {
+      "name": "LLMHound_ProvidesModel",
+      "description": "M0 spike only: model advertised by the runtime; inference not implied.",
+      "is_traversable": false
+    },
+    {
+      "name": "LLMHound_ProvidesTool",
+      "description": "M0 spike only: tool enumerated, not executed.",
+      "is_traversable": false
+    },
+    {
+      "name": "LLMHound_M0TraversableControl",
+      "description": "M0 spike only: traversability CONTROL edge (is_traversable true) so pathfinding behavior can be contrasted against the non-traversable LLMHound kinds. Spike-only kind; the real LLMHound schema ships no traversable edges.",
+      "is_traversable": true
+    }
+  ]
+}

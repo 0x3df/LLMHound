@@ -1,0 +1,3 @@
+# LLMHound M0 lab runtime files (credentials, tokens, results) — never commit.
+lab/.env
+lab/.runtime/

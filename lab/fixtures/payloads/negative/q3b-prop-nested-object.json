@@ -1,0 +1,43 @@
+{
+  "graph": {
+    "nodes": [
+      {
+        "id": "m0-props-nested",
+        "kinds": [
+          "LLMHound_M0UpsertProbe"
+        ],
+        "properties": {
+          "name": "M0 NESTED PROBE",
+          "prop_nested": {
+            "a": 1
+          }
+        }
+      },
+      {
+        "id": "m0-netep-1b",
+        "kinds": [
+          "LLMHound_NetworkEndpoint"
+        ],
+        "properties": {
+          "name": "M0 NETEP PROBE"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "kind": "LLMHound_ObservedAt",
+        "start": {
+          "match_by": "id",
+          "value": "m0-props-nested"
+        },
+        "end": {
+          "match_by": "id",
+          "value": "m0-netep-1b"
+        }
+      }
+    ]
+  },
+  "metadata": {
+    "source_kind": "LLMHound"
+  }
+}

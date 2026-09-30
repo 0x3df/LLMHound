@@ -1,0 +1,17 @@
+{
+  "schema": {
+    "name": "M0UnprefixedProbe",
+    "display_name": "M0 Unprefixed Kind Probe",
+    "version": "v0.0.1",
+    "namespace": "M0Probe"
+  },
+  "node_kinds": [
+    {
+      "name": "OllamaInstance",
+      "display_name": "Ollama Instance (unprefixed probe)",
+      "description": "M0 spike only: kind name WITHOUT the namespace prefix; the definition-schema docs require prefixing, so registration should be rejected.",
+      "is_display_kind": true
+    }
+  ],
+  "relationship_kinds": []
+}

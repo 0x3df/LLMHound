@@ -1,0 +1,30 @@
+[03:53:31] === M0 checks against http://127.0.0.1:18080 ===
+pass     E1
+pass     E2
+pass     E3
+[03:53:33] === Q1: kind namespacing and collision behavior ===
+pass     Q1.1
+pass     Q1.2
+pass     Q1.3
+pass     Q1.4
+pass     Q1.5
+pass     Q1.6
+pass     Q1.7
+jq: invalid JSON text passed to --argjson
+Use jq --help for help with command-line options,
+or see the jq manpage, or online docs at https://jqlang.org
+jq: invalid JSON text passed to --argjson
+Use jq --help for help with command-line options,
+or see the jq manpage, or online docs at https://jqlang.org
+pass     Q1.8
+jq: invalid JSON text passed to --argjson
+Use jq --help for help with command-line options,
+or see the jq manpage, or online docs at https://jqlang.org
+jq: invalid JSON text passed to --argjson
+Use jq --help for help with command-line options,
+or see the jq manpage, or online docs at https://jqlang.org
+pass     E4
+[03:53:34] === AD fixture: SharpHound-format synthetic Computers ===
+pass     E5
+pass     E6
+[03:54:26] === Q2: multi-label nodes (AIService umbrella) ===

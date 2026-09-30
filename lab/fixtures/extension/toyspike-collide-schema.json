@@ -1,0 +1,17 @@
+{
+  "schema": {
+    "name": "ToySpikeCollide",
+    "display_name": "Toy Spike Collide (M0 collision probe)",
+    "version": "v0.0.1",
+    "namespace": "ToySpike"
+  },
+  "node_kinds": [
+    {
+      "name": "ToySpike_MCPService",
+      "display_name": "Toy MCP Service (duplicate name)",
+      "description": "M0 spike only: same full kind-name string as the ToySpike extension but a different schema.name. Tests whether kind names are globally unique or per-extension.",
+      "is_display_kind": true
+    }
+  ],
+  "relationship_kinds": []
+}

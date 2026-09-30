@@ -1,0 +1,24 @@
+{
+  "metadata": {
+    "source_kind": "LLMHound"
+  },
+  "graph": {
+    "nodes": [
+      {
+        "id": "m0-unprefixed-ollama",
+        "kinds": ["LLMHound_OllamaInstance", "AIService"],
+        "properties": {
+          "name": "M0 UNPREFIXED UMBRELLA PROBE",
+          "endpoint_host": "127.0.0.1"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "kind": "LLMHound_ObservedAt",
+        "start": { "match_by": "id", "value": "m0-unprefixed-ollama" },
+        "end": { "match_by": "id", "value": "m0-netep-1" }
+      }
+    ]
+  }
+}

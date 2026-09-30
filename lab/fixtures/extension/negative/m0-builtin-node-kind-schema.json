@@ -1,0 +1,23 @@
+{
+  "schema": {
+    "name": "M0BuiltinNodeProbe",
+    "display_name": "M0 Built-in Node Kind Probe",
+    "version": "v0.0.1",
+    "namespace": "M0Probe"
+  },
+  "node_kinds": [
+    {
+      "name": "M0Probe_Computer",
+      "display_name": "Probe Computer",
+      "description": "M0 spike only: kind named after the built-in Computer kind but namespaced (allowed form).",
+      "is_display_kind": true
+    },
+    {
+      "name": "Computer",
+      "display_name": "Computer (built-in overlap probe)",
+      "description": "M0 spike only: exact built-in kind name as a custom node kind; registration should be rejected.",
+      "is_display_kind": true
+    }
+  ],
+  "relationship_kinds": []
+}

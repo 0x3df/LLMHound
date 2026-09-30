@@ -307,15 +307,21 @@ upload_and_check_match() {
     out=$(upload_out "$file" application/json "$name")
     wait_for_node "$svc" 120
     edges=$(cypher_or_fail "MATCH (s {objectid: \"$svc\"})-[r:LLMHound_ObservedAt]->(c:Computer) RETURN c.objectid AS target, r.match_value AS mv, r.confidence AS conf")
-    printf '%s' "$edges" | jq -cn --argjson u "$out" \
-        --arg rows "$(printf '%s' "$edges" | jq -c '.data.literals // []' 2>/dev/null)" \
+    local rows
+    rows=$(printf '%s' "$edges" | jq -c '.data.literals // []' 2>/dev/null)
+    [ -n "$rows" ] || rows='[]'
+    printf '%s' "$edges" | jq -cn --argjson u "$out" --argjson rows "$rows" \
         '{upload:$u, targets:$rows}'
 }
 record Q6.1 pass "$(jq -cn --argjson o "$(upload_and_check_match "$FIXTURES_DIR/payloads/q6a-prop-match-name-lower.json" "q6a.json")" '{action:"match_by property name=lab-win-01.lab.local (lowercase) kind Computer", expected:"docs: name values uppercased at ingest; case-sensitivity behavior observed", observed:$o}')"
-record Q6.2 pass "$(jq -cn --argjson o "$(upload_and_check_match "$FIXTURES_DIR/payloads/q6b-prop-match-name-upper.json" "q6b.json")" '{action:"match_by property name=LAB-WIN-01.LAB.LOCAL (exact uppercase) kind Computer", expected:"single match", observed:$o}')"
+o=$(upload_and_check_match "$FIXTURES_DIR/payloads/q6b-prop-match-name-upper.json" "q6b.json")
+v=$(printf '%s' "$o" | jq -r 'if ((.targets // []) | length) == 1 then "pass" else "deviation" end')
+record Q6.2 "$v" "$(jq -cn --argjson o "$o" '{action:"match_by property name=LAB-WIN-01.LAB.LOCAL (exact uppercase) kind Computer", expected:"single match", observed:$o}')"
 record Q6.3 pass "$(jq -cn --argjson o "$(upload_and_check_match "$FIXTURES_DIR/payloads/q6c-prop-match-zeromatch.json" "q6c.json")" '{action:"match_by property with zero candidate matches", expected:"observed (edge dropped? error?)", observed:$o}')"
 record Q6.4 pass "$(jq -cn --argjson o "$(upload_and_check_match "$FIXTURES_DIR/payloads/q6d-prop-match-multi.json" "q6d.json")" '{action:"match_by property matching BOTH computers (domain property)", expected:"observed (edge to each? error?)", observed:$o}')"
-record Q6.5 pass "$(jq -cn --argjson o "$(upload_and_check_match "$FIXTURES_DIR/payloads/q6e-prop-match-samaccount.json" "q6e.json")" '{action:"match_by property samaccountname=LAB-WIN-02$ kind Computer", expected:"single match", observed:$o}')"
+o=$(upload_and_check_match "$FIXTURES_DIR/payloads/q6e-prop-match-samaccount.json" "q6e.json")
+v=$(printf '%s' "$o" | jq -r 'if ((.targets // []) | length) == 1 then "pass" else "deviation" end')
+record Q6.5 "$v" "$(jq -cn --argjson o "$o" '{action:"match_by property samaccountname=LAB-WIN-02$ kind Computer", expected:"single match", observed:$o}')"
 
 # ============================================================================
 say "=== Q7: edge endpoint matched by objectid (SID) against SharpHound Computer ==="

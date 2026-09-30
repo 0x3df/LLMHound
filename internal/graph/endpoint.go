@@ -42,6 +42,13 @@ func ParseTarget(raw string) (Target, error) {
 		}
 		return Target{IPTarget, ip.String()}, nil
 	}
+	// Reject non-ASCII before case folding: Unicode characters such as the
+	// Kelvin sign fold to ASCII and must not silently become another hostname.
+	for _, c := range raw {
+		if c > 127 {
+			return Target{}, errors.New("target hostname must be ASCII DNS labels")
+		}
+	}
 	host := strings.ToLower(strings.TrimSuffix(raw, "."))
 	if len(host) == 0 || len(host) > 253 {
 		return Target{}, errors.New("invalid target hostname")

@@ -63,6 +63,7 @@ func TestMalformedEndpointsFailWithoutEchoingSecrets(t *testing.T) {
 		"http://example.com/%xx", "http://example.com/white space", "http://[fe80::1%25en0]",
 		"http://bad..example", "http://-bad.example", "http://example.com..", "http://☃.example",
 		"http://2001:db8::1", "http://999.999.999.999", "http://example.com/%00", "http://example.com/%0A",
+		"http://[192.0.2.1]", "http://K.example",
 	} {
 		t.Run(raw, func(t *testing.T) {
 			_, err := graph.ParseEndpoint(raw, "")
@@ -108,7 +109,7 @@ func TestCanonicalTargets(t *testing.T) {
 			t.Fatalf("targets differ: %v %v", a, b)
 		}
 	}
-	for _, raw := range []string{"", " a.example", "http://a.example", "a.example:80", "[a.example]", "a..example", "192.168.001.1", "fe80::1%en0"} {
+	for _, raw := range []string{"", " a.example", "http://a.example", "a.example:80", "[a.example]", "a..example", "192.168.001.1", "fe80::1%en0", "K.example"} {
 		if _, err := graph.ParseTarget(raw); err == nil {
 			t.Fatalf("accepted target %q", raw)
 		}

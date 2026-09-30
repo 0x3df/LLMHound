@@ -303,7 +303,7 @@ upload_and_check_match() {
     # Each probe payload defines its own service node (m0-match-qX), so the
     # edge query is unambiguous and never counts earlier probes' edges.
     local file="$1" name="$2" out edges svc
-    svc="M0-MATCH-$(basename "$name" .json | cut -c1-3 | tr '[:lower:]' '[:upper:]')"
+    svc="M0-MATCH-$(basename "$name" .json | sed 's/-id-match-computer//; s/\.json//' | cut -c1-3 | tr '[:lower:]' '[:upper:]')"
     out=$(upload_out "$file" application/json "$name")
     wait_for_node "$svc" 120
     edges=$(cypher_or_fail "MATCH (s {objectid: \"$svc\"})-[r:LLMHound_ObservedAt]->(c:Computer) RETURN c.objectid AS target, r.match_value AS mv, r.confidence AS conf")

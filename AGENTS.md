@@ -123,3 +123,13 @@ Goal: eventually listed on the SpecterOps OpenGraph community library page
   well-known paths.
 - Design decisions follow the brainstorming-first process: design docs in
   `docs/plans/` before code.
+- M0 CE-compatibility answers (kind naming, property types, upload pipeline,
+  cleanup semantics) are recorded in `docs/reference/ce-compatibility.md`;
+  the reproducible lab and check suite live in `lab/` (see `lab/README.md`).
+
+## Maintaining this file
+
+Keep this file for knowledge useful to almost every future agent session in this project.
+Do not repeat what the codebase already shows; point to the authoritative file or command instead.
+Prefer rewriting or pruning existing entries over appending new ones.
+When updating this file, preserve this bar for all agents and keep entries concise.

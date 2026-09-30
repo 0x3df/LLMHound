@@ -2,7 +2,7 @@
   "graph": {
     "nodes": [
       {
-        "id": "m0-match-q7-",
+        "id": "m0-match-q7",
         "kinds": [
           "LLMHound_OllamaInstance"
         ],
@@ -16,7 +16,7 @@
         "kind": "LLMHound_ObservedAt",
         "start": {
           "match_by": "id",
-          "value": "m0-match-q7-"
+          "value": "m0-match-q7"
         },
         "end": {
           "match_by": "id",

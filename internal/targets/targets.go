@@ -238,10 +238,6 @@ func NormalizeHost(value string) (string, error) {
 	if len(name) > 253 || !strings.Contains(name, ".") {
 		return "", fmt.Errorf("target must be an IP literal, CIDR, or fully qualified ASCII hostname")
 	}
-	tld := name[strings.LastIndexByte(name, '.')+1:]
-	if strings.HasPrefix(tld, "0x") || strings.Trim(tld, "0123456789") == "" {
-		return "", fmt.Errorf("invalid numeric IP address")
-	}
 	for _, label := range strings.Split(name, ".") {
 		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
 			return "", fmt.Errorf("invalid FQDN label")
@@ -251,6 +247,10 @@ func NormalizeHost(value string) (string, error) {
 				return "", fmt.Errorf("FQDN must contain only ASCII letters, digits, and hyphens; URLs, ports, credentials, and wildcards are not accepted")
 			}
 		}
+	}
+	tld := name[strings.LastIndexByte(name, '.')+1:]
+	if strings.HasPrefix(tld, "0x") || strings.Trim(tld, "0123456789") == "" {
+		return "", fmt.Errorf("invalid numeric IP address")
 	}
 	return name, nil
 }

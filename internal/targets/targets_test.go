@@ -155,6 +155,14 @@ func TestPrepareRejectsAlternateNumericIPv4Spellings(t *testing.T) {
 	}
 }
 
+func TestNormalizeHostReportsEmptyLabels(t *testing.T) {
+	for _, value := range []string{"ai.example.test..", "..", "10.0.0.1.."} {
+		if got, err := NormalizeHost(value); err == nil || err.Error() != "invalid FQDN label" {
+			t.Fatalf("%q: got %q, %v; want invalid FQDN label", value, got, err)
+		}
+	}
+}
+
 func TestNormalizeHost(t *testing.T) {
 	for in, want := range map[string]string{"API.Example.Test.": "api.example.test", "::ffff:192.0.2.1": "192.0.2.1", "2001:0DB8::1": "2001:db8::1"} {
 		got, err := NormalizeHost(in)

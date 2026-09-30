@@ -1,0 +1,33 @@
+{
+  "graph": {
+    "nodes": [
+      {
+        "id": "m0-match-q7",
+        "kinds": [
+          "LLMHound_OllamaInstance"
+        ],
+        "properties": {
+          "name": "M0 LINK PROBE WITH SOURCEKIND"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "kind": "LLMHound_ObservedAt",
+        "start": {
+          "match_by": "id",
+          "value": "m0-match-q7"
+        },
+        "end": {
+          "match_by": "id",
+          "value": "S-1-5-21-3623811015-3361044348-30300870-1104"
+        },
+        "properties": {
+          "match_method": "mapping_file",
+          "match_value": "S-1-5-21-3623811015-3361044348-30300870-1104",
+          "confidence": "exact"
+        }
+      }
+    ]
+  }
+}

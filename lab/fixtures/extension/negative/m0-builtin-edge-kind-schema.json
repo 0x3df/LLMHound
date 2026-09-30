@@ -1,0 +1,23 @@
+{
+  "schema": {
+    "name": "M0BuiltinEdgeProbe",
+    "display_name": "M0 Built-in Edge Kind Probe",
+    "version": "v0.0.1",
+    "namespace": "M0Probe"
+  },
+  "node_kinds": [
+    {
+      "name": "M0Probe_Node",
+      "display_name": "Probe Node",
+      "description": "M0 spike only: carrier node for the built-in edge-kind probe.",
+      "is_display_kind": true
+    }
+  ],
+  "relationship_kinds": [
+    {
+      "name": "MemberOf",
+      "description": "M0 spike only: exact built-in relationship kind name as a custom edge kind; registration should be rejected.",
+      "is_traversable": false
+    }
+  ]
+}

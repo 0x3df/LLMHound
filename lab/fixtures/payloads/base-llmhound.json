@@ -1,0 +1,114 @@
+{
+  "metadata": {
+    "source_kind": "LLMHound"
+  },
+  "graph": {
+    "nodes": [
+      {
+        "id": "m0-vantage-lab",
+        "kinds": ["LLMHound_CollectionVantage"],
+        "properties": {
+          "name": "M0 LAB VANTAGE",
+          "vantage_key": "m0-lab",
+          "description": "M0 spike only: stable lab vantage."
+        }
+      },
+      {
+        "id": "m0-ollama-1",
+        "kinds": ["LLMHound_OllamaInstance", "LLMHound_AIService"],
+        "properties": {
+          "name": "OLLAMA · 127.0.0.1:11434",
+          "endpoint_scheme": "http",
+          "endpoint_host": "127.0.0.1",
+          "endpoint_port": 11434,
+          "base_path": "",
+          "is_anonymous_access_observed": true,
+          "coverage": "complete",
+          "model_tags": ["probe-model", "m0"]
+        }
+      },
+      {
+        "id": "m0-model-1",
+        "kinds": ["LLMHound_AIModel"],
+        "properties": {
+          "name": "PROBE-MODEL",
+          "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "size_bytes": 1234567
+        }
+      },
+      {
+        "id": "m0-mcp-1",
+        "kinds": ["LLMHound_MCPServer", "LLMHound_AIService"],
+        "properties": {
+          "name": "M0 MCP PROBE",
+          "endpoint_scheme": "http",
+          "endpoint_host": "127.0.0.1",
+          "endpoint_port": 8080,
+          "protocol_version": "2025-06-18"
+        }
+      },
+      {
+        "id": "m0-mcp-tool-1",
+        "kinds": ["LLMHound_MCPTool"],
+        "properties": {
+          "name": "M0 TOOL PROBE",
+          "tool_description": "M0 spike only: enumerated, not executed."
+        }
+      },
+      {
+        "id": "m0-netep-1",
+        "kinds": ["LLMHound_NetworkEndpoint"],
+        "properties": {
+          "name": "M0 NETEP PROBE",
+          "target_type": "ip",
+          "target_value": "127.0.0.1",
+          "resolved": false
+        }
+      }
+    ],
+    "edges": [
+      {
+        "kind": "LLMHound_UnauthenticatedAccess",
+        "start": { "match_by": "id", "value": "m0-vantage-lab" },
+        "end": { "match_by": "id", "value": "m0-ollama-1" },
+        "properties": {
+          "operation": "ollama_model_list",
+          "outcome": "success",
+          "observed_at": "2026-09-29T00:00:00Z"
+        }
+      },
+      {
+        "kind": "LLMHound_UnauthenticatedAccess",
+        "start": { "match_by": "id", "value": "m0-vantage-lab" },
+        "end": { "match_by": "id", "value": "m0-mcp-1" },
+        "properties": {
+          "operation": "mcp_tools_list",
+          "outcome": "success",
+          "observed_at": "2026-09-29T00:00:00Z"
+        }
+      },
+      {
+        "kind": "LLMHound_ObservedAt",
+        "start": { "match_by": "id", "value": "m0-ollama-1" },
+        "end": { "match_by": "id", "value": "m0-netep-1" },
+        "properties": {
+          "match_method": "none",
+          "match_value": "127.0.0.1",
+          "confidence": "fallback"
+        }
+      },
+      {
+        "kind": "LLMHound_ProvidesModel",
+        "start": { "match_by": "id", "value": "m0-ollama-1" },
+        "end": { "match_by": "id", "value": "m0-model-1" },
+        "properties": { "source": "advertisement" }
+      },
+      {
+        "kind": "LLMHound_ProvidesTool",
+        "start": { "match_by": "id", "value": "m0-mcp-1" },
+        "end": { "match_by": "id", "value": "m0-mcp-tool-1" },
+        "properties": { "source": "enumeration" }
+      }
+    ]
+  }
+}

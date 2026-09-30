@@ -1,0 +1,25 @@
+{
+  "schema": {
+    "name": "ToySpike",
+    "display_name": "Toy Spike (M0 collision probe)",
+    "version": "v0.0.1",
+    "namespace": "ToySpike"
+  },
+  "node_kinds": [
+    {
+      "name": "ToySpike_MCPService",
+      "display_name": "Toy MCP Service",
+      "description": "M0 spike only: legit second extension kind to test coexistence alongside LLMHound kinds.",
+      "is_display_kind": true,
+      "icon": "plug",
+      "color": "#0EA5E9"
+    }
+  ],
+  "relationship_kinds": [
+    {
+      "name": "ToySpike_ConnectedTo",
+      "description": "M0 spike only: toy edge kind for the coexistence probe.",
+      "is_traversable": false
+    }
+  ]
+}

@@ -1,0 +1,131 @@
+{
+  "graph": {
+    "nodes": [
+      {
+        "id": "m0-path-a1",
+        "kinds": [
+          "LLMHound_M0TraversableProbe"
+        ],
+        "properties": {
+          "name": "M0 PATH A1"
+        }
+      },
+      {
+        "id": "m0-path-a2",
+        "kinds": [
+          "LLMHound_M0TraversableProbe"
+        ],
+        "properties": {
+          "name": "M0 PATH A2"
+        }
+      },
+      {
+        "id": "m0-path-a3",
+        "kinds": [
+          "LLMHound_M0TraversableProbe"
+        ],
+        "properties": {
+          "name": "M0 PATH A3"
+        }
+      },
+      {
+        "id": "m0-path-a4",
+        "kinds": [
+          "LLMHound_M0TraversableProbe"
+        ],
+        "properties": {
+          "name": "M0 PATH A4"
+        }
+      },
+      {
+        "id": "m0-path-a5",
+        "kinds": [
+          "LLMHound_M0TraversableProbe"
+        ],
+        "properties": {
+          "name": "M0 PATH A5"
+        }
+      },
+      {
+        "id": "m0-path-a6",
+        "kinds": [
+          "LLMHound_M0TraversableProbe"
+        ],
+        "properties": {
+          "name": "M0 PATH A6"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "kind": "LLMHound_M0TraversableControl",
+        "start": {
+          "match_by": "id",
+          "value": "m0-path-a1"
+        },
+        "end": {
+          "match_by": "id",
+          "value": "m0-path-a2"
+        }
+      },
+      {
+        "kind": "LLMHound_ObservedAt",
+        "start": {
+          "match_by": "id",
+          "value": "m0-path-a2"
+        },
+        "end": {
+          "match_by": "id",
+          "value": "m0-path-a3"
+        }
+      },
+      {
+        "kind": "LLMHound_ObservedAt",
+        "start": {
+          "match_by": "id",
+          "value": "m0-path-a1"
+        },
+        "end": {
+          "match_by": "id",
+          "value": "m0-path-a4"
+        }
+      },
+      {
+        "kind": "LLMHound_ObservedAt",
+        "start": {
+          "match_by": "id",
+          "value": "m0-path-a4"
+        },
+        "end": {
+          "match_by": "id",
+          "value": "m0-path-a5"
+        }
+      },
+      {
+        "kind": "LLMHound_M0TraversableControl",
+        "start": {
+          "match_by": "id",
+          "value": "m0-path-a1"
+        },
+        "end": {
+          "match_by": "id",
+          "value": "m0-path-a6"
+        }
+      },
+      {
+        "kind": "LLMHound_M0TraversableControl",
+        "start": {
+          "match_by": "id",
+          "value": "m0-path-a6"
+        },
+        "end": {
+          "match_by": "id",
+          "value": "m0-path-a3"
+        }
+      }
+    ]
+  },
+  "metadata": {
+    "source_kind": "LLMHound"
+  }
+}

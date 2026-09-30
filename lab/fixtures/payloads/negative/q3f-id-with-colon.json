@@ -1,0 +1,40 @@
+{
+  "graph": {
+    "nodes": [
+      {
+        "id": "m0:colon:id",
+        "kinds": [
+          "LLMHound_M0UpsertProbe"
+        ],
+        "properties": {
+          "name": "M0 COLON ID PROBE"
+        }
+      },
+      {
+        "id": "m0-netep-1f",
+        "kinds": [
+          "LLMHound_NetworkEndpoint"
+        ],
+        "properties": {
+          "name": "M0 NETEP PROBE"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "kind": "LLMHound_ObservedAt",
+        "start": {
+          "match_by": "id",
+          "value": "m0:colon:id"
+        },
+        "end": {
+          "match_by": "id",
+          "value": "m0-netep-1f"
+        }
+      }
+    ]
+  },
+  "metadata": {
+    "source_kind": "LLMHound"
+  }
+}

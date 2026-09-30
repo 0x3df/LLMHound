@@ -1,0 +1,42 @@
+{
+  "graph": {
+    "nodes": [
+      {
+        "id": "m0-upper",
+        "kinds": [
+          "LLMHound_M0UpsertProbe"
+        ],
+        "properties": {
+          "name": "m0 upper probe host",
+          "operatingsystem": "probe linux",
+          "distinguishedname": "cn=probe,dc=lab,dc=local"
+        }
+      },
+      {
+        "id": "m0-netep-1h",
+        "kinds": [
+          "LLMHound_NetworkEndpoint"
+        ],
+        "properties": {
+          "name": "M0 NETEP PROBE"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "kind": "LLMHound_ObservedAt",
+        "start": {
+          "match_by": "id",
+          "value": "m0-upper"
+        },
+        "end": {
+          "match_by": "id",
+          "value": "m0-netep-1h"
+        }
+      }
+    ]
+  },
+  "metadata": {
+    "source_kind": "LLMHound"
+  }
+}

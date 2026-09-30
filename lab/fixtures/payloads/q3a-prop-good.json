@@ -1,0 +1,33 @@
+{
+  "metadata": {
+    "source_kind": "LLMHound"
+  },
+  "graph": {
+    "nodes": [
+      {
+        "id": "m0-props-good",
+        "kinds": ["LLMHound_M0UpsertProbe"],
+        "properties": {
+          "name": "M0 PROPERTY TYPES PROBE",
+          "prop_string": "value",
+          "prop_int": 42,
+          "prop_float": 4.2,
+          "prop_bool": true,
+          "prop_empty_string": "",
+          "prop_array_strings": ["a", "b"],
+          "prop_array_numbers": [1, 2, 3],
+          "prop_array_bools": [true, false],
+          "PropertyName": "CaseSensitiveProbe",
+          "propertyname": "casesensitiveprobe"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "kind": "LLMHound_ObservedAt",
+        "start": { "match_by": "id", "value": "m0-props-good" },
+        "end": { "match_by": "id", "value": "m0-netep-1" }
+      }
+    ]
+  }
+}

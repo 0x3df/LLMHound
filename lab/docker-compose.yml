@@ -1,0 +1,59 @@
+# LLMHound M0 — BloodHound CE compatibility lab.
+#
+# Pinned BloodHound CE (PostgreSQL graph driver) for the M0 spike. This lab is
+# isolated and self-contained:
+#   - dedicated Compose project name and labeled volumes (see .env.example)
+#   - loopback-only published ports (CE UI/API only; PostgreSQL is never published)
+#   - no other BloodHound server is touched, and nothing is run against real
+#     network targets
+# Teardown (`lab/scripts/lab-down.sh`) removes ONLY this project's containers,
+# networks, and volumes. It never prunes Docker globally.
+#
+# Pin: BloodHound CE v9.7.1 (release tag), PostgreSQL 18, graph_driver=pg.
+# Compose structure mirrors the upstream example:
+#   https://github.com/SpecterOps/BloodHound/blob/v9.7.1/examples/docker-compose/docker-compose.yml
+
+services:
+  app-db:
+    image: docker.io/library/postgres:18
+    environment:
+      - PGUSER=${POSTGRES_USER:-bloodhound}
+      - POSTGRES_USER=${POSTGRES_USER:-bloodhound}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?set in lab/.env by lab-up.sh}
+      - POSTGRES_DB=${POSTGRES_DB:-bloodhound}
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER:-bloodhound} -d ${POSTGRES_DB:-bloodhound} -h 127.0.0.1 -p 5432"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  bloodhound:
+    image: docker.io/specterops/bloodhound:${BLOODHOUND_TAG:-9.7.1}
+    environment:
+      # PostgreSQL graph driver is required for full OpenGraph support.
+      - bhe_graph_driver=pg
+      - bhe_database_connection=user=${POSTGRES_USER:-bloodhound} password=${POSTGRES_PASSWORD:?set in lab/.env by lab-up.sh} dbname=${POSTGRES_DB:-bloodhound} host=app-db
+      # Default admin gets the lab-generated password from the untracked .env
+      # so no credential is ever committed or logged by these scripts.
+      - bhe_default_admin_password=${POSTGRES_PASSWORD:?set in lab/.env by lab-up.sh}
+      - bhe_recreate_default_admin=${BHE_RECREATE_DEFAULT_ADMIN:-false}
+      # Cypher mutations stay disabled; cleanup tests use the
+      # POST /api/v2/clear-database API instead of mutation Cypher.
+      - bhe_enable_cypher_mutations=${BHE_ENABLE_CYPHER_MUTATIONS:-false}
+      - bhe_graph_query_memory_limit=${BHE_GRAPH_QUERY_MEMORY_LIMIT:-2}
+    ports:
+      # Loopback only, nonstandard host port by default to avoid collisions.
+      - ${BHE_BIND:-127.0.0.1}:${BHE_PORT:-18080}:8080
+    depends_on:
+      app-db:
+        condition: service_healthy
+
+volumes:
+  postgres-data:

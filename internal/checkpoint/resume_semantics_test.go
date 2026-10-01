@@ -408,3 +408,29 @@ func TestTargetObservationContentsValidated(t *testing.T) {
 		t.Fatal("valid completed record must count")
 	}
 }
+
+func TestResultObservationSurfaceMustMatch(t *testing.T) {
+	var buf bytes.Buffer
+	header := sampleHeader()
+	j, _ := checkpoint.NewWriter(&buf, header)
+	obs := sampleObservation(t, sampleVantage(t, header.DeploymentScope, header.VantageKey), "ev-1", semanticsTime)
+	obs.Surface = "mcp"
+	if err := j.RecordResult(checkpoint.Result{Target: "h", Surface: "ollama", Observation: obs}); err == nil {
+		t.Fatal("result whose observation is for another surface must be rejected")
+	}
+
+	obs.Surface = "ollama"
+	recordSurface(t, j, obs, "h", "ollama", graph.CoverageComplete)
+	forged := strings.Replace(buf.String(), `"surface":"ollama","observation"`, `"surface":"qdrant","observation"`, 1)
+	if forged == buf.String() {
+		t.Fatal("failed to forge result entry")
+	}
+	if _, err := checkpoint.Replay(strings.NewReader(forged)); err == nil {
+		t.Fatal("replay must reject result whose surface disagrees with its observation")
+	}
+
+	empty := strings.Replace(buf.String(), `"target":"h","surface":"ollama","observation"`, `"target":"","surface":"ollama","observation"`, 1)
+	if _, err := checkpoint.Replay(strings.NewReader(empty)); err == nil {
+		t.Fatal("replay must reject result with empty target")
+	}
+}

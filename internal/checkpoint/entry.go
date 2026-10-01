@@ -143,16 +143,26 @@ type Result struct {
 	Details     map[string]any     `json:"details,omitempty"`
 }
 
-// Validate checks that the result has required fields and valid provenance.
-func (r Result) Validate(scope string) error {
+func (r Result) validateIdentity() error {
 	if strings.TrimSpace(r.Target) == "" {
 		return errors.New("result requires target")
 	}
 	if strings.TrimSpace(r.Surface) == "" {
 		return errors.New("result requires surface")
 	}
+	if r.Observation.Surface != r.Surface {
+		return errors.New("result observation surface does not match result surface")
+	}
+	return nil
+}
+
+// Validate checks that the result has required fields and valid provenance.
+func (r Result) Validate(scope string) error {
 	if err := r.Observation.Validate(scope); err != nil {
 		return fmt.Errorf("result observation: %w", err)
+	}
+	if err := r.validateIdentity(); err != nil {
+		return err
 	}
 	if r.Status != "" {
 		if !r.Status.Valid() {
@@ -553,7 +563,7 @@ func fromResultRecord(r ResultRecord, vantage graph.Identity) (Result, error) {
 		evs[i] = ev
 	}
 
-	return Result{
+	res := Result{
 		Target:      r.Target,
 		Surface:     r.Surface,
 		Observation: obs,
@@ -563,7 +573,11 @@ func fromResultRecord(r ResultRecord, vantage graph.Identity) (Result, error) {
 		Evidence:    evs,
 		Error:       r.Error,
 		Details:     r.Details,
-	}, nil
+	}
+	if err := res.validateIdentity(); err != nil {
+		return Result{}, err
+	}
+	return res, nil
 }
 
 func boundStrings(in []string, maxLen int) []string {

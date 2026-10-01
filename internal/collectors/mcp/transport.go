@@ -4,11 +4,13 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -142,7 +144,7 @@ func (t *trackingTransport) RoundTrip(req *http.Request) (*http.Response, error)
 		t.tlsState = &clonedTLS
 	}
 
-	if resp.Body != nil && t.maxResponseBytes > 0 {
+	if resp.Body != nil && t.maxResponseBytes > 0 && !strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
 		resp.Body = &limitReadCloser{
 			r:     io.LimitReader(resp.Body, t.maxResponseBytes+1),
 			c:     resp.Body,
@@ -157,22 +159,13 @@ func isTLSError(err error) bool {
 	if err == nil {
 		return false
 	}
-	s := err.Error()
-	return errors.Is(err, tls.RecordHeaderError{}) ||
-		containsAny(s, "x509", "certificate", "tls", "handshake failure")
-}
-
-func containsAny(s string, substrs ...string) bool {
-	for _, sub := range substrs {
-		if sub != "" && len(s) >= len(sub) {
-			for i := 0; i+len(sub) <= len(s); i++ {
-				if s[i:i+len(sub)] == sub {
-					return true
-				}
-			}
-		}
-	}
-	return false
+	var recErr tls.RecordHeaderError
+	var certErr *tls.CertificateVerificationError
+	var unknownAuth x509.UnknownAuthorityError
+	var hostErr x509.HostnameError
+	var invalidErr x509.CertificateInvalidError
+	return errors.As(err, &recErr) || errors.As(err, &certErr) || errors.As(err, &unknownAuth) ||
+		errors.As(err, &hostErr) || errors.As(err, &invalidErr)
 }
 
 func (t *trackingTransport) LastStatus() (int, string) {
@@ -213,11 +206,10 @@ func (t *trackingTransport) RecordRedirect(fromURL, toURL string, statusCode int
 	})
 }
 
-// buildHTTPClient constructs an HTTP client configured with timeouts, redirect policy, and tracking.
-func buildHTTPClient(connectTimeout, responseTimeout time.Duration, maxRedirects int, tracker *trackingTransport) *http.Client {
+// buildHTTPClient constructs an HTTP client configured with redirect policy, and tracking.
+func buildHTTPClient(maxRedirects int, tracker *trackingTransport) *http.Client {
 	client := &http.Client{
 		Transport: tracker,
-		Timeout:   responseTimeout,
 	}
 
 	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {

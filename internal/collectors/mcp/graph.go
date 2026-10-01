@@ -76,13 +76,13 @@ func buildServerNode(srvID graph.Identity, ep graph.Endpoint, obs graph.Observat
 
 	displayName := fmt.Sprintf("MCP · %s:%d%s", ep.Host(), ep.Port(), ep.BasePath())
 	props := map[string]any{
-		"name":                displayName,
-		"display_name":        displayName,
-		"endpoint":            ep.String(),
-		"endpoint_host":       ep.Host(),
-		"endpoint_port":       int(ep.Port()),
-		"endpoint_scheme":     ep.Scheme(),
-		"endpoint_base_path":  ep.BasePath(),
+		"name":               displayName,
+		"display_name":       displayName,
+		"endpoint":           ep.String(),
+		"endpoint_host":      ep.Host(),
+		"endpoint_port":      int(ep.Port()),
+		"endpoint_scheme":    ep.Scheme(),
+		"endpoint_base_path": ep.BasePath(),
 	}
 
 	if initResult != nil {
@@ -421,50 +421,39 @@ func buildAccessEdge(vantageID, srvID graph.Identity, obs graph.Observation, che
 
 func buildCorrelationEdgeAndFallback(
 	scope string,
-	rawTarget string,
+	targetHost string,
 	srvID graph.Identity,
 	obs graph.Observation,
 	correlator *correlate.Resolver,
 	computers []correlate.Computer,
 ) (graph.Edge, *emitter.NodeItem, correlate.Evidence, error) {
-	targetHost := rawTarget
-	// If rawTarget is a URL, parse host
-	if strings.Contains(rawTarget, "://") {
-		if ep, err := graph.ParseEndpoint(rawTarget, ""); err == nil {
-			targetHost = ep.Host()
-		}
-	} else if strings.Contains(rawTarget, ":") {
-		// Strip port if host:port
-		parts := strings.Split(rawTarget, ":")
-		targetHost = parts[0]
-	}
-
 	if correlator != nil {
 		corrRes, err := correlator.Resolve(scope, targetHost, computers)
-		if err == nil {
-			edge, err := corrRes.ObservedAt(srvID, obs)
+		if err != nil {
+			return graph.Edge{}, nil, correlate.Evidence{}, fmt.Errorf("resolve Computer correlation: %w", err)
+		}
+		edge, err := corrRes.ObservedAt(srvID, obs)
+		if err != nil {
+			return graph.Edge{}, nil, corrRes.Evidence(), err
+		}
+
+		var fallbackItem *emitter.NodeItem
+		if fallbackID, ok := corrRes.FallbackIdentity(); ok {
+			fallbackNode, err := graph.NewNode(fallbackID, obs)
 			if err != nil {
 				return graph.Edge{}, nil, corrRes.Evidence(), err
 			}
-
-			var fallbackItem *emitter.NodeItem
-			if fallbackID, ok := corrRes.FallbackIdentity(); ok {
-				fallbackNode, err := graph.NewNode(fallbackID, obs)
-				if err != nil {
-					return graph.Edge{}, nil, corrRes.Evidence(), err
-				}
-				item, err := emitter.NewNodeItem(fallbackNode, map[string]any{
-					"name":         targetHost,
-					"target_type":  string(corrRes.Evidence().TargetType),
-					"target_value": targetHost,
-				})
-				if err != nil {
-					return graph.Edge{}, nil, corrRes.Evidence(), err
-				}
-				fallbackItem = &item
+			item, err := emitter.NewNodeItem(fallbackNode, map[string]any{
+				"name":         targetHost,
+				"target_type":  string(corrRes.Evidence().TargetType),
+				"target_value": targetHost,
+			})
+			if err != nil {
+				return graph.Edge{}, nil, corrRes.Evidence(), err
 			}
-			return edge, fallbackItem, corrRes.Evidence(), nil
+			fallbackItem = &item
 		}
+		return edge, fallbackItem, corrRes.Evidence(), nil
 	}
 
 	// Default fallback to NetworkEndpoint
@@ -503,7 +492,7 @@ func buildCorrelationEdgeAndFallback(
 	}
 
 	corrEv := correlate.Evidence{
-		OriginalTarget:   rawTarget,
+		OriginalTarget:   targetHost,
 		NormalizedTarget: tgt.Value(),
 		TargetType:       tgt.Type(),
 		Correlation:      corr,

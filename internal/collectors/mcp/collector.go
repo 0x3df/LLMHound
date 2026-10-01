@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -147,22 +148,28 @@ func (c *Collector) CollectTarget(ctx context.Context, target Target, j checkpoi
 	}
 
 	if j != nil {
-		_ = j.RecordTarget(checkpoint.TargetRecord{
+		recordErr := j.RecordTarget(checkpoint.TargetRecord{
 			Target:  origTarget,
 			Surface: "mcp",
 			Status:  checkpoint.TargetStatusStarted,
 		})
+		if recordErr != nil {
+			return nil, fmt.Errorf("record target start in journal: %w", recordErr)
+		}
 	}
 
 	res, err := c.collectInternal(ctx, target, vantageID, scope, scanID, c.evidenceID, collectorVersion)
 	if err != nil {
 		if j != nil {
-			_ = j.RecordTarget(checkpoint.TargetRecord{
+			recordErr := j.RecordTarget(checkpoint.TargetRecord{
 				Target:  origTarget,
 				Surface: "mcp",
 				Status:  checkpoint.TargetStatusFailed,
 				Error:   err.Error(),
 			})
+			if recordErr != nil {
+				return nil, fmt.Errorf("%w; record target failure in journal: %v", err, recordErr)
+			}
 		}
 		return nil, err
 	}
@@ -185,13 +192,16 @@ func (c *Collector) CollectTarget(ctx context.Context, target Target, j checkpoi
 			CoverageReason:   res.Observation.CoverageReason,
 		}
 
-		_ = j.RecordTarget(checkpoint.TargetRecord{
+		recordErr := j.RecordTarget(checkpoint.TargetRecord{
 			Target:      origTarget,
 			Surface:     "mcp",
 			Status:      res.Status,
 			Observation: &obsRec,
 			Error:       res.Error,
 		})
+		if recordErr != nil {
+			return nil, fmt.Errorf("record target result in journal: %w", recordErr)
+		}
 	}
 
 	return res, nil
@@ -229,6 +239,9 @@ func (c *Collector) collectInternal(
 		baseTransport = c.customHTTPClient.Transport
 	} else {
 		baseTransport = &http.Transport{
+			DialContext:           (&net.Dialer{Timeout: c.config.Bounds.ConnectTimeout}).DialContext,
+			TLSHandshakeTimeout:   c.config.Bounds.ConnectTimeout,
+			ResponseHeaderTimeout: c.config.Bounds.ResponseTimeout,
 			TLSClientConfig: &tls.Config{
 				InsecureSkipVerify: c.config.Insecure,
 			},
@@ -245,8 +258,6 @@ func (c *Collector) collectInternal(
 	)
 
 	httpClient := buildHTTPClient(
-		c.config.Bounds.ConnectTimeout,
-		c.config.Bounds.ResponseTimeout,
 		c.config.Bounds.MaxRedirects,
 		tracker,
 	)
@@ -319,7 +330,11 @@ func (c *Collector) collectInternal(
 		addCheck(CheckIDPromptsList, OpPromptsList, "prerequisite failed: TLS verification failed", graph.OutcomeSkipped, nil, obs)
 		addCheck(CheckIDRFC9728, OpRFC9728, "prerequisite failed: TLS verification failed", graph.OutcomeSkipped, nil, obs)
 
-		evRecords = append(evRecords, c.buildEvidenceRecords(checks, checkDetails, nil, tlsObs, tracker.Redirects(), nil, obs)...)
+		recs, err := c.buildEvidenceRecords(checks, checkDetails, nil, tlsObs, tracker.Redirects(), nil, obs)
+		if err != nil {
+			return nil, err
+		}
+		evRecords = append(evRecords, recs...)
 
 		return &checkpoint.Result{
 			Target:      origTarget,
@@ -341,7 +356,9 @@ func (c *Collector) collectInternal(
 		addCheck(CheckIDInitialize, OpInitialize, denyReason, graph.OutcomeDenied, map[string]any{"http_status": 401}, obs)
 
 		// Trigger RFC 9728 protected-resource metadata check
-		authServers, resource, rfcCode, rfcErr := executeRFC9728(ctx, httpClient, canonicalURL, c.config.Bounds.MaxResponseBytes)
+		rfcCtx, rfcCancel := callTimeout(ctx, c.config.Bounds.ResponseTimeout)
+		authServers, resource, rfcCode, rfcErr := executeRFC9728(rfcCtx, httpClient, canonicalURL, c.config.Bounds.MaxResponseBytes)
+		rfcCancel()
 		if rfcErr == nil && len(authServers) > 0 {
 			addCheck(CheckIDRFC9728, OpRFC9728, "discovered RFC 9728 protected resource metadata", graph.OutcomeSuccess, map[string]any{
 				"oauth_servers": authServers,
@@ -360,7 +377,11 @@ func (c *Collector) collectInternal(
 		addCheck(CheckIDResourcesList, OpResourcesList, "prerequisite failed: server requires authentication", graph.OutcomeSkipped, nil, obs)
 		addCheck(CheckIDPromptsList, OpPromptsList, "prerequisite failed: server requires authentication", graph.OutcomeSkipped, nil, obs)
 
-		evRecords = append(evRecords, c.buildEvidenceRecords(checks, checkDetails, nil, tlsObs, tracker.Redirects(), nil, obs)...)
+		recs, err := c.buildEvidenceRecords(checks, checkDetails, nil, tlsObs, tracker.Redirects(), nil, obs)
+		if err != nil {
+			return nil, err
+		}
+		evRecords = append(evRecords, recs...)
 
 		return &checkpoint.Result{
 			Target:      origTarget,
@@ -383,7 +404,11 @@ func (c *Collector) collectInternal(
 		addCheck(CheckIDPromptsList, OpPromptsList, "prerequisite failed: access forbidden", graph.OutcomeSkipped, nil, obs)
 		addCheck(CheckIDRFC9728, OpRFC9728, "not applicable; endpoint returned 403 not 401", graph.OutcomeSkipped, nil, obs)
 
-		evRecords = append(evRecords, c.buildEvidenceRecords(checks, checkDetails, nil, tlsObs, tracker.Redirects(), nil, obs)...)
+		recs, err := c.buildEvidenceRecords(checks, checkDetails, nil, tlsObs, tracker.Redirects(), nil, obs)
+		if err != nil {
+			return nil, err
+		}
+		evRecords = append(evRecords, recs...)
 
 		return &checkpoint.Result{
 			Target:      origTarget,
@@ -406,7 +431,11 @@ func (c *Collector) collectInternal(
 		addCheck(CheckIDPromptsList, OpPromptsList, "prerequisite failed: endpoint unreachable", graph.OutcomeSkipped, nil, obs)
 		addCheck(CheckIDRFC9728, OpRFC9728, "not applicable; endpoint connection failed", graph.OutcomeSkipped, nil, obs)
 
-		evRecords = append(evRecords, c.buildEvidenceRecords(checks, checkDetails, nil, tlsObs, tracker.Redirects(), nil, obs)...)
+		recs, err := c.buildEvidenceRecords(checks, checkDetails, nil, tlsObs, tracker.Redirects(), nil, obs)
+		if err != nil {
+			return nil, err
+		}
+		evRecords = append(evRecords, recs...)
 
 		return &checkpoint.Result{
 			Target:      origTarget,
@@ -435,7 +464,7 @@ func (c *Collector) collectInternal(
 	if initResult.Capabilities == nil || initResult.Capabilities.Tools == nil {
 		// Capability not advertised
 	} else {
-		tools, toolsTruncated, toolsTruncReason, toolsErr = executeToolsList(ctx, session, c.config.Bounds.MaxPages, c.config.Bounds.MaxItems)
+		tools, toolsTruncated, toolsTruncReason, toolsErr = executeToolsList(ctx, session, c.config.Bounds.MaxPages, c.config.Bounds.MaxItems, c.config.Bounds.ResponseTimeout)
 	}
 
 	// Enumerate resources (descriptors only, never content!)
@@ -448,7 +477,7 @@ func (c *Collector) collectInternal(
 	if initResult.Capabilities == nil || initResult.Capabilities.Resources == nil {
 		// Capability not advertised
 	} else {
-		resources, templates, resTruncated, resTruncReason, resErr = executeResourcesList(ctx, session, c.config.Bounds.MaxPages, c.config.Bounds.MaxItems)
+		resources, templates, resTruncated, resTruncReason, resErr = executeResourcesList(ctx, session, c.config.Bounds.MaxPages, c.config.Bounds.MaxItems, c.config.Bounds.ResponseTimeout)
 	}
 
 	// Enumerate prompts
@@ -460,7 +489,7 @@ func (c *Collector) collectInternal(
 	if initResult.Capabilities == nil || initResult.Capabilities.Prompts == nil {
 		// Capability not advertised
 	} else {
-		prompts, promptsTruncated, promptsTruncReason, promptsErr = executePromptsList(ctx, session, c.config.Bounds.MaxPages, c.config.Bounds.MaxItems)
+		prompts, promptsTruncated, promptsTruncReason, promptsErr = executePromptsList(ctx, session, c.config.Bounds.MaxPages, c.config.Bounds.MaxItems, c.config.Bounds.ResponseTimeout)
 	}
 
 	// Determine surface coverage
@@ -590,7 +619,7 @@ func (c *Collector) collectInternal(
 	// 6. Computer correlation and ObservedAt edge
 	observedAtEdge, fallbackNode, corrEv, err := buildCorrelationEdgeAndFallback(
 		scope,
-		origTarget,
+		ep.Host(),
 		srvID,
 		finalObs,
 		c.correlator,
@@ -622,7 +651,11 @@ func (c *Collector) collectInternal(
 		fpInput = &fp
 	}
 
-	evRecords = append(evRecords, c.buildEvidenceRecords(checks, checkDetails, fpInput, tlsObs, tracker.Redirects(), &corrEv, finalObs)...)
+	recs, err := c.buildEvidenceRecords(checks, checkDetails, fpInput, tlsObs, tracker.Redirects(), &corrEv, finalObs)
+	if err != nil {
+		return nil, err
+	}
+	evRecords = append(evRecords, recs...)
 
 	targetStatus := checkpoint.TargetStatusCompleted
 	if finalCoverage != graph.CoverageComplete {
@@ -720,7 +753,7 @@ func (c *Collector) buildEvidenceRecords(
 	redirects []redirectInfo,
 	corrEv *correlate.Evidence,
 	obs graph.Observation,
-) []evidence.Record {
+) ([]evidence.Record, error) {
 	var records []evidence.Record
 
 	for _, check := range checks {
@@ -740,13 +773,17 @@ func (c *Collector) buildEvidenceRecords(
 				Anonymous:     true,
 				OperationKind: graph.EnumerationOperation,
 			}
-			if rec, err := evidence.NewAccessEvidenceRecord(accEv, details); err == nil {
-				records = append(records, rec)
+			rec, err := evidence.NewAccessEvidenceRecord(accEv, details)
+			if err != nil {
+				return nil, fmt.Errorf("build AccessEvidence evidence record: %w", err)
 			}
+			records = append(records, rec)
 		} else {
-			if rec, err := evidence.NewCheckResultRecord(check, details); err == nil {
-				records = append(records, rec)
+			rec, err := evidence.NewCheckResultRecord(check, details)
+			if err != nil {
+				return nil, fmt.Errorf("build CheckResult evidence record: %w", err)
 			}
+			records = append(records, rec)
 		}
 	}
 
@@ -754,9 +791,11 @@ func (c *Collector) buildEvidenceRecords(
 		fpObs := obs
 		fpObs.EvidenceID = fmt.Sprintf("%s-fingerprint", obs.EvidenceID)
 		fpInput.Observation = fpObs
-		if rec, err := evidence.NewFingerprintRecord(*fpInput); err == nil {
-			records = append(records, rec)
+		rec, err := evidence.NewFingerprintRecord(*fpInput)
+		if err != nil {
+			return nil, fmt.Errorf("build Fingerprint evidence record: %w", err)
 		}
+		records = append(records, rec)
 	}
 
 	if tlsObs != nil {
@@ -776,9 +815,11 @@ func (c *Collector) buildEvidenceRecords(
 			NegotiatedVersion:  tlsObs.NegotiatedVersion,
 			InsecureOverride:   tlsObs.InsecureOverride,
 		}
-		if rec, err := evidence.NewTLSRecord(tlsInput); err == nil {
-			records = append(records, rec)
+		rec, err := evidence.NewTLSRecord(tlsInput)
+		if err != nil {
+			return nil, fmt.Errorf("build TLS evidence record: %w", err)
 		}
+		records = append(records, rec)
 	}
 
 	for i, red := range redirects {
@@ -792,18 +833,22 @@ func (c *Collector) buildEvidenceRecords(
 			Authorized:  red.Authorized,
 			Reason:      red.Reason,
 		}
-		if rec, err := evidence.NewRedirectRecord(redInput); err == nil {
-			records = append(records, rec)
+		rec, err := evidence.NewRedirectRecord(redInput)
+		if err != nil {
+			return nil, fmt.Errorf("build Redirect evidence record: %w", err)
 		}
+		records = append(records, rec)
 	}
 
 	if corrEv != nil {
 		corrObs := obs
 		corrObs.EvidenceID = fmt.Sprintf("%s-correlation", obs.EvidenceID)
-		if rec, err := evidence.NewCorrelationRecord(*corrEv, corrObs); err == nil {
-			records = append(records, rec)
+		rec, err := evidence.NewCorrelationRecord(*corrEv, corrObs)
+		if err != nil {
+			return nil, fmt.Errorf("build Correlation evidence record: %w", err)
 		}
+		records = append(records, rec)
 	}
 
-	return records
+	return records, nil
 }

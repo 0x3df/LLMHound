@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/0x3df/LLMHound/internal/graph"
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -15,10 +16,10 @@ import (
 
 const (
 	CheckIDInitialize    = "mcp_initialize"
-	CheckIDToolsList      = "mcp_tools_list"
-	CheckIDResourcesList  = "mcp_resources_list"
-	CheckIDPromptsList    = "mcp_prompts_list"
-	CheckIDRFC9728        = "mcp_rfc9728_metadata"
+	CheckIDToolsList     = "mcp_tools_list"
+	CheckIDResourcesList = "mcp_resources_list"
+	CheckIDPromptsList   = "mcp_prompts_list"
+	CheckIDRFC9728       = "mcp_rfc9728_metadata"
 
 	OpInitialize    = "initialize"
 	OpToolsList     = "tools/list"
@@ -44,7 +45,7 @@ func classifyRPCError(err error, op string) (graph.Outcome, string) {
 	return graph.OutcomeFailed, err.Error()
 }
 
-func executeToolsList(ctx context.Context, session *mcpsdk.ClientSession, maxPages, maxItems int) ([]*mcpsdk.Tool, bool, string, error) {
+func paginate[T any](maxPages, maxItems int, name string, fetch func(cursor string) ([]T, string, error)) ([]T, bool, string, error) {
 	if maxPages <= 0 {
 		maxPages = 100
 	}
@@ -52,154 +53,97 @@ func executeToolsList(ctx context.Context, session *mcpsdk.ClientSession, maxPag
 		maxItems = 10000
 	}
 
-	var tools []*mcpsdk.Tool
+	var all []T
 	cursor := ""
-	pageCount := 0
-	isTruncated := false
-	var truncationReason string
-
-	for {
-		pageCount++
-		params := &mcpsdk.ListToolsParams{}
-		if cursor != "" {
-			params.Cursor = cursor
-		}
-
-		res, err := session.ListTools(ctx, params)
+	for page := 1; ; page++ {
+		items, next, err := fetch(cursor)
 		if err != nil {
-			return tools, isTruncated, truncationReason, err
+			return all, false, "", err
 		}
-
-		tools = append(tools, res.Tools...)
-		if len(tools) >= maxItems {
-			tools = tools[:maxItems]
-			isTruncated = true
-			truncationReason = fmt.Sprintf("tools enumeration reached item limit (%d)", maxItems)
-			break
+		all = append(all, items...)
+		if len(all) > maxItems {
+			return all[:maxItems], true, fmt.Sprintf("%s enumeration reached item limit (%d)", name, maxItems), nil
 		}
-
-		if res.NextCursor == "" {
-			break
+		if next == "" {
+			return all, false, "", nil
 		}
-
-		if pageCount >= maxPages {
-			isTruncated = true
-			truncationReason = fmt.Sprintf("tools enumeration reached page limit (%d)", maxPages)
-			break
+		if len(all) == maxItems {
+			return all, true, fmt.Sprintf("%s enumeration reached item limit (%d)", name, maxItems), nil
 		}
-
-		cursor = res.NextCursor
+		if page >= maxPages {
+			return all, true, fmt.Sprintf("%s enumeration reached page limit (%d)", name, maxPages), nil
+		}
+		cursor = next
 	}
-
-	return tools, isTruncated, truncationReason, nil
 }
 
-func executeResourcesList(ctx context.Context, session *mcpsdk.ClientSession, maxPages, maxItems int) ([]*mcpsdk.Resource, []*mcpsdk.ResourceTemplate, bool, string, error) {
-	if maxPages <= 0 {
-		maxPages = 100
+func callTimeout(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if timeout <= 0 {
+		return ctx, func() {}
 	}
-	if maxItems <= 0 {
-		maxItems = 10000
-	}
-
-	var resources []*mcpsdk.Resource
-	cursor := ""
-	pageCount := 0
-	isTruncated := false
-	var truncationReason string
-
-	for {
-		pageCount++
-		params := &mcpsdk.ListResourcesParams{}
-		if cursor != "" {
-			params.Cursor = cursor
-		}
-
-		res, err := session.ListResources(ctx, params)
-		if err != nil {
-			return resources, nil, isTruncated, truncationReason, err
-		}
-
-		resources = append(resources, res.Resources...)
-		if len(resources) >= maxItems {
-			resources = resources[:maxItems]
-			isTruncated = true
-			truncationReason = fmt.Sprintf("resources enumeration reached item limit (%d)", maxItems)
-			break
-		}
-
-		if res.NextCursor == "" {
-			break
-		}
-
-		if pageCount >= maxPages {
-			isTruncated = true
-			truncationReason = fmt.Sprintf("resources enumeration reached page limit (%d)", maxPages)
-			break
-		}
-
-		cursor = res.NextCursor
-	}
-
-	var templates []*mcpsdk.ResourceTemplate
-	if !isTruncated {
-		tmplRes, err := session.ListResourceTemplates(ctx, &mcpsdk.ListResourceTemplatesParams{})
-		if err == nil && tmplRes != nil {
-			templates = tmplRes.ResourceTemplates
-		}
-	}
-
-	return resources, templates, isTruncated, truncationReason, nil
+	return context.WithTimeout(ctx, timeout)
 }
 
-func executePromptsList(ctx context.Context, session *mcpsdk.ClientSession, maxPages, maxItems int) ([]*mcpsdk.Prompt, bool, string, error) {
-	if maxPages <= 0 {
-		maxPages = 100
-	}
-	if maxItems <= 0 {
-		maxItems = 10000
-	}
-
-	var prompts []*mcpsdk.Prompt
-	cursor := ""
-	pageCount := 0
-	isTruncated := false
-	var truncationReason string
-
-	for {
-		pageCount++
-		params := &mcpsdk.ListPromptsParams{}
-		if cursor != "" {
-			params.Cursor = cursor
-		}
-
-		res, err := session.ListPrompts(ctx, params)
+func executeToolsList(ctx context.Context, session *mcpsdk.ClientSession, maxPages, maxItems int, timeout time.Duration) ([]*mcpsdk.Tool, bool, string, error) {
+	return paginate(maxPages, maxItems, "tools", func(cursor string) ([]*mcpsdk.Tool, string, error) {
+		callCtx, cancel := callTimeout(ctx, timeout)
+		defer cancel()
+		res, err := session.ListTools(callCtx, &mcpsdk.ListToolsParams{Cursor: cursor})
 		if err != nil {
-			return prompts, isTruncated, truncationReason, err
+			return nil, "", err
 		}
+		return res.Tools, res.NextCursor, nil
+	})
+}
 
-		prompts = append(prompts, res.Prompts...)
-		if len(prompts) >= maxItems {
-			prompts = prompts[:maxItems]
-			isTruncated = true
-			truncationReason = fmt.Sprintf("prompts enumeration reached item limit (%d)", maxItems)
-			break
+func executeResourcesList(ctx context.Context, session *mcpsdk.ClientSession, maxPages, maxItems int, timeout time.Duration) ([]*mcpsdk.Resource, []*mcpsdk.ResourceTemplate, bool, string, error) {
+	resources, truncated, reason, err := paginate(maxPages, maxItems, "resources", func(cursor string) ([]*mcpsdk.Resource, string, error) {
+		callCtx, cancel := callTimeout(ctx, timeout)
+		defer cancel()
+		res, err := session.ListResources(callCtx, &mcpsdk.ListResourcesParams{Cursor: cursor})
+		if err != nil {
+			return nil, "", err
 		}
-
-		if res.NextCursor == "" {
-			break
-		}
-
-		if pageCount >= maxPages {
-			isTruncated = true
-			truncationReason = fmt.Sprintf("prompts enumeration reached page limit (%d)", maxPages)
-			break
-		}
-
-		cursor = res.NextCursor
+		return res.Resources, res.NextCursor, nil
+	})
+	if err != nil {
+		return resources, nil, truncated, reason, err
 	}
 
-	return prompts, isTruncated, truncationReason, nil
+	templates, tmplTruncated, tmplReason, err := paginate(maxPages, maxItems, "resource templates", func(cursor string) ([]*mcpsdk.ResourceTemplate, string, error) {
+		callCtx, cancel := callTimeout(ctx, timeout)
+		defer cancel()
+		res, err := session.ListResourceTemplates(callCtx, &mcpsdk.ListResourceTemplatesParams{Cursor: cursor})
+		if err != nil {
+			return nil, "", err
+		}
+		return res.ResourceTemplates, res.NextCursor, nil
+	})
+	if err != nil {
+		if outcome, _ := classifyRPCError(err, OpResourcesList); outcome != graph.OutcomeUnsupported {
+			return resources, templates, truncated, reason, fmt.Errorf("resources/templates/list: %w", err)
+		}
+	}
+	if tmplTruncated {
+		truncated = true
+		if reason != "" {
+			reason += "; "
+		}
+		reason += tmplReason
+	}
+	return resources, templates, truncated, reason, nil
+}
+
+func executePromptsList(ctx context.Context, session *mcpsdk.ClientSession, maxPages, maxItems int, timeout time.Duration) ([]*mcpsdk.Prompt, bool, string, error) {
+	return paginate(maxPages, maxItems, "prompts", func(cursor string) ([]*mcpsdk.Prompt, string, error) {
+		callCtx, cancel := callTimeout(ctx, timeout)
+		defer cancel()
+		res, err := session.ListPrompts(callCtx, &mcpsdk.ListPromptsParams{Cursor: cursor})
+		if err != nil {
+			return nil, "", err
+		}
+		return res.Prompts, res.NextCursor, nil
+	})
 }
 
 type rfc9728Response struct {

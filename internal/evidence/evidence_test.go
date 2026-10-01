@@ -225,6 +225,8 @@ func TestCheckResultRecordRedactsNestedDetails(t *testing.T) {
 	rec, err := evidence.NewCheckResultRecord(check, map[string]any{
 		"headers":      map[string]any{"X-API-Key": "k", "Accept": "json"},
 		"access_token": "t",
+		"max_tokens":   4096,
+		"token_count":  7,
 		"items":        []any{long},
 	})
 	if err != nil {
@@ -236,6 +238,9 @@ func TestCheckResultRecordRedactsNestedDetails(t *testing.T) {
 	}
 	if strings.Contains(string(out), `"k"`) || strings.Contains(string(out), `"t"`) {
 		t.Errorf("secret leaked: %s", out)
+	}
+	if rec.Details["max_tokens"] != 4096 || rec.Details["token_count"] != 7 {
+		t.Errorf("telemetry keys redacted: %s", out)
 	}
 	if len(out) > evidence.MaxDetailSize*2 {
 		t.Errorf("long nested string not bounded: %d bytes", len(out))

@@ -310,7 +310,6 @@ func SanitizeURL(raw string) string {
 var sensitiveKeyFragments = []string{
 	"authorization",
 	"cookie",
-	"token",
 	"api_key",
 	"api-key",
 	"apikey",
@@ -322,7 +321,7 @@ var sensitiveKeyFragments = []string{
 
 func isSensitiveKey(key string) bool {
 	lower := strings.ToLower(key)
-	if lower == "auth" {
+	if lower == "auth" || strings.HasSuffix(lower, "token") {
 		return true
 	}
 	for _, f := range sensitiveKeyFragments {

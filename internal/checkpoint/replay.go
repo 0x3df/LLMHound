@@ -102,7 +102,7 @@ func surfaceCompleted(tr TargetRecord) bool {
 	if tr.Status != TargetStatusCompleted {
 		return false
 	}
-	return tr.Observation == nil || tr.Observation.Coverage == string(graph.CoverageComplete)
+	return tr.Observation != nil && tr.Observation.Coverage == string(graph.CoverageComplete)
 }
 
 func (s *State) Results() []Result {
@@ -170,9 +170,6 @@ func (s *State) addResult(res Result) {
 	// Update target status based on result coverage
 	key := targetKey(res.Target, res.Surface)
 	status := statusForCoverage(res.Observation.Coverage)
-	if res.Status != "" {
-		status = res.Status
-	}
 
 	obsRec := toObservationRecord(res.Observation, DefaultMaxEntryBytes)
 	s.targets[key] = TargetRecord{

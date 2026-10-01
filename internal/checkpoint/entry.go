@@ -106,8 +106,16 @@ func (r TargetRecord) Validate() error {
 	if !r.Status.Valid() {
 		return fmt.Errorf("target record has undefined status %q", r.Status)
 	}
-	if r.Status == TargetStatusCompleted && r.Observation != nil && r.Observation.Coverage != string(graph.CoverageComplete) {
-		return fmt.Errorf("target record cannot be completed with %q coverage", r.Observation.Coverage)
+	if r.Status == TargetStatusCompleted {
+		if strings.TrimSpace(r.Surface) == "" {
+			return errors.New("completed target record requires surface")
+		}
+		if r.Observation == nil {
+			return errors.New("completed target record requires observation")
+		}
+		if r.Observation.Coverage != string(graph.CoverageComplete) {
+			return fmt.Errorf("target record cannot be completed with %q coverage", r.Observation.Coverage)
+		}
 	}
 	return nil
 }

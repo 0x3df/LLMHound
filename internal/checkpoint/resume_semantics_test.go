@@ -42,8 +42,8 @@ func TestResumeCompletionRequiresFullCoverage(t *testing.T) {
 	recordSurface(t, j, obs, "10.0.0.2", "ollama", graph.CoverageComplete)
 	recordSurface(t, j, obs, "10.0.0.2", "mcp", graph.CoverageComplete)
 	recordSurface(t, j, obs, "10.0.0.3", "ollama", graph.CoverageTruncated)
-	if err := j.RecordTarget(checkpoint.TargetRecord{Target: "10.0.0.4", Status: checkpoint.TargetStatusCompleted}); err != nil {
-		t.Fatal(err)
+	if err := j.RecordTarget(checkpoint.TargetRecord{Target: "10.0.0.4", Status: checkpoint.TargetStatusCompleted}); err == nil {
+		t.Fatal("surface-less completed record must be rejected")
 	}
 
 	state, err := checkpoint.Replay(&buf)
@@ -288,5 +288,54 @@ func TestFailedWritePoisonsJournal(t *testing.T) {
 	w.fail = false
 	if err := j.RecordTarget(rec); err == nil {
 		t.Fatal("journal must refuse writes after a failed write")
+	}
+}
+
+func TestCompletedWithoutObservationNeverCounts(t *testing.T) {
+	var buf bytes.Buffer
+	header := sampleHeader()
+	j, _ := checkpoint.NewWriter(&buf, header)
+	obs := sampleObservation(t, sampleVantage(t, header.DeploymentScope, header.VantageKey), "ev-1", semanticsTime)
+	recordSurface(t, j, obs, "h", "mcp", graph.CoveragePartial)
+
+	if err := j.RecordTarget(checkpoint.TargetRecord{Target: "h", Surface: "mcp", Status: checkpoint.TargetStatusCompleted}); err == nil {
+		t.Fatal("completed record without observation must be rejected at write")
+	}
+
+	hdr := bytes.Split(buf.Bytes(), []byte("\n"))
+	forged := `{"entry_type":"target","target":{"target":"h","surface":"mcp","status":"completed"}}` + "\n"
+	if _, err := checkpoint.Replay(strings.NewReader(string(hdr[0]) + "\n" + forged)); err == nil {
+		t.Fatal("replay must reject completed record without observation")
+	}
+
+	state, err := checkpoint.Replay(&buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.IsCompleted("h", "mcp") || len(state.CompletedTargets()) != 0 {
+		t.Fatal("partial surface must not be completed")
+	}
+}
+
+func TestReplayDerivesStatusFromCoverageNotClaim(t *testing.T) {
+	var buf bytes.Buffer
+	header := sampleHeader()
+	j, _ := checkpoint.NewWriter(&buf, header)
+	obs := sampleObservation(t, sampleVantage(t, header.DeploymentScope, header.VantageKey), "ev-1", semanticsTime)
+	recordSurface(t, j, obs, "h", "ollama", graph.CoveragePartial)
+
+	forged := strings.Replace(buf.String(), `"surface":"ollama","observation"`, `"surface":"ollama","status":"completed","observation"`, 1)
+	if forged == buf.String() {
+		t.Fatal("failed to forge status into result entry")
+	}
+	state, err := checkpoint.Replay(strings.NewReader(forged))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.IsCompleted("h", "ollama") {
+		t.Fatal("result claiming completed with partial coverage must not be completed")
+	}
+	if got := state.Targets()["h|ollama"].Status; got != checkpoint.TargetStatusPartial {
+		t.Fatalf("status = %q, want partial", got)
 	}
 }

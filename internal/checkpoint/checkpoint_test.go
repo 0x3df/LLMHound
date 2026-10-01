@@ -869,6 +869,11 @@ func TestGranularRecordsReplay(t *testing.T) {
 		Target:  "10.10.10.1:11434",
 		Surface: "ollama",
 		Status:  checkpoint.TargetStatusCompleted,
+		Observation: &checkpoint.ObservationRecord{
+			SchemaVersion: "1", ScanID: obs.ScanID, CollectorVersion: obs.CollectorVersion,
+			EvidenceID: obs.EvidenceID, Source: obs.Source, Surface: obs.Surface,
+			ObservedAt: tObs.Format(time.RFC3339), VantageKey: vantage.ID(), Coverage: string(graph.CoverageComplete),
+		},
 	}); err != nil {
 		t.Fatalf("record target: %v", err)
 	}

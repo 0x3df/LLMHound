@@ -148,3 +148,14 @@ func TestApplyAllFields(t *testing.T) {
 		t.Fatalf("incomplete overrides: %+v %v", got, err)
 	}
 }
+
+func TestVantageIdentity(t *testing.T) {
+	c := Config{Scope: "lab-scope", VantageKey: "vantage-1"}
+	id, err := c.VantageIdentity()
+	if err != nil {
+		t.Fatalf("VantageIdentity: %v", err)
+	}
+	if id.Kind() != "CollectionVantage" || id.Scope() != "lab-scope" {
+		t.Errorf("unexpected identity: %+v", id)
+	}
+}

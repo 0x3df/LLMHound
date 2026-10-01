@@ -1,0 +1,33 @@
+{
+  "graph": {
+    "nodes": [],
+    "edges": [
+      {
+        "kind": "LLMHound_ObservedAt",
+        "start": {
+          "match_by": "id",
+          "value": "B32E6924F96ACFD7959832FF1E1D6F78CB373DF925F868571ED161AF7355D30D"
+        },
+        "end": {
+          "match_by": "property",
+          "kind": "Computer",
+          "property_matchers": [
+            {
+              "key": "name",
+              "operator": "equals",
+              "value": "OLLAMA.CORP.LOCAL"
+            }
+          ]
+        },
+        "properties": {
+          "confidence": "unique_property_match",
+          "evidence_id": "ev-golden-001",
+          "match_method": "ad_suffix_name",
+          "match_value": "OLLAMA.CORP.LOCAL",
+          "observed_at": "2026-10-01T12:00:00Z",
+          "scan_id": "golden-scan-001"
+        }
+      }
+    ]
+  }
+}

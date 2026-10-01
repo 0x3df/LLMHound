@@ -14,6 +14,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/0x3df/LLMHound/internal/graph"
 	"github.com/0x3df/LLMHound/internal/targets"
 	"gopkg.in/yaml.v3"
 )
@@ -358,4 +359,9 @@ func (c Config) TargetInput() targets.Input {
 	entries = append(entries, c.Targets...)
 	entries = append(entries, c.CIDRs...)
 	return targets.Input{Entries: entries, Files: c.TargetsFiles, Exclude: c.Exclude, ExcludeFiles: c.ExcludeFiles, MaxTargets: c.Bounds.MaxTargets}
+}
+
+// VantageIdentity returns the source-owned CollectionVantage identity for this config.
+func (c Config) VantageIdentity() (graph.Identity, error) {
+	return graph.NewVantageIdentity(c.Scope, c.VantageKey)
 }

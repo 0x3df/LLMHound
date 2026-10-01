@@ -131,9 +131,9 @@ Goal: eventually listed on the SpecterOps OpenGraph community library page
 - M0 CE-compatibility answers (kind naming, property types, upload pipeline,
   cleanup semantics) are recorded in `docs/reference/ce-compatibility.md`;
   the reproducible lab and check suite live in `lab/` (see `lab/README.md`).
-- M1 graph/correlation primitives and their bounded plan are documented in
-  `docs/reference/graph-model.md`. Test locally without network activity:
-  `go test -race ./internal/graph ./internal/correlate` and `go vet ./...`.
+- M1 graph, correlation, and OpenGraph/evidence emission primitives are documented
+  in `docs/reference/graph-model.md`. Test locally without network activity:
+  `go test -race ./...` and `go vet ./...`.
 
 ## Maintaining this file
 

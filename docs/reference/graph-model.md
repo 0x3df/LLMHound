@@ -1,10 +1,12 @@
 # LLMHound graph model
 
-> **Status: M1 primitives implemented.** Companion to the
+> **Status: M1 primitives and emission implemented.** Companion to the
 > [design plan](../plans/2026-09-29-llmhound-design.md).
 > `internal/graph` implements identity, kind mapping and observation primitives;
-> `internal/correlate` implements input-only correlation. Collectors, emission,
-> the extension schema and CE API integration remain separate milestones.
+> `internal/correlate` implements input-only correlation; `internal/emitter` and
+> `internal/evidence` implement OpenGraph payload emission and evidence sidecars;
+> `extension/schema.json` defines the OpenGraph schema. Collectors and CE API
+> integration remain separate milestones.
 > [M0](ce-compatibility.md) validated the required semantics on CE 9.7.1.
 
 LLMHound collects AI-infrastructure observations for BloodHound and downstream
@@ -408,8 +410,8 @@ partial or absent result.
 Run the standalone contract tests with:
 
 ```sh
-go test -race ./internal/graph ./internal/correlate
-go vet ./internal/graph ./internal/correlate
+go test -race ./...
+go vet ./...
 ```
 
 The bounded implementation plan is

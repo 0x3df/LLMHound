@@ -5,8 +5,8 @@
 LLMHound is a BloodHound [OpenGraph](https://bloodhound.specterops.io/opengraph/overview)
 collector for LLM and agentic AI infrastructure: MCP servers, A2A agents, LLM
 gateways, inference servers, vector stores, model registries, notebooks, and
-AI UIs. It runs on a central collection server, scans your network remotely,
-and extends your existing BloodHound graph: AI services attach to the Active
+AI UIs. The planned collector runs on a central collection server, scans your
+network remotely, and extends your existing BloodHound graph: AI services attach to the Active
 Directory `Computer` nodes you already have, so you can see which machines on
 your existing attack paths are running AI services and what those services
 expose anonymously.
@@ -20,18 +20,25 @@ targets → network scan → OpenGraph payload + evidence sidecar → AI service
 ```
 
 > [!NOTE]
-> **Status: early development.** Only internal graph-identity and correlation
-> primitives exist; there is no usable CLI or collector yet. The design is
-> [`docs/plans/2026-09-29-llmhound-design.md`](docs/plans/2026-09-29-llmhound-design.md);
-> see [Roadmap](#roadmap) for what ships when. Commands and flags below are
-> planned and may change.
+> **Status: M1 CLI/input skeleton and graph primitives.** Help/version, strict
+> YAML configuration, flag overrides, and offline bounded target preparation
+> work. Internal graph-identity and Computer-correlation primitives exist as
+> libraries. No collectors, DNS correlation, scan artifacts, or upload are wired
+> into the CLI; `scan`, `plan`, and `upload` return nonzero not-implemented
+> errors. The remaining sections describe the accepted design and roadmap, not
+> working collection.
+> See [configuration](docs/reference/configuration.md) for implemented behavior
+> and the [design](docs/plans/2026-09-29-llmhound-design.md) for future contracts.
+> The reproducible [M0 lab](lab/README.md) records CE spike results, not full
+> collector/adapter support.
 
 ## Contents
 
 - [What it finds](#what-it-finds)
 - [How it works](#how-it-works)
 - [BloodHound integration](#bloodhound-integration)
-- [Quick start (planned)](#quick-start-planned)
+- [Quick start (offline M1)](#quick-start-offline-m1)
+- [Collection workflow (planned)](#collection-workflow-planned)
 - [Operational model](#operational-model)
 - [Responsible use](#responsible-use)
 - [Roadmap](#roadmap)
@@ -39,8 +46,8 @@ targets → network scan → OpenGraph payload + evidence sidecar → AI service
 
 ## What it finds
 
-v1 collection is **anonymous, bounded, and read-only**: LLMHound sends no
-credentials to scanned services and checks only allowlisted metadata operations.
+**Planned; no collectors are implemented in the CLI yet.** v1 collection is
+**anonymous, bounded, and read-only**: LLMHound sends no credentials to scanned services and checks only allowlisted metadata operations.
 Sensitive existing resource content is collected only with explicit opt-in,
 size limits, and redaction. The [collector capability matrix](docs/reference/collector-capabilities.md)
 defines each surface's checks and evidence contract; endpoint availability
@@ -71,10 +78,13 @@ applicable allowlisted version checks and report unknown honestly; product
 versions stay distinct from protocol, API, and model versions. Advertised
 references and model provenance retain their sources, not assumed verification.
 
-LLMHound is network-only. It does not read local files, agent configs, or
-keychains on the machine it runs on or on any target.
+Collection is network-only; host-local scanning is out of scope. The M1 CLI
+reads only operator-supplied configuration and target/exclusion input files,
+not target-service configs, environment variables, or keychains.
 
 ## How it works
+
+**Planned pipeline:** only offline target-input preparation is wired into the CLI today.
 
 1. **Targets.** CIDR ranges and/or a targets file of IPs and FQDNs,
    deduplicated.
@@ -132,7 +142,35 @@ observation time; one successful check does not establish service-wide access.
 The full node and edge model, including identity rules and coverage
 properties, is in [`docs/reference/graph-model.md`](docs/reference/graph-model.md).
 
-## Quick start (planned)
+## Quick start (offline M1)
+
+Requires Go 1.27 or newer (tested with 1.27.1):
+
+```bash
+CGO_ENABLED=0 go build -o llmhound ./cmd/llmhound
+./llmhound --help
+./llmhound targets --config llmhound.example.yaml
+# 192.0.2.2
+# 192.0.2.3
+# ai.example.test
+
+go test -race ./...
+go vet ./...
+```
+
+`targets` validates required deployment scope/vantage and bounds, expands
+bounded IP/FQDN/CIDR inputs, deduplicates, removes exact-name/IP/CIDR exclusions,
+and prints sorted targets without DNS or target traffic. It does **not** list
+checks or produce a scan payload. Copy `llmhound.example.yaml` to `llmhound.yaml`
+and replace the example scope/vantage and inputs for your environment.
+Explicit flags replace only their own fields; omitted flags preserve file values.
+See [configuration and limits](docs/reference/configuration.md) for precedence,
+path resolution, strict input rules, policy bounds, and reserved fields.
+
+## Collection workflow (planned)
+
+**Not executable yet.** `plan`/`scan` (M2) and `upload` (M3) are honest stubs,
+not collectors or an ingest pipeline. Future command examples:
 
 ```bash
 # Review what a scan would do (targets × checks), without touching targets
@@ -140,7 +178,7 @@ llmhound plan --config llmhound.yaml
 
 # Scan; write an OpenGraph payload plus an .evidence.jsonl sidecar
 llmhound scan --config llmhound.yaml \
-    --cidr 10.0.0.0/8 \
+    --cidr 10.0.0.0/24 \
     --targets-file known-ai-hosts.txt \
     --output llmhound-2026-09-29.json
 
@@ -163,8 +201,8 @@ scope and collection bounds.
 
 ## Operational model
 
-LLMHound is built to run unattended on a dedicated scanner VM, on a
-cron or systemd schedule, feeding an automated BloodHound ingest pipeline:
+The planned collector is designed to run unattended on a dedicated scanner VM,
+on a cron or systemd schedule, feeding an automated BloodHound ingest pipeline:
 
 - **Rate-limited.** Configurable concurrency, per-host rate limits, and
   connect/response timeouts.
@@ -178,7 +216,8 @@ cron or systemd schedule, feeding an automated BloodHound ingest pipeline:
 
 ## Responsible use
 
-LLMHound actively probes and enumerates network services. Only run it against
+The future collector will actively probe and enumerate network services; the
+current `targets` helper is offline. Only run it against
 networks and systems you own or are explicitly authorized to assess. Collected
 metadata (model catalogs, workspace file names, backend references) can be
 sensitive; minimize and redact retained payloads, set retention limits, and
@@ -199,6 +238,12 @@ not permission to fetch arbitrary URLs.
 | **M4** _(future)_ | Credential-driven enumeration and access evidence                                                                                                      |
 | **M5** _(future)_ | Node/edge description docs and an OpenGraph community library listing                                                                                  |
 
+## Development validation
+
+The [Go CI operator guide](docs/reference/go-ci.md) describes automated PR
+checks, the module-free M0 bootstrap distinction, and how to trigger real
+checks on existing QA PRs without changing their code.
+
 ## Licensing
 
 LLMHound is original code written from scratch. Reference projects
@@ -207,4 +252,4 @@ only; no code is derived from them. See the
 [provenance table](docs/plans/2026-09-29-llmhound-design.md#provenance-and-licensing-posture)
 in the design doc.
 
-LLMHound is licensed under Apache-2.0 (`LICENSE` ships with M1).
+LLMHound is licensed under [Apache-2.0](LICENSE).

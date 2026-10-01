@@ -16,6 +16,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"path"
 	"strings"
 	"sync"
 	"time"
@@ -41,7 +42,10 @@ var (
 var bannedPathPrefixes = []string{
 	"/api/generate",
 	"/api/chat",
-	"/api/embeddings",
+	"/api/embed",
+	"/v1/chat/completions",
+	"/v1/completions",
+	"/v1/embeddings",
 	"/api/pull",
 	"/api/push",
 	"/api/create",
@@ -237,6 +241,21 @@ func NewClient(cfg Config) *Client {
 				return ErrMaxRedirectsExceeded
 			}
 
+			if err := CheckSafety(req.Method, req.URL.Path); err != nil || req.Method != http.MethodGet {
+				if err == nil {
+					err = fmt.Errorf("%w: redirected %s", ErrForbiddenMethod, req.Method)
+				}
+				rec := RedirectInfo{
+					FromURL:    fromURL,
+					ToURL:      req.URL.String(),
+					StatusCode: status,
+					Authorized: false,
+					Reason:     "redirect violates read-only policy",
+				}
+				c.currentRedirects = append(c.currentRedirects, rec)
+				return err
+			}
+
 			// If authorized hosts are configured, check redirect target
 			if len(c.authorizedHosts) > 0 {
 				host := strings.ToLower(req.URL.Hostname())
@@ -297,7 +316,7 @@ func CheckSafety(method, rawPath string) error {
 		return fmt.Errorf("%w: %s", ErrForbiddenMethod, method)
 	}
 
-	lowerPath := strings.ToLower(rawPath)
+	lowerPath := strings.ToLower(path.Clean("/" + rawPath))
 	for _, banned := range bannedPathPrefixes {
 		if strings.HasPrefix(lowerPath, banned) {
 			return fmt.Errorf("%w: path %q matches generation/mutation prefix %q", ErrMutationForbidden, rawPath, banned)

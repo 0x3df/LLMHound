@@ -241,3 +241,42 @@ func TestTransport_Redirects(t *testing.T) {
 
 // Ensure transport compiles without unused tls import
 var _ = tls.VersionTLS13
+
+func TestTransport_RedirectToBannedPathRefused(t *testing.T) {
+	var hit bool
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/show", "/api/tags":
+			http.Redirect(w, r, "/api/pull", http.StatusTemporaryRedirect)
+		case "/api/pull":
+			hit = true
+		}
+	}))
+	defer ts.Close()
+
+	client := transport.NewClient(transport.Config{
+		Bounds: config.Bounds{MaxResponseBytes: 1024, MaxRedirects: 3},
+	})
+	ctx := context.Background()
+
+	if _, err := client.Get(ctx, ts.URL+"/api/tags"); err == nil || !errors.Is(err, transport.ErrMutationForbidden) {
+		t.Errorf("expected ErrMutationForbidden for GET redirect to banned path, got %v", err)
+	}
+	if _, err := client.Post(ctx, ts.URL+"/api/show", "application/json", []byte(`{"name":"m"}`)); err == nil {
+		t.Errorf("expected POST redirect to banned path to be refused")
+	}
+	if hit {
+		t.Errorf("banned path must never be requested via redirect")
+	}
+}
+
+func TestTransport_NormalizedPathsAndEmbedBanned(t *testing.T) {
+	for _, p := range []string{"/api/embed", "/v1/chat/completions", "/v1/completions", "/v1/embeddings", "//api//generate", "/api/tags/../generate"} {
+		if err := transport.CheckSafety(http.MethodGet, p); !errors.Is(err, transport.ErrMutationForbidden) {
+			t.Errorf("expected ErrMutationForbidden for %s, got %v", p, err)
+		}
+	}
+	if err := transport.CheckSafety(http.MethodGet, "/api/tags"); err != nil {
+		t.Errorf("unexpected error for /api/tags: %v", err)
+	}
+}

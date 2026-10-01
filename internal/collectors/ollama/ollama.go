@@ -82,15 +82,14 @@ type ShowRequest struct {
 	Name string `json:"name"`
 }
 
-// ShowResponse represents the sensitive payload returned by POST /api/show.
-type ShowResponse struct {
-	Modelfile  string       `json:"modelfile,omitempty"`
-	Parameters string       `json:"parameters,omitempty"`
-	Template   string       `json:"template,omitempty"`
-	System     string       `json:"system,omitempty"`
-	Details    ModelDetails `json:"details,omitempty"`
-	License    string       `json:"license,omitempty"`
+// ShowProvenance is the only part of the POST /api/show payload that is decoded.
+// Modelfile, system prompt, and template content are never decoded or retained.
+type ShowProvenance struct {
+	Details ModelDetails `json:"details,omitempty"`
+	License string       `json:"license,omitempty"`
 }
+
+const maxProvenanceFieldLen = 200
 
 // Collector implements Ollama surface enumeration.
 type Collector struct {
@@ -201,6 +200,9 @@ func (c *Collector) Collect(
 	var catalogModels []ModelInfo
 	var catalogTruncated bool
 	var runningModels []ModelInfo
+	var degraded []string
+	var responseTruncated bool
+	provenance := make(map[string]ShowProvenance)
 
 	var versionCheckErr error
 	var tagsCheckErr error
@@ -350,14 +352,19 @@ func (c *Collector) Collect(
 			case http.StatusOK:
 				var t TagsResponse
 				if err := json.Unmarshal(resp.Body, &t); err != nil {
+					reason := "invalid JSON response from tags endpoint"
+					if resp.Truncated {
+						responseTruncated = true
+						reason = "tags response truncated at max_response_bytes limit"
+					}
 					checkResults = append(checkResults, graph.CheckResult{
 						CheckID:   checkID,
 						Operation: op,
 						TargetID:  srvID.ID(),
 						Outcome:   graph.OutcomeFailed,
-						Reason:    "invalid JSON response from tags endpoint",
+						Reason:    reason,
 					})
-					checkDetails[checkID] = map[string]any{"http_status": resp.StatusCode}
+					checkDetails[checkID] = map[string]any{"http_status": resp.StatusCode, "truncated": resp.Truncated}
 				} else {
 					checkResults = append(checkResults, graph.CheckResult{
 						CheckID:   checkID,
@@ -443,12 +450,16 @@ func (c *Collector) Collect(
 				Reason:    reason,
 			})
 			checkDetails[checkID] = map[string]any{"error": reason}
+			degraded = append(degraded, "running models check failed: "+reason)
 		} else {
 			switch resp.StatusCode {
 			case http.StatusOK:
 				var ps PSResponse
 				if err := json.Unmarshal(resp.Body, &ps); err == nil {
 					runningModels = ps.Models
+					if maxItems := c.cfg.Bounds.MaxItems; maxItems > 0 && len(runningModels) > maxItems {
+						runningModels = runningModels[:maxItems]
+					}
 					checkResults = append(checkResults, graph.CheckResult{
 						CheckID:   checkID,
 						Operation: op,
@@ -461,14 +472,20 @@ func (c *Collector) Collect(
 						"running_models_count": len(ps.Models),
 					}
 				} else {
+					psReason := "invalid JSON response from ps endpoint"
+					if resp.Truncated {
+						responseTruncated = true
+						psReason = "ps response truncated at max_response_bytes limit"
+					}
+					degraded = append(degraded, psReason)
 					checkResults = append(checkResults, graph.CheckResult{
 						CheckID:   checkID,
 						Operation: op,
 						TargetID:  srvID.ID(),
 						Outcome:   graph.OutcomeFailed,
-						Reason:    "invalid JSON response from ps endpoint",
+						Reason:    psReason,
 					})
-					checkDetails[checkID] = map[string]any{"http_status": resp.StatusCode}
+					checkDetails[checkID] = map[string]any{"http_status": resp.StatusCode, "truncated": resp.Truncated}
 				}
 			case http.StatusNotFound:
 				checkResults = append(checkResults, graph.CheckResult{
@@ -478,6 +495,7 @@ func (c *Collector) Collect(
 					Outcome:   graph.OutcomeFailed,
 					Reason:    "HTTP 404 not found (running models endpoint unavailable on this version)",
 				})
+				degraded = append(degraded, "running models endpoint unavailable (HTTP 404)")
 				checkDetails[checkID] = map[string]any{"http_status": resp.StatusCode}
 			case http.StatusUnauthorized, http.StatusForbidden:
 				checkResults = append(checkResults, graph.CheckResult{
@@ -487,6 +505,7 @@ func (c *Collector) Collect(
 					Outcome:   graph.OutcomeDenied,
 					Reason:    fmt.Sprintf("HTTP %d: authentication or authorization required", resp.StatusCode),
 				})
+				degraded = append(degraded, fmt.Sprintf("running models endpoint denied (HTTP %d)", resp.StatusCode))
 				checkDetails[checkID] = map[string]any{"http_status": resp.StatusCode}
 			default:
 				checkResults = append(checkResults, graph.CheckResult{
@@ -496,6 +515,7 @@ func (c *Collector) Collect(
 					Outcome:   graph.OutcomeFailed,
 					Reason:    fmt.Sprintf("HTTP %d unexpected status", resp.StatusCode),
 				})
+				degraded = append(degraded, fmt.Sprintf("running models endpoint returned HTTP %d", resp.StatusCode))
 				checkDetails[checkID] = map[string]any{"http_status": resp.StatusCode}
 			}
 		}
@@ -528,6 +548,7 @@ func (c *Collector) Collect(
 		} else {
 			// Query /api/show for models with bounds and sanitization
 			successCount := 0
+			showProvenance := make(map[string]map[string]any)
 			var showErrors []string
 			for _, m := range catalogModels {
 				showReqBody, _ := json.Marshal(ShowRequest{Name: m.Name})
@@ -536,8 +557,18 @@ func (c *Collector) Collect(
 					showErrors = append(showErrors, fmt.Sprintf("%s: %s", m.Name, sanitizeError(showErr)))
 					continue
 				}
-				if resp.StatusCode == http.StatusOK {
+				var sp ShowProvenance
+				if resp.StatusCode == http.StatusOK && json.Unmarshal(resp.Body, &sp) == nil {
+					sp = redactProvenance(sp)
+					provenance[m.Name] = sp
+					showProvenance[m.Name] = map[string]any{
+						"parent_model": sp.Details.ParentModel,
+						"family":       sp.Details.Family,
+						"license":      sp.License,
+					}
 					successCount++
+				} else if resp.StatusCode == http.StatusOK {
+					showErrors = append(showErrors, fmt.Sprintf("%s: invalid JSON", m.Name))
 				} else {
 					showErrors = append(showErrors, fmt.Sprintf("%s: HTTP %d", m.Name, resp.StatusCode))
 				}
@@ -549,17 +580,25 @@ func (c *Collector) Collect(
 					Operation: op,
 					TargetID:  srvID.ID(),
 					Outcome:   graph.OutcomeSuccess,
-					Reason:    fmt.Sprintf("detailed model metadata retrieved for %d models", successCount),
+					Reason:    fmt.Sprintf("model provenance retrieved for %d of %d models", successCount, len(catalogModels)),
 				})
-				checkDetails[checkID] = map[string]any{"success_count": successCount}
+				checkDetails[checkID] = map[string]any{
+					"success_count": successCount,
+					"provenance":    showProvenance,
+					"errors":        showErrors,
+				}
+				if len(showErrors) > 0 {
+					degraded = append(degraded, fmt.Sprintf("model provenance retrieved for %d of %d models", successCount, len(catalogModels)))
+				}
 			} else {
 				checkResults = append(checkResults, graph.CheckResult{
 					CheckID:   checkID,
 					Operation: op,
 					TargetID:  srvID.ID(),
 					Outcome:   graph.OutcomeFailed,
-					Reason:    fmt.Sprintf("failed to retrieve detailed model metadata: %s", strings.Join(showErrors, "; ")),
+					Reason:    fmt.Sprintf("failed to retrieve model provenance: %s", strings.Join(showErrors, "; ")),
 				})
+				degraded = append(degraded, "model provenance retrieval failed for all models")
 				checkDetails[checkID] = map[string]any{"errors": showErrors}
 			}
 		}
@@ -598,10 +637,14 @@ func (c *Collector) Collect(
 		finalStatus = checkpoint.TargetStatusPartial
 		finalCoverageReason = "authentication required: all metadata endpoints denied access"
 	} else if verSuccess && tagsSuccess {
-		if catalogTruncated {
+		if catalogTruncated || responseTruncated {
 			finalCoverage = graph.CoverageTruncated
 			finalStatus = checkpoint.TargetStatusPartial
-			finalCoverageReason = fmt.Sprintf("model catalog truncated at max_items limit: %d", c.cfg.Bounds.MaxItems)
+			finalCoverageReason = "model catalog or running models truncated by max_items or max_response_bytes limit"
+		} else if len(degraded) > 0 {
+			finalCoverage = graph.CoveragePartial
+			finalStatus = checkpoint.TargetStatusPartial
+			finalCoverageReason = strings.Join(degraded, "; ")
 		} else {
 			finalCoverage = graph.CoverageComplete
 			finalStatus = checkpoint.TargetStatusCompleted
@@ -733,6 +776,18 @@ func (c *Collector) Collect(
 		}
 		if m.ModifiedAt != "" {
 			modelProps["modified_at"] = m.ModifiedAt
+		}
+		if sp, ok := provenance[m.Name]; ok {
+			if sp.Details.ParentModel != "" {
+				modelProps["parent_model"] = sp.Details.ParentModel
+			}
+			if sp.Details.Family != "" {
+				modelProps["family"] = sp.Details.Family
+			}
+			if sp.License != "" {
+				modelProps["license"] = sp.License
+			}
+			modelProps["provenance_source"] = "api_show"
 		}
 		if rm, ok := runningMap[modelName]; ok {
 			modelProps["running"] = true
@@ -991,6 +1046,24 @@ func (c *Collector) CollectToJournal(
 		return res, fmt.Errorf("flush journal: %w", err)
 	}
 	return res, nil
+}
+
+func redactProvenance(sp ShowProvenance) ShowProvenance {
+	return ShowProvenance{
+		Details: ModelDetails{
+			ParentModel: truncateField(sp.Details.ParentModel),
+			Family:      truncateField(sp.Details.Family),
+		},
+		License: truncateField(sp.License),
+	}
+}
+
+func truncateField(v string) string {
+	v = strings.TrimSpace(v)
+	if r := []rune(v); len(r) > maxProvenanceFieldLen {
+		return string(r[:maxProvenanceFieldLen])
+	}
+	return v
 }
 
 func normalizeVersion(raw string) string {

@@ -603,6 +603,8 @@ func TestOllama_CheckpointJournalAndEmissionRoundtrip(t *testing.T) {
 					}
 				]
 			}`))
+		case "/api/ps":
+			_, _ = w.Write([]byte(`{"models":[]}`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -748,6 +750,8 @@ func TestOllama_TLSVerification(t *testing.T) {
 		case "/api/tags":
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`{"models":[{"name":"llama3:latest"}]}`))
+		case "/api/ps":
+			_, _ = w.Write([]byte(`{"models":[]}`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -839,3 +843,185 @@ func TestOllama_SafetyRejectsGeneration(t *testing.T) {
 	}
 }
 
+
+func TestOllama_ShowRecordsOnlyRedactedProvenance(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/version":
+			_, _ = w.Write([]byte(`{"version":"0.3.12"}`))
+		case "/api/tags":
+			_, _ = w.Write([]byte(`{"models":[{"name":"tuned:latest"}]}`))
+		case "/api/ps":
+			_, _ = w.Write([]byte(`{"models":[]}`))
+		case "/api/show":
+			_, _ = w.Write([]byte(`{
+				"modelfile": "FROM llama3\nSYSTEM SECRET-MODELFILE-TOKEN",
+				"template": "SECRET-TEMPLATE-TOKEN {{ .Prompt }}",
+				"system": "SECRET-SYSTEM-TOKEN",
+				"parameters": "SECRET-PARAMETERS-TOKEN",
+				"license": "Apache License 2.0",
+				"details": {"parent_model": "llama3:8b", "family": "llama"}
+			}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ts.Close()
+
+	cfg := config.Defaults()
+	cfg.Scope = "corp-scope"
+	cfg.VantageKey = "vantage-01"
+	cfg.OptIns.Prompts = true
+
+	vantage := helperVantage(t, cfg.Scope, cfg.VantageKey)
+	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	res, err := ollama.New(cfg).Collect(context.Background(), ts.URL, vantage, "scan-001", now, nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Observation.Coverage != graph.CoverageComplete {
+		t.Errorf("expected complete coverage, got %s (%s)", res.Observation.Coverage, res.Observation.CoverageReason)
+	}
+
+	var props map[string]any
+	for _, n := range res.Nodes {
+		if n.Node.Identity().Kind() == graph.AIModel {
+			props = n.Properties
+		}
+	}
+	if props == nil {
+		t.Fatalf("expected an AIModel node")
+	}
+	if props["parent_model"] != "llama3:8b" || props["family"] != "llama" || props["license"] != "Apache License 2.0" {
+		t.Errorf("expected provenance on model node, got %v", props)
+	}
+
+	persisted, err := json.Marshal(struct {
+		Nodes    any
+		Evidence any
+	}{Nodes: nodeProps(res), Evidence: res.Evidence})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, secret := range []string{"SECRET-MODELFILE-TOKEN", "SECRET-TEMPLATE-TOKEN", "SECRET-SYSTEM-TOKEN", "SECRET-PARAMETERS-TOKEN"} {
+		if strings.Contains(string(persisted), secret) {
+			t.Errorf("sensitive show content %q must not be persisted", secret)
+		}
+	}
+}
+
+func nodeProps(res checkpoint.Result) []map[string]any {
+	var out []map[string]any
+	for _, n := range res.Nodes {
+		out = append(out, n.Properties)
+	}
+	return out
+}
+
+func TestOllama_PSAndShowFailuresDowngradeCoverage(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/version":
+			_, _ = w.Write([]byte(`{"version":"0.3.12"}`))
+		case "/api/tags":
+			_, _ = w.Write([]byte(`{"models":[{"name":"a"},{"name":"b"}]}`))
+		case "/api/ps":
+			w.WriteHeader(http.StatusUnauthorized)
+		case "/api/show":
+			w.WriteHeader(http.StatusInternalServerError)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ts.Close()
+
+	cfg := config.Defaults()
+	cfg.Scope = "corp-scope"
+	cfg.VantageKey = "vantage-01"
+	cfg.OptIns.Prompts = true
+
+	vantage := helperVantage(t, cfg.Scope, cfg.VantageKey)
+	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	res, err := ollama.New(cfg).Collect(context.Background(), ts.URL, vantage, "scan-001", now, nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Observation.Coverage != graph.CoveragePartial || res.Status != checkpoint.TargetStatusPartial {
+		t.Errorf("expected partial coverage/status, got %s/%s", res.Observation.Coverage, res.Status)
+	}
+	if !strings.Contains(res.Observation.CoverageReason, "running models") || !strings.Contains(res.Observation.CoverageReason, "provenance") {
+		t.Errorf("expected reason to name ps and show degradation, got %q", res.Observation.CoverageReason)
+	}
+}
+
+func TestOllama_TruncatedTagsBodyReportedAsTruncation(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/version":
+			_, _ = w.Write([]byte(`{"version":"0.3.12"}`))
+		case "/api/tags":
+			_, _ = w.Write([]byte(`{"models":[{"name":"` + strings.Repeat("x", 4096) + `"}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ts.Close()
+
+	cfg := config.Defaults()
+	cfg.Scope = "corp-scope"
+	cfg.VantageKey = "vantage-01"
+	cfg.Bounds.MaxResponseBytes = 256
+
+	vantage := helperVantage(t, cfg.Scope, cfg.VantageKey)
+	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	res, err := ollama.New(cfg).Collect(context.Background(), ts.URL, vantage, "scan-001", now, nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var reason string
+	for _, r := range res.Evidence {
+		if r.CheckID == ollama.CheckTags {
+			reason = r.Reason
+		}
+	}
+	if !strings.Contains(reason, "truncated") {
+		t.Errorf("expected tags outcome to report truncation, got %q", reason)
+	}
+}
+
+func TestOllama_PSBoundedByMaxItems(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/version":
+			_, _ = w.Write([]byte(`{"version":"0.3.12"}`))
+		case "/api/tags":
+			_, _ = w.Write([]byte(`{"models":[{"name":"a"},{"name":"b"}]}`))
+		case "/api/ps":
+			_, _ = w.Write([]byte(`{"models":[{"name":"a"},{"name":"b"}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ts.Close()
+
+	cfg := config.Defaults()
+	cfg.Scope = "corp-scope"
+	cfg.VantageKey = "vantage-01"
+	cfg.Bounds.MaxItems = 1
+
+	vantage := helperVantage(t, cfg.Scope, cfg.VantageKey)
+	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	res, err := ollama.New(cfg).Collect(context.Background(), ts.URL, vantage, "scan-001", now, nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	running := 0
+	for _, n := range res.Nodes {
+		if n.Properties["running"] == true {
+			running++
+		}
+	}
+	if running > 1 {
+		t.Errorf("running models must be bounded by max_items, got %d", running)
+	}
+}

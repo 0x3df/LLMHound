@@ -14,6 +14,7 @@ import (
 	"github.com/0x3df/LLMHound/internal/checkpoint"
 	"github.com/0x3df/LLMHound/internal/config"
 	"github.com/0x3df/LLMHound/internal/correlate"
+	"github.com/0x3df/LLMHound/internal/discovery"
 	"github.com/0x3df/LLMHound/internal/emitter"
 	"github.com/0x3df/LLMHound/internal/evidence"
 	"github.com/0x3df/LLMHound/internal/graph"
@@ -140,6 +141,28 @@ func (c *Collector) Collect(ctx context.Context, rawTarget string) (checkpoint.R
 
 	baseURL := strings.TrimRight(canonicalURL, "/")
 
+	probe, err := discovery.Probe(ctx, c.httpClient.client, baseURL, discovery.JupyterDefinition())
+	if err != nil {
+		return checkpoint.Result{}, fmt.Errorf("probe target: %w", err)
+	}
+	if !probe.Matched {
+		failedObs := baseObs
+		failedObs.Coverage = graph.CoverageFailed
+		if probe.Reachable {
+			failedObs.CoverageReason = "target not identified as jupyter: " + probe.Reason
+		} else {
+			failedObs.CoverageReason = "target unreachable: " + probe.Reason
+		}
+		return checkpoint.Result{
+			Target:      rawTarget,
+			Surface:     "jupyter",
+			Observation: failedObs,
+			Status:      checkpoint.TargetStatusFailed,
+			Error:       failedObs.CoverageReason,
+			Details:     map[string]any{"endpoint": canonicalURL},
+		}, nil
+	}
+
 	// Track TLS and collected information across checks
 	var observedTLS TLSInfo
 	var verInfo VersionInfo
@@ -147,6 +170,8 @@ func (c *Collector) Collect(ctx context.Context, rawTarget string) (checkpoint.R
 	var files []CollectedFile
 	var checks []checkExecution
 	var truncatedWorkspace bool
+	var truncatedSessions bool
+	var skippedDirs int
 	var failedChecks []string
 	var authRequired bool
 	var anyReachable bool
@@ -168,8 +193,13 @@ func (c *Collector) Collect(ctx context.Context, rawTarget string) (checkpoint.R
 	}
 	verInfo = verCheck.version
 
+	maxItems := c.cfg.Bounds.MaxItems
+	if maxItems <= 0 {
+		maxItems = 10000
+	}
+
 	// 2. Session Metadata Check: GET /api/sessions
-	sessCheck := c.executeSessionsCheck(ctx, baseURL, srvID.ID())
+	sessCheck := c.executeSessionsCheck(ctx, baseURL, srvID.ID(), maxItems)
 	checks = append(checks, sessCheck.exec)
 	if sessCheck.reachable {
 		anyReachable = true
@@ -184,12 +214,9 @@ func (c *Collector) Collect(ctx context.Context, rawTarget string) (checkpoint.R
 		failedChecks = append(failedChecks, sessCheck.exec.checkID)
 	}
 	sessions = sessCheck.sessions
+	truncatedSessions = sessCheck.truncated
 
 	// 3. Workspace Listing Check: GET /api/contents
-	maxItems := c.cfg.Bounds.MaxItems
-	if maxItems <= 0 {
-		maxItems = 10000
-	}
 	contCheck := c.executeContentsCheck(ctx, baseURL, srvID.ID(), maxItems)
 	checks = append(checks, contCheck.exec)
 	if contCheck.reachable {
@@ -208,6 +235,7 @@ func (c *Collector) Collect(ctx context.Context, rawTarget string) (checkpoint.R
 		truncatedWorkspace = true
 	}
 	files = contCheck.files
+	skippedDirs = contCheck.skippedDirs
 
 	// Coverage determination
 	coverage := graph.CoverageComplete
@@ -218,13 +246,17 @@ func (c *Collector) Collect(ctx context.Context, rawTarget string) (checkpoint.R
 		coverage = graph.CoverageFailed
 		coverageReason = "target unreachable: connection refused or timeout on all checks"
 		status = checkpoint.TargetStatusFailed
-	} else if truncatedWorkspace {
+	} else if truncatedWorkspace || truncatedSessions {
 		coverage = graph.CoverageTruncated
-		coverageReason = fmt.Sprintf("workspace listing truncated at max_items limit (%d)", maxItems)
+		coverageReason = fmt.Sprintf("listing truncated at max_items limit (%d)", maxItems)
 		status = checkpoint.TargetStatusPartial
 	} else if len(failedChecks) > 0 {
 		coverage = graph.CoveragePartial
 		coverageReason = fmt.Sprintf("checks failed: %s", strings.Join(failedChecks, ", "))
+		status = checkpoint.TargetStatusPartial
+	} else if skippedDirs > 0 {
+		coverage = graph.CoveragePartial
+		coverageReason = fmt.Sprintf("root listing only: %d directories not enumerated", skippedDirs)
 		status = checkpoint.TargetStatusPartial
 	}
 
@@ -558,7 +590,7 @@ func (c *Collector) executeVersionCheck(ctx context.Context, baseURL, targetID s
 	}
 
 	// Login page or non-JSON HTML
-	if resp.IsHTML || isLoginPage(resp.StatusCode, resp.Body, resp.RedirectURL) {
+	if isLoginPage(resp.StatusCode, resp.Body, resp.RedirectURL) {
 		res.authRequired = true
 		res.exec.outcome = graph.OutcomeDenied
 		res.exec.reason = "login page returned instead of api version"
@@ -613,9 +645,10 @@ type sessionsCheckResult struct {
 	tls          TLSInfo
 	authRequired bool
 	reachable    bool
+	truncated    bool
 }
 
-func (c *Collector) executeSessionsCheck(ctx context.Context, baseURL, targetID string) sessionsCheckResult {
+func (c *Collector) executeSessionsCheck(ctx context.Context, baseURL, targetID string, maxItems int) sessionsCheckResult {
 	reqURL := baseURL + "/api/sessions"
 	resp, err := c.httpClient.Get(ctx, reqURL)
 	if err != nil {
@@ -643,7 +676,7 @@ func (c *Collector) executeSessionsCheck(ctx context.Context, baseURL, targetID 
 		},
 	}
 
-	if resp.IsHTML || isLoginPage(resp.StatusCode, resp.Body, resp.RedirectURL) {
+	if isLoginPage(resp.StatusCode, resp.Body, resp.RedirectURL) {
 		res.authRequired = true
 		res.exec.outcome = graph.OutcomeDenied
 		res.exec.reason = "login page returned instead of session list"
@@ -677,6 +710,10 @@ func (c *Collector) executeSessionsCheck(ctx context.Context, baseURL, targetID 
 	}
 
 	for _, s := range parsed {
+		if len(res.sessions) >= maxItems {
+			res.truncated = true
+			break
+		}
 		cs := CollectedSession{
 			ID:   s.ID,
 			Path: s.Path,
@@ -694,6 +731,7 @@ func (c *Collector) executeSessionsCheck(ctx context.Context, baseURL, targetID 
 	res.exec.reason = "session metadata listed anonymously"
 	res.exec.anonymous = true
 	res.exec.details["session_count"] = len(res.sessions)
+	res.exec.details["truncated"] = res.truncated
 
 	return res
 }
@@ -705,6 +743,7 @@ type contentsCheckResult struct {
 	authRequired bool
 	reachable    bool
 	truncated    bool
+	skippedDirs  int
 }
 
 func (c *Collector) executeContentsCheck(ctx context.Context, baseURL, targetID string, maxItems int) contentsCheckResult {
@@ -735,7 +774,7 @@ func (c *Collector) executeContentsCheck(ctx context.Context, baseURL, targetID 
 		},
 	}
 
-	if resp.IsHTML || isLoginPage(resp.StatusCode, resp.Body, resp.RedirectURL) {
+	if isLoginPage(resp.StatusCode, resp.Body, resp.RedirectURL) {
 		res.authRequired = true
 		res.exec.outcome = graph.OutcomeDenied
 		res.exec.reason = "login page returned instead of contents listing"
@@ -771,6 +810,7 @@ func (c *Collector) executeContentsCheck(ctx context.Context, baseURL, targetID 
 	for _, item := range parsed.Content {
 		// Only notebooks and files are WorkspaceFiles; directories are folder structures
 		if item.Type == "directory" {
+			res.skippedDirs++
 			continue
 		}
 		if len(res.files) >= maxItems {
@@ -796,6 +836,7 @@ func (c *Collector) executeContentsCheck(ctx context.Context, baseURL, targetID 
 	res.exec.anonymous = true
 	res.exec.details["workspace_file_count"] = len(res.files)
 	res.exec.details["truncated"] = res.truncated
+	res.exec.details["directories_not_enumerated"] = res.skippedDirs
 
 	return res
 }
@@ -910,9 +951,6 @@ func isLoginPage(status int, body []byte, redirectURL string) bool {
 		if strings.Contains(lowerRedir, "/login") || strings.Contains(lowerRedir, "/tree") {
 			return true
 		}
-	}
-	if status == http.StatusFound || status == http.StatusSeeOther || status == http.StatusTemporaryRedirect {
-		return true
 	}
 	bodyStr := strings.ToLower(string(body))
 	if strings.Contains(bodyStr, `<form action="/login"`) || strings.Contains(bodyStr, `name="password"`) || strings.Contains(bodyStr, `name="token"`) {

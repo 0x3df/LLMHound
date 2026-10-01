@@ -38,14 +38,14 @@ func TestJupyterDefinitionMatch(t *testing.T) {
 			wantMatch: true,
 		},
 		{
-			name: "server header match tornado",
+			name: "generic tornado server is not jupyter",
 			path: "/api",
 			handler: func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Server", "TornadoServer/6.3.3")
 				w.WriteHeader(http.StatusOK)
 				_, _ = w.Write([]byte(`ok`))
 			},
-			wantMatch: true,
+			wantMatch: false,
 		},
 		{
 			name: "unauthorized with jupyter keyword",

@@ -82,11 +82,6 @@ func mockJupyterHandler(t *testing.T) http.HandlerFunc {
 						"type": "file",
 						"size": 3200,
 						"last_modified": "2026-10-01T12:05:00Z"
-					},
-					{
-						"name": "data_dir",
-						"path": "data_dir",
-						"type": "directory"
 					}
 				]
 			}`))
@@ -1040,3 +1035,82 @@ func TestEndToEndTargetDiscoveryAndEmission(t *testing.T) {
 	}
 }
 
+
+func TestNonJupyterServerYieldsNoGraph(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Server", "TornadoServer/6.3.3")
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	col, err := jupyter.New(jupyter.Config{
+		Scope: "test-scope", VantageKey: "vantage-dc01", ScanID: "scan-nonj-001",
+		Now: testFixedTime, HTTPClient: server.Client(),
+	})
+	if err != nil {
+		t.Fatalf("jupyter.New: %v", err)
+	}
+	res, err := col.Collect(context.Background(), server.URL)
+	if err != nil {
+		t.Fatalf("Collect failed: %v", err)
+	}
+	if res.Status != checkpoint.TargetStatusFailed || res.Observation.Coverage != graph.CoverageFailed {
+		t.Errorf("got status %q coverage %q, want failed", res.Status, res.Observation.Coverage)
+	}
+	if !strings.Contains(res.Observation.CoverageReason, "not identified as jupyter") {
+		t.Errorf("unexpected reason %q", res.Observation.CoverageReason)
+	}
+	if len(res.Nodes) != 0 || len(res.Edges) != 0 {
+		t.Errorf("got %d nodes %d edges, want none", len(res.Nodes), len(res.Edges))
+	}
+}
+
+func TestRootOnlyListingIsPartial(t *testing.T) {
+	base := mockJupyterHandler(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/contents" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"type":"directory","content":[{"name":"d","path":"d","type":"directory"}]}`))
+			return
+		}
+		base(w, r)
+	}))
+	defer server.Close()
+
+	col, err := jupyter.New(jupyter.Config{
+		Scope: "test-scope", VantageKey: "vantage-dc01", ScanID: "scan-root-001",
+		Now: testFixedTime, HTTPClient: server.Client(),
+	})
+	if err != nil {
+		t.Fatalf("jupyter.New: %v", err)
+	}
+	res, err := col.Collect(context.Background(), server.URL)
+	if err != nil {
+		t.Fatalf("Collect failed: %v", err)
+	}
+	if res.Observation.Coverage != graph.CoveragePartial || !strings.Contains(res.Observation.CoverageReason, "root listing only") {
+		t.Errorf("got coverage %q reason %q, want partial root listing", res.Observation.Coverage, res.Observation.CoverageReason)
+	}
+}
+
+func TestSessionListTruncation(t *testing.T) {
+	base := mockJupyterHandler(t)
+	server := httptest.NewServer(base)
+	defer server.Close()
+
+	col, err := jupyter.New(jupyter.Config{
+		Scope: "test-scope", VantageKey: "vantage-dc01", ScanID: "scan-sess-001",
+		Now: testFixedTime, HTTPClient: server.Client(),
+		Bounds: config.Bounds{MaxItems: 1},
+	})
+	if err != nil {
+		t.Fatalf("jupyter.New: %v", err)
+	}
+	res, err := col.Collect(context.Background(), server.URL)
+	if err != nil {
+		t.Fatalf("Collect failed: %v", err)
+	}
+	if res.Observation.Coverage != graph.CoverageTruncated {
+		t.Errorf("got coverage %q, want truncated", res.Observation.Coverage)
+	}
+}

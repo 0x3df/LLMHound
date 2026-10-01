@@ -44,7 +44,7 @@ func JupyterDefinition() Definition {
 		ProbePaths:  []string{"/api", "/api/status", "/tree", "/login"},
 		Match: func(status int, headers http.Header, body []byte) bool {
 			serverHeader := strings.ToLower(headers.Get("Server"))
-			if strings.Contains(serverHeader, "tornado") || strings.Contains(serverHeader, "jupyter") {
+			if strings.Contains(serverHeader, "jupyter") {
 				return true
 			}
 			if headers.Get("X-Jupyter-Version") != "" {
@@ -88,6 +88,8 @@ type ProbeResult struct {
 	MatchedPath string
 	StatusCode  int
 	Latency     time.Duration
+	Reachable   bool
+	Reason      string
 }
 
 // Probe executes fingerprint probing for a target URL against a definition.
@@ -102,12 +104,14 @@ func Probe(ctx context.Context, client *http.Client, baseURL string, def Definit
 		probeClient = &copyClient
 	} else {
 		probeClient = &http.Client{
+			Timeout: 10 * time.Second,
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
 				return http.ErrUseLastResponse
 			},
 		}
 	}
 
+	reachable := false
 	for _, p := range def.ProbePaths {
 		targetURL := baseURL + p
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
@@ -123,6 +127,7 @@ func Probe(ctx context.Context, client *http.Client, baseURL string, def Definit
 			continue // try next probe path if network error or connection refused
 		}
 
+		reachable = true
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 		_ = resp.Body.Close()
 
@@ -133,12 +138,19 @@ func Probe(ctx context.Context, client *http.Client, baseURL string, def Definit
 				MatchedPath: p,
 				StatusCode:  resp.StatusCode,
 				Latency:     latency,
+				Reachable:   true,
 			}, nil
 		}
 	}
 
+	reason := "no " + string(def.Surface) + "-specific evidence on probed paths"
+	if !reachable {
+		reason = "target unreachable on all probed paths"
+	}
 	return ProbeResult{
-		Matched: false,
-		Surface: def.Surface,
+		Matched:   false,
+		Surface:   def.Surface,
+		Reachable: reachable,
+		Reason:    reason,
 	}, nil
 }

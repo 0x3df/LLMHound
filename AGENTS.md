@@ -52,10 +52,9 @@ Goal: eventually listed on the SpecterOps OpenGraph community library page
    Rejected as taken: AgentHound (reference project), MCPHound (3 existing
    MCP scanners), AIHound (Netwrix extension), PromptHound, ContextHound,
    AgenticHound. A single extension covers all surfaces (an LLMHound/MCP
-   split was considered and declined). Kinds use clean logical names
-   (`OllamaInstance`, `ProvidesModel`) with no blanket prefix; whether any
-   qualification is needed is decided by the M0 spike and recorded in
-   `ce-compatibility.md`.
+   split was considered and declined). Code uses clean logical names;
+   M0 requires emitted `LLMHound_<Kind>` names on CE 9.7.1. The central
+   mapping is `internal/graph/kinds.go`; details are in `ce-compatibility.md`.
 4. **Graph model** per `docs/reference/graph-model.md`: **all v1 edges are
    non-traversable**, including access evidence (`UnauthenticatedAccess`,
    `PublicAccess`, from a `CollectionVantage`). Deterministic SHA-256
@@ -64,7 +63,8 @@ Goal: eventually listed on the SpecterOps OpenGraph community library page
    (mapping file → configured AD-suffix FQDN match → CE API lookup);
    otherwise to a fallback `NetworkEndpoint` node. Correlation is an edge to
    an existing node, never an identity merge; native BloodHound IDs are never
-   overwritten, and cleanup never touches `Computer` nodes.
+   overwritten. M0 Q5 requires native-linking payloads **without source_kind**
+   to prevent source cleanup from deleting Computers; see `ce-compatibility.md`.
 5. **Reference environment:** BloodHound CE on PostgreSQL at a pinned,
    validated version; upload via API (`POST /api/v2/login`,
    `PUT /api/v2/extensions`, `POST /api/v2/file-upload`,
@@ -97,8 +97,8 @@ Goal: eventually listed on the SpecterOps OpenGraph community library page
 0. **M0 — CE compatibility spike:** pinned CE in docker-compose; toy
    extension + payload; answer the questions in `ce-compatibility.md`
    (kind namespacing, multi-label, property types, non-traversable edges,
-   `source_kind` cleanup, property-matched edges to `Computer`). Spike results
-   and repeatable checks are recorded in `docs/reference/ce-compatibility.md` and `lab/`.
+   `source_kind` cleanup, property-matched edges to `Computer`). **Complete:**
+   CE 9.7.1 findings and safe upload constraints are in `ce-compatibility.md`.
 1. **M1 — Skeleton + graph + emitter:** CLI (cobra), `llmhound.yaml` loader,
    targets, graph model, OpenGraph emitter + evidence sidecar,
    `extension/schema.json`, `LICENSE`, golden-file tests.
@@ -131,6 +131,9 @@ Goal: eventually listed on the SpecterOps OpenGraph community library page
 - M0 CE-compatibility answers (kind naming, property types, upload pipeline,
   cleanup semantics) are recorded in `docs/reference/ce-compatibility.md`;
   the reproducible lab and check suite live in `lab/` (see `lab/README.md`).
+- M1 graph/correlation primitives and their bounded plan are documented in
+  `docs/reference/graph-model.md`. Test locally without network activity:
+  `go test -race ./internal/graph ./internal/correlate` and `go vet ./...`.
 
 ## Maintaining this file
 

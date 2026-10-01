@@ -2,7 +2,8 @@
 
 **Date:** 2026-09-29
 **Status:** Revised draft — final pre-development pass applied (M0 spike,
-Computer correlation, evidence sidecar, config, M2 split); nothing implemented
+Computer correlation, evidence sidecar, config, M2 split). Implementation
+status is tracked in [`graph-model.md`](../reference/graph-model.md).
 
 ## One-liner
 

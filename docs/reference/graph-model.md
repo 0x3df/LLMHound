@@ -1,39 +1,42 @@
 # LLMHound graph model
 
-> **Status: revised draft.** Companion to the
-> [design plan](../plans/2026-09-29-llmhound-design.md). Nothing is implemented
-> yet. Names below are proposed; the OpenGraph adapter and extension schema
-> must be validated against the exact target BloodHound release.
+> **Status: M1 primitives implemented.** Companion to the
+> [design plan](../plans/2026-09-29-llmhound-design.md).
+> `internal/graph` implements identity, kind mapping and observation primitives;
+> `internal/correlate` implements input-only correlation. Collectors, emission,
+> the extension schema and CE API integration remain separate milestones.
+> [M0](ce-compatibility.md) validated the required semantics on CE 9.7.1.
 
 LLMHound collects AI-infrastructure observations for BloodHound and downstream
 inventory enrichment through anonymous, bounded, read-only collection.
-The planned extension/source identifier and
-`source_kind` remain `LLMHound`; node and edge kinds use clean logical names.
+The extension/source identifier and `source_kind` are `LLMHound`.
+Code uses clean logical kind names; CE 9.7.1 requires emitted names to carry
+`LLMHound_` (for example, `LLMHound_OllamaInstance`).
 
 ## Naming contract
 
-- **Kinds:** use `OllamaInstance`, `MCPServer`, `ObservedAt`, and similar names
-  below without a blanket collector prefix. The M0 spike records whether the
-  target CE requires any qualification in [ce-compatibility.md](ce-compatibility.md).
+- **Kinds:** logical names such as `OllamaInstance`, `MCPServer` and
+  `ObservedAt` are centrally mapped by `internal/graph/kinds.go` to
+  `LLMHound_<Kind>`. Native `Computer` remains unqualified and is never emitted
+  as a source-owned node. Saved queries and schema definitions must use the
+  emitted names, per [M0 Q1](ce-compatibility.md).
 - **Display names:** describe the instance, for example
   `Ollama · ai-server-01:11434`, without a collector prefix.
 - **Ownership:** retain `LLMHound` in extension/source metadata. Cleanup must
   use validated source ownership, never a kind-name prefix.
-- **Adapter mapping:** verify whether the target OpenGraph schema isolates kinds
-  by extension or uses a global kind namespace. Do not assume generic names
-  are collision-free (the observed-target kind is `NetworkEndpoint`, not
-  `Host`, for this reason) or reuse another extension's kind merely
-  because its spelling matches. Apply minimal qualification only where needed
-  for schema requirements or collisions, and document the mapping centrally.
-  Schema definitions, emitted payloads, and saved queries must use that mapping.
+- **Adapter mapping:** M0 confirmed a global namespace and mandatory,
+  exclusively owned extension prefix. Schema definitions, payloads and saved
+  queries must share the mapping above. An untested CE release still requires
+  adapter validation; the local kind mapping is not a compatibility claim
+  for every release.
 - **Identity:** the versioned identity tuple includes the stable source identifier,
   deployment scope, and logical kind. Adapter qualification and display-name
   changes do not change object IDs. Source identity prevents cross-collector
   collisions without putting collector branding in every kind.
 
-These are proposed logical names, not a claim that every unqualified name is
-accepted by the target BloodHound release. Adapter tests must cover collisions
-and consistent kind mapping before declaring support.
+These tables show logical names, not the unqualified strings to send to CE.
+M0 recorded namespace/collision behavior; the release gate must validate the
+finished extension and consistent mapping before declaring release support.
 
 ## At a glance
 
@@ -106,9 +109,9 @@ endpoint, not its child tools, skills, or resources.
 - **AI service kinds** each represent a fingerprinted service endpoint, not a
   guaranteed unique process or installation. Multiple endpoints may eventually
   be correlated to one deployment without rewriting observation identity.
-- **`AIService`** is a proposed extra label for concrete AI-service
-  nodes, not a separate node or identity component. Validate multi-kind support
-  in the target adapter; queries must not depend on unverified support.
+- **`AIService`** is the second kind on every concrete service node, not a
+  separate node or identity owner. M0 verified multi-kind support and querying;
+  the emitted umbrella label is `LLMHound_AIService`.
 - An advertised backend URL alone does not establish its product or availability.
   Keep it as a sanitized dependency reference until independently fingerprinted;
   only then emit a typed service-to-service `UsesBackend` edge. Never scan a
@@ -138,17 +141,47 @@ stable configuration, not a secret or a per-scan UUID.
 | -------------------- | -------------------------------------------------------------------------- |
 | Collection vantage   | Configured stable vantage key                                              |
 | NetworkEndpoint      | Normalized target type and target value                                    |
-| Service              | Canonical endpoint: scheme, hostname/IP, effective port, service base path |
+| Service              | Canonical endpoint: scheme, hostname/IP, effective port, service base path; optional configured instance key |
 | Child resource/model | Owning service ID and exact stable resource key                            |
 
 Resource keys include collection name, model name, MCP resource URI/tool name,
 workspace path, or registered model name and version. Preserve case where the
-protocol is case-sensitive. Normalize DNS case and IP representation; define
-and test default-port and base-path handling. Do not collapse distinct virtual
-hosts or path-mounted services. Credentials, fragments, request query strings,
-display names, versions, timestamps, and descriptions do not enter endpoint
-identity. Endpoints distinguishable only by excluded secret/query material need
-an explicit non-secret configured instance key, not a lossy silent merge.
+protocol is case-sensitive. Normalize DNS case and IP representation without DNS
+resolution. Do not collapse distinct virtual hosts or path-mounted services. Credentials, fragments, request
+query strings, display names, observed software versions, timestamps and
+descriptions do not enter endpoint identity. A registered model's artifact
+version can be part of its stable resource key; that is not a software version.
+
+### Implemented identity v1
+
+`internal/graph/identity.go` hashes a JSON string-array tuple beginning with
+`["1", "LLMHound", deployment_scope, logical_kind, ...]`; SHA-256 hex is
+upper-case to match M0's node-ID ingest normalization. Native Computer IDs are
+preserved verbatim, not passed through this hash or rewritten. Resource ownership
+is the scoped concrete service ID. Stable keys retain case and are not trimmed.
+
+`ParseEndpoint` accepts HTTP(S) and defines these normalization rules:
+
+- DNS names are ASCII (use A-labels for international names), lower-case and
+  without a single terminal root dot; IPs use canonical `net/netip` spelling.
+  Zoned IP literals and malformed numeric addresses are rejected, including
+  hostnames whose final label is all digits or starts with `0x`
+  (`example.123`, `0x7f.0.0.1`).
+- Omitted ports are 80/443; explicit default ports and leading-zero decimal
+  spellings normalize to the same effective port. Schemes stay distinct.
+- Empty path and `/` are equivalent. Unreserved percent escapes normalize to
+  literal characters; remaining escapes use upper-case hex. Escaped `/` is not
+  a path separator. Path case, non-root trailing slash, repeated slash and dot
+  segments are preserved: their server semantics may differ.
+- Userinfo and fragments fail closed. A query-bearing endpoint requires an
+  explicit stable **non-secret instance key**; the key enters identity but the
+  query is neither retained nor hashed. Different query-selected instances must
+  get different keys. `Endpoint.String()` is a sanitized canonical URL, not a
+  representation of the instance key; keep that key separately when rebuilding
+  identity. Mutable credentials/query values must not become instance keys.
+
+`ParseTarget` accepts bare DNS/IP targets independently of service URLs.
+IP/FQDN coincidence, shared certificates and redirects never unify identities.
 
 Repeated observations of the same identity retain its ID. This does not prove
 that an IP-backed installation stayed the same over time. Preserve temporal
@@ -161,17 +194,33 @@ against AD `Computer` nodes rather than creating a parallel host graph.
 
 | Precedence | Source | Matches on | Notes |
 |---|---|---|---|
-| 1 | Operator mapping file | target → Computer objectid/SID | Exact; the only IP-only path besides reverse DNS |
-| 2 | AD domain-suffix FQDN | Computer `name`/`dNSHostName` | Only for FQDNs inside configured suffixes; requires M0-confirmed property-matched edge endpoints |
-| 3 | CE API lookup (M3) | exact objectid resolved pre-scan | Optional; needs a read-only CE token |
-| — | Reverse DNS (opt-in) | PTR → FQDN, then rule 2 | Off by default; recorded as a weaker method |
+| 1 | Explicit operator mapping data | target → existing Computer objectid/SID | Requires destination existence in the caller's verified inventory; the only implemented IP-only path |
+| 2 | AD domain-suffix FQDN | exact stored Computer `name` | Explicitly enable M0 property-match support; use upper-case canonical FQDN and require exactly one verified candidate |
+| 3 | CE API lookup (M3; not implemented here) | exact objectid resolved pre-scan | Optional; needs a read-only CE token |
+| — | Reverse DNS (future opt-in; not implemented here) | PTR → FQDN, then rule 2 | Off by default; would be recorded as a weaker method |
 
-- A correlated target emits `ObservedAt` (service → `Computer`) with
-  `match_method`, `match_value`, and `confidence` edge properties. No
-  `NetworkEndpoint` node is created for it.
-- No match, suffix mismatch, or several candidate Computers → fallback
-  `NetworkEndpoint`; ambiguous candidates and the reason are written to the
-  evidence sidecar.
+- `internal/correlate` takes mapping entries, configured AD suffixes and an
+  externally verified inventory of existing Computers. It does not read files,
+  query CE, resolve DNS or invent a lookup. The inventory must include all
+  candidates relevant to a matcher; an incomplete/stale subset cannot prove
+  uniqueness. Empty inventory never proves a match.
+- A successful decision returns an existing native reference and `ObservedAt`
+  (service → `Computer`) with match method/value/confidence. No fallback node
+  identity is returned. Mapping references use `match_by: id`; suffix references
+  use `match_by: property`, `kind: Computer`, `name` equals the upper-case FQDN.
+  Only `name` is supported: M0 did not validate `dNSHostName` semantics.
+- A suffix must have a DNS label boundary and a child hostname: `host.lab.local`
+  is inside `lab.local`, but `lab.local`, `notlab.local` and
+  `host.lab.local.other` are not. IP-only targets never become name matches.
+- No match, disabled property support, suffix mismatch, unverified mapping
+  destination or ambiguity returns a scoped `NetworkEndpoint`. Reasons and
+  sorted candidate IDs are retained in correlation evidence for a future
+  sidecar writer. An unresolved/ambiguous explicit mapping does not silently
+  fall through to the weaker suffix rule. Duplicate identical records dedup;
+  conflicting records for one native ID are rejected.
+- Existence and uniqueness are checked before constructing native references:
+  M0 showed missing ID endpoints materialize stubs and zero/multiple property
+  matches silently drop edges. Accepting a payload alone cannot verify a match.
 - Correlation is an **edge to an existing node, not an identity merge**.
   Service objectids never depend on it, native BloodHound IDs are never
   overwritten, and LLMHound cleanup never removes or modifies `Computer` nodes.
@@ -208,7 +257,7 @@ Never overwrite native BloodHound identifiers with LLMHound hashes.
 | Edge                    | Source → target                 | Meaning                                                                          |
 | ----------------------- | ------------------------------- | -------------------------------------------------------------------------------- |
 | `UnauthenticatedAccess` | CollectionVantage → service     | A specific enumeration operation succeeded without credentials from this vantage |
-| `PublicAccess`          | CollectionVantage → MCPResource | A specific resource read succeeded without credentials from this vantage         |
+| `PublicAccess`          | CollectionVantage → readable resource | A specific resource read succeeded without credentials from this vantage         |
 
 `PublicAccess` means anonymous access from the recorded vantage, **not internet
 exposure**. A denied control read is not required to record a successful anonymous
@@ -219,7 +268,14 @@ successful enumeration. Different operations may have different access outcomes.
 The earlier host-to-service access edge is intentionally replaced: the collector
 observed scanner access, not access originating from the hosting machine.
 The graph still supports exposure and inventory queries without enabling these
-edges in attack-path search.
+edges in attack-path search. `NewAccessEdge` requires validated anonymous success,
+check ID, exact operation/target, original observation and matching vantage.
+Enumeration and resource-read evidence are distinct; TCP probes, declarations,
+negative/unknown outcomes and reversed directions cannot create access edges.
+Readable targets are `MCPResource`, `WorkspaceFile`, `ModelArtifact`,
+`ArtifactStore` and `VectorCollection`; their sensitive reads still require the
+collector's independent opt-in and bounds. `NewTopologyEdge` cannot bypass these
+requirements and rejects the reserved `RunsOn` kind.
 
 Topology and identity mappings remain non-traversable regardless of the
 metadata attached to their endpoints.
@@ -329,6 +385,35 @@ a new upload must not be assumed to remove old data automatically.
 
 Removing collector-owned data must not delete native AD/Azure nodes or unrelated
 source data. External integrations own the lifecycle of their own records.
+
+**M0 Q5 safety requirement:** a payload with `metadata.source_kind` tags even
+referenced native endpoints on CE 9.7.1. Future emission/upload must therefore
+separate (1) owned nodes/edges with `source_kind: LLMHound` from (2) linking edges
+that touch native Computers, **without** `source_kind`. Owned-node constructors
+accept only LLMHound identities; native Computers exist only as references.
+`Edge.TouchesNative()` identifies linking edges and `Edge.SourceKind()` returns
+an empty string for them. This models the required segregation; it is not an
+implemented emitter or cleanup routine. The caller must not override the empty
+source kind with payload-level ownership. Sourceless linking data has a separate
+CE lifecycle; source cleanup alone does not remove it.
+
+Observation/check primitives preserve the original UTC time, scan, source,
+evidence ID, vantage and surface coverage. Check outcomes remain independent
+of coverage (for example a successful listing can be truncated). Incomplete
+coverage requires a reason. These packages neither refresh first/last-seen nor
+reconcile absent data, and expose no deletion/retirement operation. Stateful
+reconciliation remains downstream and cannot infer deletion from a failed,
+partial or absent result.
+
+Run the standalone contract tests with:
+
+```sh
+go test -race ./internal/graph ./internal/correlate
+go vet ./internal/graph ./internal/correlate
+```
+
+The bounded implementation plan is
+[`2026-09-30-m1-graph-identity-correlation.md`](../plans/2026-09-30-m1-graph-identity-correlation.md).
 
 ## Implementation acceptance checks
 

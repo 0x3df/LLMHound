@@ -20,11 +20,13 @@ targets → network scan → OpenGraph payload + evidence sidecar → AI service
 ```
 
 > [!NOTE]
-> **Status: M1 CLI/input skeleton.** Help/version, strict YAML configuration,
-> flag overrides, and offline bounded target preparation work. No collectors,
-> DNS correlation, scan artifacts, or upload are wired into the CLI; `scan`,
-> `plan`, and `upload` return nonzero not-implemented errors. The remaining
-> sections describe the accepted design and roadmap, not working collection.
+> **Status: M1 CLI/input skeleton and graph primitives.** Help/version, strict
+> YAML configuration, flag overrides, and offline bounded target preparation
+> work. Internal graph-identity and Computer-correlation primitives exist as
+> libraries. No collectors, DNS correlation, scan artifacts, or upload are wired
+> into the CLI; `scan`, `plan`, and `upload` return nonzero not-implemented
+> errors. The remaining sections describe the accepted design and roadmap, not
+> working collection.
 > See [configuration](docs/reference/configuration.md) for implemented behavior
 > and the [design](docs/plans/2026-09-29-llmhound-design.md) for future contracts.
 > The reproducible [M0 lab](lab/README.md) records CE spike results, not full
@@ -111,9 +113,10 @@ Targets **BloodHound CE with PostgreSQL**. Support requires validation of the
 exact CE version, OpenGraph schema, and API capabilities; a version number
 alone is not a compatibility guarantee.
 
-- **Extension schema.** `extension/schema.json` uses clean node and edge
-  names such as `OllamaInstance` and `ProvidesModel`. Any required collision
-  qualification is an adapter concern, validated against the target CE schema.
+- **Extension schema.** `extension/schema.json` uses `LLMHound_`-prefixed
+  kinds such as `LLMHound_OllamaInstance` and `LLMHound_ProvidesModel`, as
+  required by the validated CE release (see the
+  [graph model](docs/reference/graph-model.md#naming-contract)).
   All v1 edges are non-traversable.
 - **Attached to your AD Computers.** `ObservedAt` links a service to the
   existing AD `Computer` it was correlated to, or to a fallback

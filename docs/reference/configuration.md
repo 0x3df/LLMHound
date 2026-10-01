@@ -2,8 +2,8 @@
 
 **Implemented M1 slice:** Cobra help/version, strict YAML loading, explicit flag
 replacements, policy validation, and offline target preparation. No discovery,
-collectors, DNS resolution/correlation, graph assembly, resume, or CE upload is
-wired into the CLI. `scan`, `plan`, and `upload` exit nonzero with honest
+collectors, DNS resolution/correlation, graph assembly, emission, resume, or CE
+upload is wired into the CLI (emission exists only as internal libraries). `scan`, `plan`, and `upload` exit nonzero with honest
 not-implemented diagnostics and write no artifacts. `targets` is not the M2
 `plan` command: it does not invent a check inventory.
 
@@ -137,7 +137,7 @@ These values are parsed/validated, but have **no network/content effects** in M1
 - `correlation.mapping_file` (`--mapping-file`), `.ad_domain_suffixes`
   (`--ad-domain-suffix`), `.reverse_dns` (`--reverse-dns`, default false), and
   `.ce_lookup` (`--ce-lookup`, default false). Suffixes must be exact ASCII FQDNs,
-  not IPs/wildcards. This slice does not read mappings, infer machine identity,
+  not IPs/wildcards. The CLI does not read mappings (the `internal/correlate` library can), infer machine identity,
   resolve PTR records, or query CE. Correlation implementation belongs to its
   own package/milestone, per [graph-model.md](graph-model.md).
 

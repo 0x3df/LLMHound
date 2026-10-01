@@ -33,7 +33,7 @@ Goal: eventually listed on the SpecterOps OpenGraph community library page
 | `README.md` | Public-facing overview; implemented CLI vs planned collector behavior. |
 | `docs/reference/configuration.md` | Working M1 CLI/configuration/target-input contract, limits, build and test commands. |
 | `docs/plans/.future/` | Parked ideas only. Not a roadmap; nothing there is in scope. |
-| `extension/schema.json`, `extension/saved_searches/` | Not yet created (M1/M3). |
+| `extension/schema.json` | OpenGraph extension schema (M1). `extension/saved_searches/` is not yet created (M3). |
 
 ## Decisions already made (do not relitigate without cause)
 

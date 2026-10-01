@@ -3,7 +3,9 @@ package checkpoint
 import (
 	"encoding/json"
 	"net/url"
+	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/0x3df/LLMHound/internal/evidence"
 )
@@ -22,7 +24,6 @@ var sensitiveKeyFragments = []string{
 	"api-key",
 	"apikey",
 	"passw",
-	"passwd",
 	"secret",
 	"bearer",
 	"credential",
@@ -33,7 +34,7 @@ var sensitiveKeyFragments = []string{
 // isSensitiveKey checks if a property or detail key is sensitive and must be redacted.
 func isSensitiveKey(key string) bool {
 	lower := strings.ToLower(key)
-	if lower == "auth" || strings.HasSuffix(lower, "token") || strings.Contains(lower, "token") {
+	if lower == "auth" || strings.HasSuffix(lower, "token") {
 		return true
 	}
 	for _, f := range sensitiveKeyFragments {
@@ -50,9 +51,27 @@ func boundString(s string, maxLen int) string {
 		maxLen = DefaultMaxStringSize
 	}
 	if len(s) > maxLen {
-		return s[:maxLen] + TruncatedSuffix
+		cut := maxLen
+		for cut > 0 && !utf8.RuneStart(s[cut]) {
+			cut--
+		}
+		return s[:cut] + TruncatedSuffix
 	}
 	return s
+}
+
+var (
+	urlInTextPattern    = regexp.MustCompile(`[A-Za-z][A-Za-z0-9+.-]*://[^\s"'<>]+`)
+	bearerInTextPattern = regexp.MustCompile(`(?i)\b(bearer|basic)\s+[^\s"']+`)
+	secretInTextPattern = regexp.MustCompile(`(?i)\b([a-z_-]*(?:token|passw[a-z]*|secret|api[_-]?key))\s*[=:]\s*[^\s"'&,;]+`)
+)
+
+// sanitizeText strips credentials and URL query data embedded in free text, then bounds it.
+func sanitizeText(s string, maxLen int) string {
+	s = urlInTextPattern.ReplaceAllStringFunc(s, SanitizeURL)
+	s = bearerInTextPattern.ReplaceAllString(s, "${1} "+RedactedPlaceholder)
+	s = secretInTextPattern.ReplaceAllString(s, "${1}="+RedactedPlaceholder)
+	return boundString(s, maxLen)
 }
 
 // SanitizeTarget strips userinfo, credentials, query parameters, and fragments from target strings.
@@ -89,7 +108,7 @@ func SanitizeURL(raw string) string {
 
 // SanitizeMap recursively redacts sensitive keys and bounds string values in a map.
 func SanitizeMap(m map[string]any, maxStringLen int) map[string]any {
-	if len(m) == 0 {
+	if m == nil {
 		return nil
 	}
 	out := make(map[string]any, len(m))
@@ -108,7 +127,7 @@ func sanitizeValue(v any, maxStringLen int) any {
 	case nil, bool, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32, float64, json.Number:
 		return t
 	case string:
-		return boundString(t, maxStringLen)
+		return sanitizeText(t, maxStringLen)
 	case map[string]any:
 		return SanitizeMap(t, maxStringLen)
 	case []any:
@@ -120,7 +139,7 @@ func sanitizeValue(v any, maxStringLen int) any {
 	case []string:
 		out := make([]string, len(t))
 		for i, s := range t {
-			out[i] = boundString(s, maxStringLen)
+			out[i] = sanitizeText(s, maxStringLen)
 		}
 		return out
 	default:

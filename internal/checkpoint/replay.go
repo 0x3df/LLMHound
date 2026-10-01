@@ -68,28 +68,41 @@ func (s *State) Targets() map[string]TargetRecord {
 	return cp
 }
 
+// CompletedTargets lists targets that have at least one recorded surface and
+// whose every recorded surface is fully completed. Surface-less records never count.
 func (s *State) CompletedTargets() []string {
-	seen := make(map[string]bool)
-	var out []string
+	complete := make(map[string]bool)
 	for _, tr := range s.targets {
-		if tr.Status == TargetStatusCompleted && !seen[tr.Target] {
-			seen[tr.Target] = true
-			out = append(out, tr.Target)
+		if tr.Surface == "" {
+			continue
+		}
+		done, seen := complete[tr.Target]
+		complete[tr.Target] = (done || !seen) && surfaceCompleted(tr)
+	}
+	var out []string
+	for target, done := range complete {
+		if done {
+			out = append(out, target)
 		}
 	}
 	sort.Strings(out)
 	return out
 }
 
+// IsCompleted reports whether the given surface of target was recorded as fully covered.
 func (s *State) IsCompleted(target, surface string) bool {
-	key := targetKey(target, surface)
-	if tr, ok := s.targets[key]; ok {
-		return tr.Status == TargetStatusCompleted
+	if surface == "" {
+		return false
 	}
-	if tr, ok := s.targets[target]; ok {
-		return tr.Status == TargetStatusCompleted
+	tr, ok := s.targets[targetKey(target, surface)]
+	return ok && surfaceCompleted(tr)
+}
+
+func surfaceCompleted(tr TargetRecord) bool {
+	if tr.Status != TargetStatusCompleted {
+		return false
 	}
-	return false
+	return tr.Observation == nil || tr.Observation.Coverage == string(graph.CoverageComplete)
 }
 
 func (s *State) Results() []Result {
@@ -156,15 +169,12 @@ func (s *State) addResult(res Result) {
 
 	// Update target status based on result coverage
 	key := targetKey(res.Target, res.Surface)
-	status := TargetStatusCompleted
-	if res.Observation.Coverage == graph.CoverageFailed {
-		status = TargetStatusFailed
-	}
+	status := statusForCoverage(res.Observation.Coverage)
 	if res.Status != "" {
 		status = res.Status
 	}
 
-	obsRec := toObservationRecord(res.Observation)
+	obsRec := toObservationRecord(res.Observation, DefaultMaxEntryBytes)
 	s.targets[key] = TargetRecord{
 		Target:      res.Target,
 		Surface:     res.Surface,
@@ -251,7 +261,6 @@ func ReplayStream(r io.Reader, handler ReplayHandler, opts ...Option) error {
 			return fmt.Errorf("line %d: invalid JSON entry: %w", lineNum, decErr)
 		}
 
-
 		if !headerSeen {
 			if entry.EntryType != EntryHeader || entry.Header == nil {
 				return fmt.Errorf("line %d: first entry must be %q, got %q", lineNum, EntryHeader, entry.EntryType)
@@ -293,6 +302,9 @@ func ReplayStream(r io.Reader, handler ReplayHandler, opts ...Option) error {
 		case EntryTarget:
 			if entry.Target == nil {
 				return fmt.Errorf("line %d: target entry missing body", lineNum)
+			}
+			if err := entry.Target.Validate(); err != nil {
+				return fmt.Errorf("line %d: invalid target record: %w", lineNum, err)
 			}
 			if handler.OnTarget != nil {
 				if err := handler.OnTarget(*entry.Target); err != nil {

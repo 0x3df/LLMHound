@@ -2,6 +2,7 @@ package checkpoint
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -88,6 +89,7 @@ type WriterJournal struct {
 	vantage graph.Identity
 	opts    options
 	closed  bool
+	failed  error
 }
 
 // NewWriter creates a Journal writing to w and emits the Header entry.
@@ -138,7 +140,7 @@ func (j *WriterJournal) RecordResult(res Result) error {
 		return ErrClosedJournal
 	}
 
-	if err := res.Validate(j.header.DeploymentScope); err != nil {
+	if err := j.validateResultLocked(res); err != nil {
 		return fmt.Errorf("invalid result: %w", err)
 	}
 
@@ -158,8 +160,20 @@ func (j *WriterJournal) RecordTarget(target TargetRecord) error {
 		return ErrClosedJournal
 	}
 
-	target.Target = SanitizeTarget(target.Target)
-	target.Error = boundString(target.Error, j.opts.maxStringSize)
+	if err := target.Validate(); err != nil {
+		return fmt.Errorf("invalid target record: %w", err)
+	}
+	if target.Observation != nil {
+		if target.Observation.VantageKey != j.vantage.ID() {
+			return errors.New("target observation vantage does not match journal vantage")
+		}
+		obs := *target.Observation
+		obs.Source = boundString(SanitizeURL(obs.Source), j.opts.maxStringSize)
+		obs.CoverageReason = sanitizeText(obs.CoverageReason, j.opts.maxStringSize)
+		target.Observation = &obs
+	}
+	target.Target = boundString(SanitizeTarget(target.Target), j.opts.maxStringSize)
+	target.Error = sanitizeText(target.Error, j.opts.maxStringSize)
 	target.Details = SanitizeMap(target.Details, j.opts.maxStringSize)
 
 	return j.writeEntryLocked(JournalEntry{
@@ -177,8 +191,8 @@ func (j *WriterJournal) RecordNode(item emitter.NodeItem) error {
 		return ErrClosedJournal
 	}
 
-	if item.Node.Identity().Scope() != j.header.DeploymentScope {
-		return errors.New("node scope does not match journal deployment scope")
+	if err := j.validateNodeLocked(item); err != nil {
+		return err
 	}
 
 	rec := toNodeRecord(item, j.opts.maxStringSize)
@@ -197,8 +211,8 @@ func (j *WriterJournal) RecordEdge(edge graph.Edge) error {
 		return ErrClosedJournal
 	}
 
-	if edge.Start().Scope() != j.header.DeploymentScope {
-		return errors.New("edge start scope does not match journal deployment scope")
+	if err := j.validateEdgeLocked(edge); err != nil {
+		return err
 	}
 
 	rec := toEdgeRecord(edge, j.opts.maxStringSize)
@@ -217,15 +231,11 @@ func (j *WriterJournal) RecordEvidence(record evidence.Record) error {
 		return ErrClosedJournal
 	}
 
-	if err := record.Validate(); err != nil {
-		return fmt.Errorf("invalid evidence record: %w", err)
-	}
-	if record.DeploymentScope != j.header.DeploymentScope {
-		return errors.New("evidence record scope does not match journal deployment scope")
+	if err := j.validateEvidenceLocked(record); err != nil {
+		return err
 	}
 
-	record.Details = SanitizeMap(record.Details, j.opts.maxStringSize)
-	record.Source = SanitizeURL(record.Source)
+	record = sanitizeEvidence(record, j.opts.maxStringSize)
 
 	return j.writeEntryLocked(JournalEntry{
 		EntryType: EntryEvidence,
@@ -233,7 +243,92 @@ func (j *WriterJournal) RecordEvidence(record evidence.Record) error {
 	})
 }
 
+func (j *WriterJournal) validateObservationLocked(obs graph.Observation) error {
+	if err := obs.Validate(j.header.DeploymentScope); err != nil {
+		return err
+	}
+	if obs.Vantage.ID() != j.vantage.ID() {
+		return errors.New("observation vantage does not match journal vantage")
+	}
+	return nil
+}
+
+func (j *WriterJournal) validateNodeLocked(item emitter.NodeItem) error {
+	id := item.Node.Identity()
+	if id.ID() == "" {
+		return errors.New("node requires identity")
+	}
+	if id.Scope() != j.header.DeploymentScope {
+		return errors.New("node scope does not match journal deployment scope")
+	}
+	if err := j.validateObservationLocked(item.Node.Observation()); err != nil {
+		return fmt.Errorf("node observation: %w", err)
+	}
+	return nil
+}
+
+func (j *WriterJournal) validateEdgeLocked(edge graph.Edge) error {
+	if edge.Kind() == "" {
+		return errors.New("edge requires kind")
+	}
+	for _, ref := range []graph.Reference{edge.Start(), edge.End()} {
+		if !ref.IsNative() && ref.Scope() != j.header.DeploymentScope {
+			return errors.New("edge endpoint scope does not match journal deployment scope")
+		}
+	}
+	if err := j.validateObservationLocked(edge.Observation()); err != nil {
+		return fmt.Errorf("edge observation: %w", err)
+	}
+	if acc, ok := edge.AccessEvidence(); ok {
+		if err := j.validateObservationLocked(acc.Observation); err != nil {
+			return fmt.Errorf("edge access observation: %w", err)
+		}
+	}
+	return nil
+}
+
+func (j *WriterJournal) validateEvidenceLocked(rec evidence.Record) error {
+	if err := rec.Validate(); err != nil {
+		return fmt.Errorf("invalid evidence record: %w", err)
+	}
+	if rec.DeploymentScope != j.header.DeploymentScope {
+		return errors.New("evidence record scope does not match journal deployment scope")
+	}
+	if rec.VantageKey != "" && rec.VantageKey != j.vantage.ID() {
+		return errors.New("evidence record vantage does not match journal vantage")
+	}
+	return nil
+}
+
+func (j *WriterJournal) validateResultLocked(res Result) error {
+	if err := res.Validate(j.header.DeploymentScope); err != nil {
+		return err
+	}
+	if err := j.validateObservationLocked(res.Observation); err != nil {
+		return fmt.Errorf("result observation: %w", err)
+	}
+	for i, n := range res.Nodes {
+		if err := j.validateNodeLocked(n); err != nil {
+			return fmt.Errorf("result node %d: %w", i, err)
+		}
+	}
+	for i, e := range res.Edges {
+		if err := j.validateEdgeLocked(e); err != nil {
+			return fmt.Errorf("result edge %d: %w", i, err)
+		}
+	}
+	for i, ev := range res.Evidence {
+		if err := j.validateEvidenceLocked(ev); err != nil {
+			return fmt.Errorf("result evidence %d: %w", i, err)
+		}
+	}
+	return nil
+}
+
 func (j *WriterJournal) writeEntryLocked(entry JournalEntry) error {
+	if j.failed != nil {
+		return j.failed
+	}
 	data, err := json.Marshal(entry)
 	if err != nil {
 		return fmt.Errorf("marshal journal entry: %w", err)
@@ -244,8 +339,11 @@ func (j *WriterJournal) writeEntryLocked(entry JournalEntry) error {
 	}
 
 	data = append(data, '\n')
-	_, err = j.w.Write(data)
-	return err
+	if _, err = j.w.Write(data); err != nil {
+		j.failed = fmt.Errorf("journal write failed, journal is unusable: %w", err)
+		return err
+	}
+	return nil
 }
 
 func (j *WriterJournal) Flush() error {
@@ -305,7 +403,7 @@ func CreateFile(path string, header Header, opts ...Option) (*FileJournal, error
 		return nil, fmt.Errorf("create journal directory: %w", err)
 	}
 
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if err != nil {
 		return nil, fmt.Errorf("open journal file: %w", err)
 	}
@@ -351,9 +449,13 @@ func OpenFile(path string, opts ...Option) (*FileJournal, error) {
 		return nil, fmt.Errorf("invalid journal header: %w", err)
 	}
 
-	fAppend, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0600)
+	fAppend, err := os.OpenFile(path, os.O_RDWR|os.O_APPEND, 0600)
 	if err != nil {
 		return nil, fmt.Errorf("open journal file for appending: %w", err)
+	}
+	if err := repairTornTail(fAppend); err != nil {
+		_ = fAppend.Close()
+		return nil, fmt.Errorf("repair journal tail: %w", err)
 	}
 
 	vantage, err := graph.NewVantageIdentity(headerEntry.Header.DeploymentScope, headerEntry.Header.VantageKey)
@@ -379,4 +481,30 @@ func OpenFile(path string, opts ...Option) (*FileJournal, error) {
 		file:          fAppend,
 		path:          path,
 	}, nil
+}
+
+// repairTornTail ensures the file ends on a line boundary so appended entries never
+// join a partial line: a complete unterminated last entry is terminated, a partial one is dropped.
+func repairTornTail(f *os.File) error {
+	info, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	size := info.Size()
+	if size == 0 {
+		return nil
+	}
+	data := make([]byte, size)
+	if _, err := f.ReadAt(data, 0); err != nil {
+		return err
+	}
+	if data[size-1] == '\n' {
+		return nil
+	}
+	lineStart := int64(bytes.LastIndexByte(data, '\n') + 1)
+	if json.Valid(bytes.TrimSpace(data[lineStart:])) {
+		_, err = f.Write([]byte{'\n'})
+		return err
+	}
+	return f.Truncate(lineStart)
 }

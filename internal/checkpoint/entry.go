@@ -72,9 +72,45 @@ type TargetStatus string
 const (
 	TargetStatusStarted   TargetStatus = "started"
 	TargetStatusCompleted TargetStatus = "completed"
+	TargetStatusPartial   TargetStatus = "partial"
 	TargetStatusFailed    TargetStatus = "failed"
 	TargetStatusSkipped   TargetStatus = "skipped"
 )
+
+// Valid reports whether s is a defined target status.
+func (s TargetStatus) Valid() bool {
+	switch s {
+	case TargetStatusStarted, TargetStatusCompleted, TargetStatusPartial, TargetStatusFailed, TargetStatusSkipped:
+		return true
+	}
+	return false
+}
+
+// statusForCoverage derives the target status implied by observed surface coverage.
+func statusForCoverage(c graph.Coverage) TargetStatus {
+	switch c {
+	case graph.CoverageComplete:
+		return TargetStatusCompleted
+	case graph.CoverageFailed:
+		return TargetStatusFailed
+	default:
+		return TargetStatusPartial
+	}
+}
+
+// Validate checks the status is defined and, when it claims completion, that coverage was complete.
+func (r TargetRecord) Validate() error {
+	if strings.TrimSpace(r.Target) == "" {
+		return errors.New("target record requires target")
+	}
+	if !r.Status.Valid() {
+		return fmt.Errorf("target record has undefined status %q", r.Status)
+	}
+	if r.Status == TargetStatusCompleted && r.Observation != nil && r.Observation.Coverage != string(graph.CoverageComplete) {
+		return fmt.Errorf("target record cannot be completed with %q coverage", r.Observation.Coverage)
+	}
+	return nil
+}
 
 // TargetRecord represents target-level scanning progress and outcome.
 type TargetRecord struct {
@@ -109,6 +145,14 @@ func (r Result) Validate(scope string) error {
 	}
 	if err := r.Observation.Validate(scope); err != nil {
 		return fmt.Errorf("result observation: %w", err)
+	}
+	if r.Status != "" {
+		if !r.Status.Valid() {
+			return fmt.Errorf("result has undefined status %q", r.Status)
+		}
+		if r.Status == TargetStatusCompleted && r.Observation.Coverage != graph.CoverageComplete {
+			return fmt.Errorf("result cannot be completed with %q coverage", r.Observation.Coverage)
+		}
 	}
 	for i, n := range r.Nodes {
 		if n.Node.Identity().ID() == "" {
@@ -224,7 +268,7 @@ type CorrelationRecord struct {
 
 // Helper converters
 
-func toObservationRecord(obs graph.Observation) ObservationRecord {
+func toObservationRecord(obs graph.Observation, maxStringLen int) ObservationRecord {
 	return ObservationRecord{
 		SchemaVersion:    obs.SchemaVersion,
 		ScanID:           obs.ScanID,
@@ -235,7 +279,7 @@ func toObservationRecord(obs graph.Observation) ObservationRecord {
 		ObservedAt:       obs.ObservedAt.UTC().Format(time.RFC3339),
 		VantageKey:       obs.Vantage.ID(),
 		Coverage:         string(obs.Coverage),
-		CoverageReason:   obs.CoverageReason,
+		CoverageReason:   sanitizeText(obs.CoverageReason, maxStringLen),
 	}
 }
 
@@ -249,6 +293,10 @@ func fromObservationRecord(r ObservationRecord, vantage graph.Identity) (graph.O
 	}
 	if _, offset := t.Zone(); offset != 0 {
 		return graph.Observation{}, errors.New("observed_at must be in UTC")
+	}
+
+	if r.VantageKey != vantage.ID() {
+		return graph.Observation{}, errors.New("observation vantage does not match journal vantage")
 	}
 
 	obs := graph.Observation{
@@ -302,7 +350,6 @@ func toReferenceRecord(ref graph.Reference) ReferenceRecord {
 	return rec
 }
 
-
 func fromReferenceRecord(r ReferenceRecord) (graph.Reference, error) {
 	if r.IsNative {
 		if r.MatchBy == string(graph.MatchByProperty) {
@@ -322,7 +369,7 @@ func fromReferenceRecord(r ReferenceRecord) (graph.Reference, error) {
 
 func toNodeRecord(item emitter.NodeItem, maxStringLen int) NodeRecord {
 	idRec := toIdentityRecord(item.Node.Identity())
-	obsRec := toObservationRecord(item.Node.Observation())
+	obsRec := toObservationRecord(item.Node.Observation(), maxStringLen)
 	sanitizedProps := SanitizeMap(item.Properties, maxStringLen)
 	return NodeRecord{
 		Identity:    idRec,
@@ -352,16 +399,16 @@ func toEdgeRecord(edge graph.Edge, maxStringLen int) EdgeRecord {
 		Kind:        string(edge.Kind()),
 		Start:       toReferenceRecord(edge.Start()),
 		End:         toReferenceRecord(edge.End()),
-		Observation: toObservationRecord(edge.Observation()),
+		Observation: toObservationRecord(edge.Observation(), maxStringLen),
 	}
 
 	if corr, ok := edge.Correlation(); ok {
 		rec.Correlation = &CorrelationRecord{
 			MatchMethod:    corr.MatchMethod,
-			MatchValue:     corr.MatchValue,
+			MatchValue:     sanitizeText(corr.MatchValue, maxStringLen),
 			Confidence:     corr.Confidence,
-			FallbackReason: corr.FallbackReason,
-			CandidateIDs:   append([]string(nil), corr.CandidateIDs...),
+			FallbackReason: sanitizeText(corr.FallbackReason, maxStringLen),
+			CandidateIDs:   boundStrings(corr.CandidateIDs, maxStringLen),
 		}
 	}
 
@@ -371,10 +418,10 @@ func toEdgeRecord(edge graph.Edge, maxStringLen int) EdgeRecord {
 			Operation:     acc.Operation,
 			TargetID:      acc.TargetID,
 			Outcome:       string(acc.Outcome),
-			Reason:        acc.Reason,
+			Reason:        sanitizeText(acc.Reason, maxStringLen),
 			Anonymous:     acc.Anonymous,
 			OperationKind: string(acc.OperationKind),
-			Observation:   toObservationRecord(acc.Observation),
+			Observation:   toObservationRecord(acc.Observation, maxStringLen),
 		}
 	}
 
@@ -447,25 +494,26 @@ func toResultRecord(res Result, maxStringLen int) ResultRecord {
 
 	evs := make([]evidence.Record, len(res.Evidence))
 	for i, ev := range res.Evidence {
-		ev.Details = SanitizeMap(ev.Details, maxStringLen)
-		ev.Source = SanitizeURL(ev.Source)
-		evs[i] = ev
+		evs[i] = sanitizeEvidence(ev, maxStringLen)
 	}
 
 	return ResultRecord{
 		Target:      SanitizeTarget(res.Target),
 		Surface:     res.Surface,
-		Observation: toObservationRecord(res.Observation),
+		Observation: toObservationRecord(res.Observation, maxStringLen),
 		Status:      res.Status,
 		Nodes:       nodes,
 		Edges:       edges,
 		Evidence:    evs,
-		Error:       boundString(res.Error, maxStringLen),
+		Error:       sanitizeText(res.Error, maxStringLen),
 		Details:     SanitizeMap(res.Details, maxStringLen),
 	}
 }
 
 func fromResultRecord(r ResultRecord, vantage graph.Identity) (Result, error) {
+	if r.Status != "" && !r.Status.Valid() {
+		return Result{}, fmt.Errorf("undefined result status %q", r.Status)
+	}
 	obs, err := fromObservationRecord(r.Observation, vantage)
 	if err != nil {
 		return Result{}, fmt.Errorf("restore result observation: %w", err)
@@ -508,4 +556,37 @@ func fromResultRecord(r ResultRecord, vantage graph.Identity) (Result, error) {
 		Error:       r.Error,
 		Details:     r.Details,
 	}, nil
+}
+
+func boundStrings(in []string, maxLen int) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]string, len(in))
+	for i, v := range in {
+		out[i] = sanitizeText(v, maxLen)
+	}
+	return out
+}
+
+// sanitizeEvidence returns a copy of ev with every free-text field redacted and bounded.
+func sanitizeEvidence(ev evidence.Record, maxLen int) evidence.Record {
+	for _, f := range []*string{
+		&ev.Reason, &ev.CoverageReason, &ev.MatchValue, &ev.FallbackReason, &ev.VerificationReason,
+		&ev.Product, &ev.Vendor, &ev.SoftwareVersion, &ev.SoftwareVersionRaw, &ev.BuildID, &ev.Commit,
+		&ev.ImageDigest, &ev.APIVersion, &ev.ProtocolVersion, &ev.Method, &ev.CertFingerprint,
+		&ev.Issuer, &ev.Subject, &ev.NegotiatedVersion, &ev.CheckID, &ev.Operation, &ev.TargetID,
+	} {
+		*f = sanitizeText(*f, maxLen)
+	}
+	for _, f := range []*string{&ev.OriginalTarget, &ev.NormalizedTarget} {
+		*f = boundString(SanitizeTarget(*f), maxLen)
+	}
+	for _, f := range []*string{&ev.Source, &ev.FromURL, &ev.ToURL} {
+		*f = boundString(SanitizeURL(*f), maxLen)
+	}
+	ev.CandidateIDs = boundStrings(ev.CandidateIDs, maxLen)
+	ev.SANs = boundStrings(ev.SANs, maxLen)
+	ev.Details = SanitizeMap(ev.Details, maxLen)
+	return ev
 }

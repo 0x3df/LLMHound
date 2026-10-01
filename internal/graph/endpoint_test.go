@@ -120,3 +120,11 @@ func TestCanonicalTargets(t *testing.T) {
 		t.Fatal("incorrect target types")
 	}
 }
+
+func TestParseTargetRejectsNumericFinalLabel(t *testing.T) {
+	for _, raw := range []string{"0x7f.0.0.1", "example.123", "host.0x10", "1.2.3", "0x10"} {
+		if _, err := graph.ParseTarget(raw); err == nil {
+			t.Errorf("ParseTarget(%q) accepted a numeric-final-label host as DNS", raw)
+		}
+	}
+}

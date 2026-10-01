@@ -53,7 +53,6 @@ func ParseTarget(raw string) (Target, error) {
 	if len(host) == 0 || len(host) > 253 {
 		return Target{}, errors.New("invalid target hostname")
 	}
-	allNumeric := true
 	for _, label := range strings.Split(host, ".") {
 		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
 			return Target{}, errors.New("invalid target hostname label")
@@ -62,13 +61,10 @@ func ParseTarget(raw string) (Target, error) {
 			if !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-') {
 				return Target{}, errors.New("target hostname must be ASCII DNS labels")
 			}
-			if c < '0' || c > '9' {
-				allNumeric = false
-			}
 		}
 	}
 	// Do not silently reinterpret a malformed numeric address as DNS.
-	if allNumeric {
+	if tld := host[strings.LastIndexByte(host, '.')+1:]; strings.HasPrefix(tld, "0x") || strings.Trim(tld, "0123456789") == "" {
 		return Target{}, errors.New("invalid numeric IP target")
 	}
 	return Target{DNSTarget, host}, nil

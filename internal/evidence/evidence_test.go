@@ -211,3 +211,33 @@ func TestWriter(t *testing.T) {
 		t.Errorf("unexpected record_type in written JSON: %v", parsed["record_type"])
 	}
 }
+
+func TestCheckResultRecordRedactsNestedDetails(t *testing.T) {
+	check := graph.CheckResult{
+		Observation: sampleObservation(t),
+		CheckID:     "check_ollama_list",
+		Operation:   "ollama_tags",
+		TargetID:    "TGT-001",
+		Outcome:     graph.OutcomeSuccess,
+		Reason:      "ok",
+	}
+	long := strings.Repeat("a", evidence.MaxDetailSize*2)
+	rec, err := evidence.NewCheckResultRecord(check, map[string]any{
+		"headers":      map[string]any{"X-API-Key": "k", "Accept": "json"},
+		"access_token": "t",
+		"items":        []any{long},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := json.Marshal(rec.Details)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out), `"k"`) || strings.Contains(string(out), `"t"`) {
+		t.Errorf("secret leaked: %s", out)
+	}
+	if len(out) > evidence.MaxDetailSize*2 {
+		t.Errorf("long nested string not bounded: %d bytes", len(out))
+	}
+}

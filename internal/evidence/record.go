@@ -1,6 +1,7 @@
 package evidence
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -306,38 +307,77 @@ func SanitizeURL(raw string) string {
 	return u.String()
 }
 
-var sensitiveKeys = map[string]bool{
-	"authorization": true,
-	"auth":          true,
-	"cookie":        true,
-	"set-cookie":    true,
-	"token":         true,
-	"api_key":       true,
-	"apikey":        true,
-	"password":      true,
-	"secret":        true,
-	"bearer":        true,
+var sensitiveKeyFragments = []string{
+	"authorization",
+	"cookie",
+	"token",
+	"api_key",
+	"api-key",
+	"apikey",
+	"passw",
+	"secret",
+	"bearer",
+	"credential",
+}
+
+func isSensitiveKey(key string) bool {
+	lower := strings.ToLower(key)
+	if lower == "auth" {
+		return true
+	}
+	for _, f := range sensitiveKeyFragments {
+		if strings.Contains(lower, f) {
+			return true
+		}
+	}
+	return false
 }
 
 func sanitizeDetails(details map[string]any) map[string]any {
 	if len(details) == 0 {
 		return nil
 	}
-	out := make(map[string]any)
-	for k, v := range details {
-		lowerKey := strings.ToLower(k)
-		if sensitiveKeys[lowerKey] {
+	return sanitizeMap(details)
+}
+
+func sanitizeMap(m map[string]any) map[string]any {
+	out := make(map[string]any, len(m))
+	for k, v := range m {
+		if isSensitiveKey(k) {
 			out[k] = "[REDACTED]"
 			continue
 		}
-		if s, ok := v.(string); ok {
-			if len(s) > MaxDetailSize {
-				s = s[:MaxDetailSize] + "…[truncated]"
-			}
-			out[k] = s
-		} else {
-			out[k] = v
-		}
+		out[k] = sanitizeValue(v)
 	}
 	return out
+}
+
+func sanitizeValue(v any) any {
+	switch t := v.(type) {
+	case nil, bool, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32, float64, json.Number:
+		return t
+	case string:
+		if len(t) > MaxDetailSize {
+			return t[:MaxDetailSize] + "…[truncated]"
+		}
+		return t
+	case map[string]any:
+		return sanitizeMap(t)
+	case []any:
+		out := make([]any, len(t))
+		for i, e := range t {
+			out[i] = sanitizeValue(e)
+		}
+		return out
+	default:
+		raw, err := json.Marshal(t)
+		if err != nil {
+			return "[unserializable]"
+		}
+		var normalized any
+		if err := json.Unmarshal(raw, &normalized); err != nil {
+			return "[unserializable]"
+		}
+		return sanitizeValue(normalized)
+	}
 }

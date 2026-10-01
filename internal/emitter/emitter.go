@@ -174,49 +174,67 @@ func EmitScan(dir, prefix string, nodes []NodeItem, edges []graph.Edge, records 
 	}
 
 	artifacts := ScanArtifacts{}
-
-	// Write base payload
-	baseFilename := prefix + ".json"
+	baseName := prefix + ".json"
 	if len(linkingEdges) > 0 {
-		baseFilename = prefix + "-base.json"
+		baseName = prefix + "-base.json"
 	}
-	artifacts.BasePayloadPath = filepath.Join(dir, baseFilename)
-	bf, err := os.OpenFile(artifacts.BasePayloadPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
-	if err != nil {
-		return ScanArtifacts{}, fmt.Errorf("create base payload file: %w", err)
-	}
-	defer bf.Close()
-
-	if err := EmitBasePayload(bf, nodes, ownedEdges); err != nil {
-		return ScanArtifacts{}, fmt.Errorf("write base payload: %w", err)
-	}
-
-	// Write linking payload if there are linking edges
+	artifacts.BasePayloadPath = filepath.Join(dir, baseName)
 	if len(linkingEdges) > 0 {
 		artifacts.LinkingPayloadPath = filepath.Join(dir, prefix+"-linking.json")
-		lf, err := os.OpenFile(artifacts.LinkingPayloadPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
-		if err != nil {
-			return ScanArtifacts{}, fmt.Errorf("create linking payload file: %w", err)
-		}
-		defer lf.Close()
-
-		if err := EmitLinkingPayload(lf, linkingEdges); err != nil {
-			return ScanArtifacts{}, fmt.Errorf("write linking payload: %w", err)
-		}
 	}
-
-	// Write evidence sidecar
 	artifacts.EvidenceSidecarPath = filepath.Join(dir, prefix+".evidence.jsonl")
-	ef, err := os.OpenFile(artifacts.EvidenceSidecarPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
-	if err != nil {
-		return ScanArtifacts{}, fmt.Errorf("create evidence sidecar file: %w", err)
-	}
-	defer ef.Close()
 
-	writer := evidence.NewWriter(ef)
-	if err := writer.WriteAll(records); err != nil {
-		return ScanArtifacts{}, fmt.Errorf("write evidence sidecar: %w", err)
+	all := []string{
+		filepath.Join(dir, prefix+".json"),
+		filepath.Join(dir, prefix+"-base.json"),
+		filepath.Join(dir, prefix+"-linking.json"),
+		artifacts.EvidenceSidecarPath,
+	}
+	for _, p := range all {
+		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return ScanArtifacts{}, fmt.Errorf("remove stale artifact: %w", err)
+		}
+	}
+
+	fail := func(err error) (ScanArtifacts, error) {
+		for _, p := range all {
+			_ = os.Remove(p)
+		}
+		return ScanArtifacts{}, err
+	}
+
+	if err := writeFile(artifacts.BasePayloadPath, func(w io.Writer) error {
+		return EmitBasePayload(w, nodes, ownedEdges)
+	}); err != nil {
+		return fail(fmt.Errorf("write base payload: %w", err))
+	}
+
+	if len(linkingEdges) > 0 {
+		if err := writeFile(artifacts.LinkingPayloadPath, func(w io.Writer) error {
+			return EmitLinkingPayload(w, linkingEdges)
+		}); err != nil {
+			return fail(fmt.Errorf("write linking payload: %w", err))
+		}
+	}
+
+	if err := writeFile(artifacts.EvidenceSidecarPath, func(w io.Writer) error {
+		return evidence.NewWriter(w).WriteAll(records)
+	}); err != nil {
+		return fail(fmt.Errorf("write evidence sidecar: %w", err))
 	}
 
 	return artifacts, nil
+}
+
+func writeFile(path string, write func(io.Writer) error) (err error) {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if cerr := f.Close(); err == nil {
+			err = cerr
+		}
+	}()
+	return write(f)
 }

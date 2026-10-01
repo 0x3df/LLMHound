@@ -52,10 +52,33 @@ func LoadMappingFile(path string) ([]Mapping, error) {
 		return nil, errors.New("mapping file is empty")
 	}
 
+	var mappings []Mapping
 	if trimmed[0] == '{' || trimmed[0] == '[' {
-		return parseJSONMappings(trimmed)
+		mappings, err = parseJSONMappings(trimmed)
+	} else {
+		mappings, err = parseLineMappings(trimmed)
 	}
-	return parseLineMappings(trimmed)
+	if err != nil {
+		return nil, err
+	}
+	return rejectConflicts(mappings)
+}
+
+func rejectConflicts(mappings []Mapping) ([]Mapping, error) {
+	seen := make(map[string]string, len(mappings))
+	out := make([]Mapping, 0, len(mappings))
+	for _, m := range mappings {
+		prev, ok := seen[m.Target]
+		if !ok {
+			seen[m.Target] = m.ComputerID
+			out = append(out, m)
+			continue
+		}
+		if prev != m.ComputerID {
+			return nil, fmt.Errorf("conflicting mapping entries for target %q", m.Target)
+		}
+	}
+	return out, nil
 }
 
 func parseJSONMappings(data []byte) ([]Mapping, error) {

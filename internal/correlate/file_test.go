@@ -131,3 +131,14 @@ func TestNewFromConfig(t *testing.T) {
 		t.Errorf("failed to correlate via loaded mapping file: %+v", res)
 	}
 }
+
+func TestLoadMappingFile_RejectsConflictingTarget(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "m.txt")
+	body := "192.0.2.1 S-1-5-21-1111-2222-3333-1001\n192.0.2.1 S-1-5-21-1111-2222-3333-1002\n"
+	if err := os.WriteFile(path, []byte(body), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := correlate.LoadMappingFile(path); err == nil {
+		t.Fatal("expected conflict error")
+	}
+}

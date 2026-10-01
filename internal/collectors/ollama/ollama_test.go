@@ -1065,3 +1065,42 @@ func TestOllama_ShowTruncatedBodyReportedAsTruncation(t *testing.T) {
 		t.Errorf("expected show outcome to report truncation, got %q", reason)
 	}
 }
+
+func TestOllama_PSRedirectEvidenceRecorded(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/version":
+			_, _ = w.Write([]byte(`{"version":"0.3.12"}`))
+		case "/api/tags":
+			_, _ = w.Write([]byte(`{"models":[]}`))
+		case "/api/ps":
+			http.Redirect(w, r, "/ps2", http.StatusFound)
+		case "/ps2":
+			_, _ = w.Write([]byte(`{"models":[]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ts.Close()
+
+	cfg := config.Defaults()
+	cfg.Scope = "corp-scope"
+	cfg.VantageKey = "vantage-01"
+	cfg.Bounds.MaxRedirects = 2
+
+	vantage := helperVantage(t, cfg.Scope, cfg.VantageKey)
+	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	res, err := ollama.New(cfg).Collect(context.Background(), ts.URL, vantage, "scan-001", now, nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	found := false
+	for _, r := range res.Evidence {
+		if r.RecordType == evidence.RecordType("redirect") || strings.HasSuffix(r.ToURL, "/ps2") {
+			found = strings.HasSuffix(r.ToURL, "/ps2")
+		}
+	}
+	if !found {
+		t.Errorf("expected redirect evidence for /api/ps hop")
+	}
+}

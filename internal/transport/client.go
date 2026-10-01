@@ -266,11 +266,11 @@ func NewClient(cfg Config) *Client {
 				return err
 			}
 
-			// If authorized hosts are configured, check redirect target
-			if len(c.authorizedHosts) > 0 {
+			{
 				host := strings.ToLower(req.URL.Hostname())
 				hostWithPort := strings.ToLower(req.URL.Host)
-				if !c.authorizedHosts[host] && !c.authorizedHosts[hostWithPort] {
+				sameHost := len(via) > 0 && strings.EqualFold(via[0].URL.Host, req.URL.Host)
+				if !sameHost && !c.authorizedHosts[host] && !c.authorizedHosts[hostWithPort] {
 					rec := RedirectInfo{
 						FromURL:    fromURL,
 						ToURL:      req.URL.String(),

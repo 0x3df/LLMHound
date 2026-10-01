@@ -320,3 +320,28 @@ func TestTransport_ConcurrentRequestsKeepTLSAndRedirectsPerRequest(t *testing.T)
 	}
 	wg.Wait()
 }
+
+func TestTransport_CrossHostRedirectRefusedWithoutAllowlist(t *testing.T) {
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer other.Close()
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/cross":
+			http.Redirect(w, r, other.URL+"/api/tags", http.StatusFound)
+		case "/same":
+			http.Redirect(w, r, "/api/tags", http.StatusFound)
+		}
+	}))
+	defer origin.Close()
+
+	client := transport.NewClient(transport.Config{
+		Bounds: config.Bounds{MaxResponseBytes: 1024, MaxRedirects: 3},
+	})
+	if _, err := client.Get(context.Background(), origin.URL+"/cross"); !errors.Is(err, transport.ErrRedirectNotAuthorized) {
+		t.Errorf("expected ErrRedirectNotAuthorized for cross-host redirect, got %v", err)
+	}
+	resp, err := client.Get(context.Background(), origin.URL+"/same")
+	if err != nil || resp.StatusCode != http.StatusOK || len(resp.Redirects) != 1 {
+		t.Errorf("same-host redirect should be followed and recorded: err=%v resp=%+v", err, resp)
+	}
+}

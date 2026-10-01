@@ -201,6 +201,15 @@ func (c *Collector) Collect(
 	var catalogTruncated bool
 	var runningModels []ModelInfo
 	var degraded []string
+	absorb := func(resp *transport.Response) {
+		if resp == nil {
+			return
+		}
+		if resp.TLS != nil && tlsInfo == nil {
+			tlsInfo = resp.TLS
+		}
+		redirects = append(redirects, resp.Redirects...)
+	}
 	var responseTruncated bool
 	provenance := make(map[string]ShowProvenance)
 
@@ -439,6 +448,7 @@ func (c *Collector) Collect(
 		op := "ollama_ps"
 		psURL := baseURL + "/api/ps"
 		resp, reqErr := c.transport.Get(ctx, psURL)
+		absorb(resp)
 
 		if reqErr != nil {
 			reason := sanitizeError(reqErr)
@@ -553,6 +563,7 @@ func (c *Collector) Collect(
 			for _, m := range catalogModels {
 				showReqBody, _ := json.Marshal(ShowRequest{Name: m.Name})
 				resp, showErr := c.transport.Post(ctx, baseURL+"/api/show", "application/json", showReqBody)
+				absorb(resp)
 				if showErr != nil {
 					showErrors = append(showErrors, fmt.Sprintf("%s: %s", m.Name, sanitizeError(showErr)))
 					continue

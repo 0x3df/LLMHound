@@ -33,7 +33,7 @@ Goal: eventually listed on the SpecterOps OpenGraph community library page
 | `README.md` | Public-facing overview; implemented CLI vs planned collector behavior. |
 | `docs/reference/configuration.md` | Working M1 CLI/configuration/target-input contract, limits, build and test commands. |
 | `docs/plans/.future/` | Parked ideas only. Not a roadmap; nothing there is in scope. |
-| `extension/schema.json`, `extension/saved_searches/` | Not yet created (M1/M3). |
+| `extension/schema.json` | OpenGraph extension schema (M1). `extension/saved_searches/` is not yet created (M3). |
 
 ## Decisions already made (do not relitigate without cause)
 
@@ -131,9 +131,9 @@ Goal: eventually listed on the SpecterOps OpenGraph community library page
 - M0 CE-compatibility answers (kind naming, property types, upload pipeline,
   cleanup semantics) are recorded in `docs/reference/ce-compatibility.md`;
   the reproducible lab and check suite live in `lab/` (see `lab/README.md`).
-- M1 graph/correlation primitives and their bounded plan are documented in
-  `docs/reference/graph-model.md`. Test locally without network activity:
-  `go test -race ./internal/graph ./internal/correlate` and `go vet ./...`.
+- M1 graph, correlation, and OpenGraph/evidence emission primitives are documented
+  in `docs/reference/graph-model.md`. Test locally without network activity:
+  `go test -race ./...` and `go vet ./...`.
 
 ## Maintaining this file
 

@@ -20,11 +20,12 @@ targets → network scan → OpenGraph payload + evidence sidecar → AI service
 ```
 
 > [!NOTE]
-> **Status: M1 CLI/input skeleton and graph primitives.** Help/version, strict
-> YAML configuration, flag overrides, and offline bounded target preparation
-> work. Internal graph-identity and Computer-correlation primitives exist as
-> libraries. No collectors, DNS correlation, scan artifacts, or upload are wired
-> into the CLI; `scan`, `plan`, and `upload` return nonzero not-implemented
+> **Status: M1 CLI/input skeleton, graph primitives, and emission libraries.**
+> Help/version, strict YAML configuration, flag overrides, and offline bounded
+> target preparation work. Graph-identity, Computer-correlation, OpenGraph
+> payload emission, and evidence-sidecar primitives and `extension/schema.json`
+> exist as libraries. No collectors, DNS correlation, or upload are wired into
+> the CLI, and it writes no scan artifacts; `scan`, `plan`, and `upload` return nonzero not-implemented
 > errors. The remaining sections describe the accepted design and roadmap, not
 > working collection.
 > See [configuration](docs/reference/configuration.md) for implemented behavior

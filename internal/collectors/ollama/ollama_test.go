@@ -843,7 +843,6 @@ func TestOllama_SafetyRejectsGeneration(t *testing.T) {
 	}
 }
 
-
 func TestOllama_ShowRecordsOnlyRedactedProvenance(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

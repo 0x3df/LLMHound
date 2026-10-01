@@ -15,18 +15,21 @@ graph/evidence output, and checkpoint journal contracts.
 - **Read-Only & Anonymous:** No credentials are sent. The collector only performs
   allowlisted metadata operations.
 - **Strictly No Generation or Mutations:** Mutating and generation endpoints
-  (`/api/generate`, `/api/chat`, `/api/embeddings`, `/api/pull`, `/api/push`,
-  `/api/create`, `/api/delete`, `/api/copy`, `/api/blobs`) are strictly forbidden
-  and rejected at the transport layer.
-- **Opt-In Sensitive Content:** Model templates, modelfiles, and system prompts
-  (`/api/show`) require explicit opt-in (`--prompts`, `--configuration-content`,
-  or `--resource-content`). When disabled (the default), `/api/show` is skipped.
+  (`/api/generate`, `/api/chat`, `/api/embed*`, `/v1/chat/completions`,
+  `/v1/completions`, `/v1/embeddings`, `/api/pull`, `/api/push`, `/api/create`,
+  `/api/delete`, `/api/copy`, `/api/blobs`) are strictly forbidden and rejected at
+  the transport layer.
+- **Opt-In Provenance:** `/api/show` requires explicit opt-in (`--prompts`,
+  `--configuration-content`, or `--resource-content`); when disabled (the default)
+  it is skipped. Only bounded, redacted provenance is kept (`parent_model`,
+  `license`, details `family`); modelfile, system prompt, and template content are
+  never persisted.
 - **Bounded Resource Limits:** Respects configured `max_response_bytes`,
   `max_items` (truncating catalog enumeration with `CoverageTruncated` when
   exceeded), `connect_timeout`, and `response_timeout`.
 - **TLS & Redirects:** Captures leaf certificate details (fingerprint, issuer,
   subject, SANs, validity, negotiated version). Halts on TLS verification failure
-  unless `--insecure` is explicitly enabled. Bounded redirects within authorized scope.
+  unless `--insecure` is explicitly enabled. Bounded redirects; a hop must stay on the original request host or an explicitly authorized host. TLS and redirect evidence is captured per request across all checks.
 
 ## Allowlisted Operations
 
@@ -34,8 +37,8 @@ graph/evidence output, and checkpoint journal contracts.
 |---|---|---|---|---|---|
 | `ollama_version` | `ollama_version` | `/api/version` | GET | Runtime software version | `success`: valid version JSON; `denied`: 401/403; `failed`: 404, malformed, or transport error |
 | `ollama_tags` | `ollama_tags` | `/api/tags` | GET | Model catalog & metadata | `success`: anonymous catalog listed; `denied`: 401/403; `failed`: 404 or malformed |
-| `ollama_ps` | `ollama_ps` | `/api/ps` | GET | Running models in memory | `success`: running models listed; `failed`: 404 (unavailable in older releases) |
-| `ollama_show` | `ollama_show` | `/api/show` | POST | Sensitive modelfile/prompts | `skipped`: default (opt-in disabled); `success`: opt-in enabled with bounded read |
+| `ollama_ps` | `ollama_ps` | `/api/ps` | GET | Running models in memory | `success`: running models listed; `denied`: 401/403; `failed`: 404 (unavailable in older releases), malformed, or truncated; running models bounded by `max_items` |
+| `ollama_show` | `ollama_show` | `/api/show` | POST | Redacted model provenance | `skipped`: default (opt-in disabled); `success`: provenance retrieved for at least one model (reason gives N of M); `failed`: no model succeeded, including truncated responses |
 
 ## Graph and Evidence Mapping
 
@@ -45,7 +48,8 @@ graph/evidence output, and checkpoint journal contracts.
     `tls_verification`, `tls_fingerprint`.
   - `AIModel` nodes for each enumerated model, scoped to the owning service ID,
     with properties `name`, `digest`, `size`, `format`, `family`, `parameter_size`,
-    `quantization_level`, `modified_at`.
+    `quantization_level`, `parent_model`, `modified_at`, plus `running`/`size_vram`
+    from `ollama_ps` and `license`/`provenance_source` from opt-in `ollama_show`.
   - Fallback `NetworkEndpoint` when target does not correlate to an existing AD `Computer`.
 - **Edges:**
   - `UnauthenticatedAccess` (`CollectionVantage` → `OllamaInstance`) upon validated anonymous
@@ -61,7 +65,7 @@ graph/evidence output, and checkpoint journal contracts.
 
 ## Target Status and Coverage
 
-- `complete`: Both `ollama_version` and `ollama_tags` succeeded without truncation. Target status `completed`.
-- `truncated`: `ollama_tags` succeeded but model catalog exceeded `max_items`. Target status `partial`.
-- `partial`: At least one required check succeeded while another failed or was denied. Target status `partial`.
+- `complete`: `ollama_version` and `ollama_tags` succeeded, no truncation, and no `ollama_ps` or opted-in `ollama_show` degradation. Target status `completed`.
+- `truncated`: `ollama_tags` succeeded but the catalog or running models exceeded `max_items`, or a body hit `max_response_bytes`. Target status `partial`.
+- `partial`: At least one check succeeded while another (including `ollama_ps` or opted-in `ollama_show`) failed or was denied. Target status `partial`.
 - `failed`: Unreachable target or all checks failed. Target status `failed`.

@@ -164,7 +164,9 @@ is the scoped concrete service ID. Stable keys retain case and are not trimmed.
 
 - DNS names are ASCII (use A-labels for international names), lower-case and
   without a single terminal root dot; IPs use canonical `net/netip` spelling.
-  Zoned IP literals and malformed numeric addresses are rejected.
+  Zoned IP literals and malformed numeric addresses are rejected, including
+  hostnames whose final label is all digits or starts with `0x`
+  (`example.123`, `0x7f.0.0.1`).
 - Omitted ports are 80/443; explicit default ports and leading-zero decimal
   spellings normalize to the same effective port. Schemes stay distinct.
 - Empty path and `/` are equivalent. Unreserved percent escapes normalize to

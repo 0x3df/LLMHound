@@ -1,13 +1,15 @@
 # LLMHound graph model
 
-> **Status: M1 primitives and emission implemented.** Companion to the
+> **Status: M1 primitives and emission implemented; M2a checkpoint journal implemented.** Companion to the
 > [design plan](../plans/2026-09-29-llmhound-design.md).
 > `internal/graph` implements identity, kind mapping and observation primitives;
 > `internal/correlate` implements input-only correlation; `internal/emitter` and
 > `internal/evidence` implement OpenGraph payload emission and evidence sidecars;
+> `internal/checkpoint` implements the collector checkpoint journal interface and replay engine;
 > `extension/schema.json` defines the OpenGraph schema. Collectors and CE API
 > integration remain separate milestones.
 > [M0](ce-compatibility.md) validated the required semantics on CE 9.7.1.
+
 
 LLMHound collects AI-infrastructure observations for BloodHound and downstream
 inventory enrichment through anonymous, bounded, read-only collection.

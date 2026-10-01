@@ -64,6 +64,7 @@ func (r Reference) Kind() Kind {
 	return r.identity.kind
 }
 func (r Reference) Scope() string      { return r.identity.scope }
+func (r Reference) OwnerID() string    { return r.identity.ownerID }
 func (r Reference) IsNative() bool     { return r.nativeID != "" }
 func (r Reference) MatchBy() MatchBy   { return r.matchBy }
 func (r Reference) Property() string   { return r.property }

@@ -94,3 +94,38 @@ func NewNetworkEndpointIdentity(scope string, target Target) (Identity, error) {
 	}
 	return newIdentity(scope, NetworkEndpoint, string(target.typ), target.value)
 }
+
+// RestoreIdentity recreates a source-owned Identity from verified components (e.g. during journal replay).
+func RestoreIdentity(id, scope string, kind Kind, ownerID string) (Identity, error) {
+	if !validStableText(id) || len(id) != 64 {
+		return Identity{}, errors.New("identity requires a 64-character hex ID")
+	}
+	for _, c := range id {
+		if (c < '0' || c > '9') && (c < 'A' || c > 'F') {
+			return Identity{}, errors.New("identity ID must be uppercase hex")
+		}
+	}
+	if !validStableText(scope) {
+		return Identity{}, errors.New("identity requires a valid scope")
+	}
+	if kind == Computer || kind == AIService {
+		return Identity{}, errors.New("identity cannot be Computer or AIService")
+	}
+	if _, err := kind.Emitted(); err != nil {
+		return Identity{}, err
+	}
+	if kind.IsResource() {
+		if !validStableText(ownerID) || len(ownerID) != 64 {
+			return Identity{}, errors.New("resource identity requires a valid owning service ID")
+		}
+		for _, c := range ownerID {
+			if (c < '0' || c > '9') && (c < 'A' || c > 'F') {
+				return Identity{}, errors.New("owning service ID must be uppercase hex")
+			}
+		}
+	} else if ownerID != "" {
+		return Identity{}, errors.New("non-resource identity cannot have an owner ID")
+	}
+	return Identity{id: id, scope: scope, kind: kind, ownerID: ownerID}, nil
+}
+

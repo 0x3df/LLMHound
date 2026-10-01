@@ -153,3 +153,54 @@ func TestKindMappingAndNonTraversability(t *testing.T) {
 		t.Fatal("unknown edge accepted")
 	}
 }
+
+func TestRestoreIdentity(t *testing.T) {
+	validID := "7C7642987E9667B2033D2433AD4C3BDA6F2535F50C5B9D093CF6BFE5D248AEE9"
+	validOwnerID := "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+
+	// Valid service identity
+	id, err := graph.RestoreIdentity(validID, "scope-a", graph.OllamaInstance, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if id.ID() != validID || id.Scope() != "scope-a" || id.Kind() != graph.OllamaInstance || id.OwnerID() != "" {
+		t.Fatalf("restored identity mismatch: %+v", id)
+	}
+
+	// Valid resource identity
+	resID, err := graph.RestoreIdentity(validID, "scope-a", graph.AIModel, validOwnerID)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resID.ID() != validID || resID.Scope() != "scope-a" || resID.Kind() != graph.AIModel || resID.OwnerID() != validOwnerID {
+		t.Fatalf("restored resource identity mismatch: %+v", resID)
+	}
+
+	// Rejections
+	for _, tc := range []struct {
+		name    string
+		id      string
+		scope   string
+		kind    graph.Kind
+		ownerID string
+	}{
+		{"lowercase id", "7c7642987e9667b2033d2433ad4c3bda6f2535f50c5b9d093cf6bfe5d248aee9", "scope-a", graph.OllamaInstance, ""},
+		{"short id", "7C7642987E", "scope-a", graph.OllamaInstance, ""},
+		{"non-hex id", "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ", "scope-a", graph.OllamaInstance, ""},
+		{"empty scope", validID, "", graph.OllamaInstance, ""},
+		{"whitespace scope", validID, "  ", graph.OllamaInstance, ""},
+		{"computer kind", validID, "scope-a", graph.Computer, ""},
+		{"umbrella AIService kind", validID, "scope-a", graph.AIService, ""},
+		{"unknown kind", validID, "scope-a", graph.Kind("Invalid"), ""},
+		{"resource missing owner", validID, "scope-a", graph.AIModel, ""},
+		{"resource invalid owner", validID, "scope-a", graph.AIModel, "short"},
+		{"service with owner", validID, "scope-a", graph.OllamaInstance, validOwnerID},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := graph.RestoreIdentity(tc.id, tc.scope, tc.kind, tc.ownerID); err == nil {
+				t.Fatalf("expected error for %s, got nil", tc.name)
+			}
+		})
+	}
+}
+

@@ -53,7 +53,7 @@ func JupyterDefinition() Definition {
 			bodyStr := strings.ToLower(string(body))
 			// Status 200 with JSON version or status
 			if status == http.StatusOK {
-				if strings.Contains(bodyStr, `"version"`) && (strings.Contains(bodyStr, "jupyter") || strings.Contains(headers.Get("Content-Type"), "json")) {
+				if strings.Contains(bodyStr, `"version"`) && strings.Contains(bodyStr, "jupyter") {
 					return true
 				}
 				if strings.Contains(bodyStr, `"kernels"`) && strings.Contains(bodyStr, `"connections"`) {
@@ -65,7 +65,7 @@ func JupyterDefinition() Definition {
 			}
 			// Status 401 / 403
 			if status == http.StatusUnauthorized || status == http.StatusForbidden {
-				if strings.Contains(bodyStr, "jupyter") || strings.Contains(bodyStr, "token") || strings.Contains(bodyStr, "authentication required") {
+				if strings.Contains(bodyStr, "jupyter") {
 					return true
 				}
 			}

@@ -30,6 +30,7 @@ func mockJupyterHandler(t *testing.T) http.HandlerFunc {
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`{
 				"version": "2.14.0",
+				"jupyter_server_version": "2.14.0",
 				"server_version": "2.14.0"
 			}`))
 		case "/api/sessions":
@@ -259,7 +260,7 @@ func TestAuthenticatedJupyterServer(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
-		_, _ = w.Write([]byte(`{"message": "Token or credentials required"}`))
+		_, _ = w.Write([]byte(`{"message": "Jupyter token or credentials required"}`))
 	}))
 	defer server.Close()
 
@@ -330,7 +331,7 @@ func TestPartialAuthenticatedServer(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		if r.URL.Path == "/api" {
 			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`{"version": "1.2.0"}`))
+			_, _ = w.Write([]byte(`{"version": "1.2.0", "jupyter_server_version": "1.2.0"}`))
 			return
 		}
 		w.WriteHeader(http.StatusForbidden)
@@ -513,7 +514,7 @@ func TestWorkspaceTruncation(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api" {
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"version": "2.0.0"}`))
+			_, _ = w.Write([]byte(`{"version": "2.0.0", "jupyter_server_version": "2.0.0"}`))
 			return
 		}
 		if r.URL.Path == "/api/sessions" {
@@ -779,7 +780,7 @@ func TestMalformedJSON(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		if r.URL.Path == "/api" {
 			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`{"version": `)) // Malformed JSON
+			_, _ = w.Write([]byte(`{"version": "x", "jupyter_server_version": `)) // Malformed JSON
 			return
 		}
 		w.WriteHeader(http.StatusOK)
@@ -882,7 +883,7 @@ func TestResponseTooLarge(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		// Send 10KB of padding
-		_, _ = w.Write([]byte(fmt.Sprintf(`{"version": "%s"}`, strings.Repeat("a", 10000))))
+		_, _ = w.Write([]byte(fmt.Sprintf(`{"jupyter_server_version": "1", "version": "%s"}`, strings.Repeat("a", 10000))))
 	}))
 	defer server.Close()
 

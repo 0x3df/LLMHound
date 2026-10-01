@@ -23,7 +23,7 @@ func TestJupyterDefinitionMatch(t *testing.T) {
 			handler: func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusOK)
-				_, _ = w.Write([]byte(`{"version": "2.14.0"}`))
+				_, _ = w.Write([]byte(`{"version": "2.14.0", "jupyter_server_version": "2.14.0"}`))
 			},
 			wantMatch: true,
 		},
@@ -63,6 +63,34 @@ func TestJupyterDefinitionMatch(t *testing.T) {
 			handler: func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Location", "/login?next=%2Ftree")
 				w.WriteHeader(http.StatusFound)
+			},
+			wantMatch: true,
+		},
+		{
+			name: "generic version json is not jupyter",
+			path: "/api",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"version": "1.2"}`))
+			},
+			wantMatch: false,
+		},
+		{
+			name: "generic auth error is not jupyter",
+			path: "/api",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = w.Write([]byte(`{"error": "authentication required: missing token"}`))
+			},
+			wantMatch: false,
+		},
+		{
+			name: "x-jupyter-version header",
+			path: "/api",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("X-Jupyter-Version", "2.14.0")
+				w.WriteHeader(http.StatusForbidden)
 			},
 			wantMatch: true,
 		},

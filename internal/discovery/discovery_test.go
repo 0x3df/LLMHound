@@ -95,6 +95,15 @@ func TestJupyterDefinitionMatch(t *testing.T) {
 			wantMatch: true,
 		},
 		{
+			name: "generic login redirect is not jupyter",
+			path: "/api",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Location", "/login")
+				w.WriteHeader(http.StatusFound)
+			},
+			wantMatch: false,
+		},
+		{
 			name: "non-jupyter generic 404",
 			path: "/api",
 			handler: func(w http.ResponseWriter, r *http.Request) {

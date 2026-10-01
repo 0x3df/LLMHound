@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -71,14 +72,24 @@ func JupyterDefinition() Definition {
 			}
 			// Redirect to login or tree
 			if status == http.StatusFound || status == http.StatusSeeOther || status == http.StatusTemporaryRedirect {
-				loc := strings.ToLower(headers.Get("Location"))
-				if strings.Contains(loc, "/login") || strings.Contains(loc, "/tree") {
+				if IsJupyterLoginRedirect(headers.Get("Location")) {
 					return true
 				}
 			}
 			return false
 		},
 	}
+}
+
+// IsJupyterLoginRedirect reports whether a Location value is a Jupyter-style login
+// redirect: a /login path whose next parameter targets a /tree or /lab page.
+func IsJupyterLoginRedirect(location string) bool {
+	u, err := url.Parse(location)
+	if err != nil || !strings.HasSuffix(strings.TrimRight(u.Path, "/"), "/login") {
+		return false
+	}
+	next := strings.ToLower(u.Query().Get("next"))
+	return strings.Contains(next, "/tree") || strings.Contains(next, "/lab")
 }
 
 // ProbeResult holds the result of probing a target against a fingerprint definition.

@@ -947,8 +947,7 @@ func normalizeTargetURL(raw string) (string, error) {
 
 func isLoginPage(status int, body []byte, redirectURL string) bool {
 	if redirectURL != "" {
-		lowerRedir := strings.ToLower(redirectURL)
-		if strings.Contains(lowerRedir, "/login") || strings.Contains(lowerRedir, "/tree") {
+		if discovery.IsJupyterLoginRedirect(redirectURL) {
 			return true
 		}
 	}

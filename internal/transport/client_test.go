@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -279,4 +280,43 @@ func TestTransport_NormalizedPathsAndEmbedBanned(t *testing.T) {
 	if err := transport.CheckSafety(http.MethodGet, "/api/tags"); err != nil {
 		t.Errorf("unexpected error for /api/tags: %v", err)
 	}
+}
+
+func TestTransport_ConcurrentRequestsKeepTLSAndRedirectsPerRequest(t *testing.T) {
+	mux := func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/hop" {
+			http.Redirect(w, r, "/final", http.StatusFound)
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	tlsSrv := httptest.NewTLSServer(http.HandlerFunc(mux))
+	defer tlsSrv.Close()
+	plainSrv := httptest.NewServer(http.HandlerFunc(mux))
+	defer plainSrv.Close()
+
+	client := transport.NewClient(transport.Config{
+		Bounds:   config.Bounds{MaxResponseBytes: 1024, MaxRedirects: 3},
+		Insecure: true,
+	})
+
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			resp, err := client.Get(context.Background(), tlsSrv.URL+"/final")
+			if err != nil || resp.TLS == nil || len(resp.Redirects) != 0 {
+				t.Errorf("tls request: err=%v resp=%+v", err, resp)
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			resp, err := client.Get(context.Background(), plainSrv.URL+"/hop")
+			if err != nil || resp.TLS != nil || len(resp.Redirects) != 1 {
+				t.Errorf("plain request: err=%v resp=%+v", err, resp)
+			}
+		}()
+	}
+	wg.Wait()
 }

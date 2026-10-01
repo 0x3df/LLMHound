@@ -15,6 +15,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"path"
 	"strings"
@@ -89,15 +90,31 @@ type Response struct {
 
 // Client wraps an HTTP client with collection safety rules.
 type Client struct {
-	httpClient       *http.Client
-	bounds           config.Bounds
-	insecure         bool
-	userAgent        string
-	authorizedHosts  map[string]bool
-	lastTLSInfo      *TLSInfo
-	tlsMu            sync.Mutex
-	redirectsMu      sync.Mutex
-	currentRedirects []RedirectInfo
+	httpClient      *http.Client
+	bounds          config.Bounds
+	insecure        bool
+	userAgent       string
+	authorizedHosts map[string]bool
+}
+
+type captureKey struct{}
+
+type capture struct {
+	mu        sync.Mutex
+	tls       *TLSInfo
+	redirects []RedirectInfo
+}
+
+func (cp *capture) setTLS(info *TLSInfo) {
+	cp.mu.Lock()
+	defer cp.mu.Unlock()
+	cp.tls = info
+}
+
+func (cp *capture) addRedirect(rec RedirectInfo) {
+	cp.mu.Lock()
+	defer cp.mu.Unlock()
+	cp.redirects = append(cp.redirects, rec)
 }
 
 // Config defines options for creating a transport Client.
@@ -148,47 +165,8 @@ func NewClient(cfg Config) *Client {
 	tlsConfig := &tls.Config{
 		InsecureSkipVerify: true, // Verification handled in VerifyConnection callback to capture metadata
 		VerifyConnection: func(cs tls.ConnectionState) error {
-			info := &TLSInfo{
-				InsecureOverride: cfg.Insecure,
-			}
-			if len(cs.PeerCertificates) > 0 {
-				leaf := cs.PeerCertificates[0]
-				sum := sha256.Sum256(leaf.Raw)
-				info.CertFingerprint = strings.ToUpper(hex.EncodeToString(sum[:]))
-				info.Issuer = leaf.Issuer.String()
-				info.Subject = leaf.Subject.String()
-				info.SANs = append([]string(nil), leaf.DNSNames...)
-				for _, ip := range leaf.IPAddresses {
-					info.SANs = append(info.SANs, ip.String())
-				}
-				info.ValidFrom = leaf.NotBefore.UTC().Format(time.RFC3339)
-				info.ValidTo = leaf.NotAfter.UTC().Format(time.RFC3339)
-				info.NegotiatedVersion = formatTLSVersion(cs.Version)
-
-				// Run standard certificate verification
-				opts := x509.VerifyOptions{
-					DNSName:       cs.ServerName,
-					Intermediates: x509.NewCertPool(),
-				}
-				for _, cert := range cs.PeerCertificates[1:] {
-					opts.Intermediates.AddCert(cert)
-				}
-				if _, err := leaf.Verify(opts); err != nil {
-					if cfg.Insecure {
-						info.VerificationResult = "unverified_override"
-						info.VerificationReason = err.Error()
-						c.setLastTLS(info)
-						return nil // Explicit insecure override permitted
-					}
-					info.VerificationResult = "failed"
-					info.VerificationReason = err.Error()
-					c.setLastTLS(info)
-					return fmt.Errorf("TLS certificate verification failed: %w", err)
-				}
-				info.VerificationResult = "verified"
-			}
-			c.setLastTLS(info)
-			return nil
+			_, err := inspectTLS(cs, cfg.Insecure)
+			return err
 		},
 	}
 
@@ -200,9 +178,39 @@ func NewClient(cfg Config) *Client {
 		}).DialContext
 	}
 
+	dialTLS := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		raw, err := dialContext(ctx, network, addr)
+		if err != nil {
+			return nil, err
+		}
+		host, _, splitErr := net.SplitHostPort(addr)
+		if splitErr != nil {
+			host = addr
+		}
+		cp, _ := ctx.Value(captureKey{}).(*capture)
+		conf := tlsConfig.Clone()
+		conf.ServerName = host
+		conf.VerifyConnection = func(cs tls.ConnectionState) error {
+			info, verr := inspectTLS(cs, cfg.Insecure)
+			if cp != nil {
+				cp.setTLS(info)
+			}
+			return verr
+		}
+		hsCtx, cancel := context.WithTimeout(ctx, bounds.ConnectTimeout)
+		defer cancel()
+		conn := tls.Client(raw, conf)
+		if err := conn.HandshakeContext(hsCtx); err != nil {
+			_ = raw.Close()
+			return nil, err
+		}
+		return conn, nil
+	}
+
 	transport := &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
 		DialContext:           dialContext,
+		DialTLSContext:        dialTLS,
 		TLSClientConfig:       tlsConfig,
 		ResponseHeaderTimeout: bounds.ResponseTimeout,
 		MaxIdleConns:          100,
@@ -215,8 +223,10 @@ func NewClient(cfg Config) *Client {
 		Transport: transport,
 		Timeout:   bounds.ResponseTimeout,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			c.redirectsMu.Lock()
-			defer c.redirectsMu.Unlock()
+			cp, _ := req.Context().Value(captureKey{}).(*capture)
+			if cp == nil {
+				cp = &capture{}
+			}
 
 			fromURL := ""
 			status := 0
@@ -237,7 +247,7 @@ func NewClient(cfg Config) *Client {
 					Authorized: false,
 					Reason:     "exceeded max_redirects limit",
 				}
-				c.currentRedirects = append(c.currentRedirects, rec)
+				cp.addRedirect(rec)
 				return ErrMaxRedirectsExceeded
 			}
 
@@ -252,7 +262,7 @@ func NewClient(cfg Config) *Client {
 					Authorized: false,
 					Reason:     "redirect violates read-only policy",
 				}
-				c.currentRedirects = append(c.currentRedirects, rec)
+				cp.addRedirect(rec)
 				return err
 			}
 
@@ -268,7 +278,7 @@ func NewClient(cfg Config) *Client {
 						Authorized: false,
 						Reason:     "redirect destination not in authorized targets",
 					}
-					c.currentRedirects = append(c.currentRedirects, rec)
+					cp.addRedirect(rec)
 					return ErrRedirectNotAuthorized
 				}
 			}
@@ -279,7 +289,7 @@ func NewClient(cfg Config) *Client {
 				StatusCode: status,
 				Authorized: true,
 			}
-			c.currentRedirects = append(c.currentRedirects, rec)
+			cp.addRedirect(rec)
 			return nil
 		},
 	}
@@ -287,26 +297,42 @@ func NewClient(cfg Config) *Client {
 	return c
 }
 
-func (c *Client) setLastTLS(info *TLSInfo) {
-	c.tlsMu.Lock()
-	defer c.tlsMu.Unlock()
-	c.lastTLSInfo = info
-}
+func inspectTLS(cs tls.ConnectionState, insecure bool) (*TLSInfo, error) {
+	info := &TLSInfo{InsecureOverride: insecure}
+	if len(cs.PeerCertificates) == 0 {
+		return info, nil
+	}
+	leaf := cs.PeerCertificates[0]
+	sum := sha256.Sum256(leaf.Raw)
+	info.CertFingerprint = strings.ToUpper(hex.EncodeToString(sum[:]))
+	info.Issuer = leaf.Issuer.String()
+	info.Subject = leaf.Subject.String()
+	info.SANs = append([]string(nil), leaf.DNSNames...)
+	for _, ip := range leaf.IPAddresses {
+		info.SANs = append(info.SANs, ip.String())
+	}
+	info.ValidFrom = leaf.NotBefore.UTC().Format(time.RFC3339)
+	info.ValidTo = leaf.NotAfter.UTC().Format(time.RFC3339)
+	info.NegotiatedVersion = formatTLSVersion(cs.Version)
 
-func (c *Client) getAndClearTLS() *TLSInfo {
-	c.tlsMu.Lock()
-	defer c.tlsMu.Unlock()
-	t := c.lastTLSInfo
-	c.lastTLSInfo = nil
-	return t
-}
-
-func (c *Client) clearAndGetRedirects() []RedirectInfo {
-	c.redirectsMu.Lock()
-	defer c.redirectsMu.Unlock()
-	reds := append([]RedirectInfo(nil), c.currentRedirects...)
-	c.currentRedirects = nil
-	return reds
+	opts := x509.VerifyOptions{
+		DNSName:       cs.ServerName,
+		Intermediates: x509.NewCertPool(),
+	}
+	for _, cert := range cs.PeerCertificates[1:] {
+		opts.Intermediates.AddCert(cert)
+	}
+	if _, err := leaf.Verify(opts); err != nil {
+		info.VerificationReason = err.Error()
+		if insecure {
+			info.VerificationResult = "unverified_override"
+			return info, nil
+		}
+		info.VerificationResult = "failed"
+		return info, fmt.Errorf("TLS certificate verification failed: %w", err)
+	}
+	info.VerificationResult = "verified"
+	return info, nil
 }
 
 // CheckSafety verifies that the request method and path obey strict read-only collection policy.
@@ -335,12 +361,21 @@ func (c *Client) Do(req *http.Request) (*Response, error) {
 		req.Header.Set("User-Agent", c.userAgent)
 	}
 
-	c.clearAndGetRedirects()
-	c.getAndClearTLS()
-
-	resp, err := c.httpClient.Do(req)
-	tlsInfo := c.getAndClearTLS()
-	redirects := c.clearAndGetRedirects()
+	cp := &capture{}
+	ctx := context.WithValue(req.Context(), captureKey{}, cp)
+	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
+		GotConn: func(gc httptrace.GotConnInfo) {
+			if tc, ok := gc.Conn.(*tls.Conn); ok && gc.Reused {
+				if info, _ := inspectTLS(tc.ConnectionState(), c.insecure); info != nil {
+					cp.setTLS(info)
+				}
+			}
+		},
+	})
+	resp, err := c.httpClient.Do(req.WithContext(ctx))
+	cp.mu.Lock()
+	tlsInfo, redirects := cp.tls, append([]RedirectInfo(nil), cp.redirects...)
+	cp.mu.Unlock()
 
 	if err != nil {
 		// Include captured TLS info in partial error metadata if available

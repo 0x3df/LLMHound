@@ -1025,3 +1025,43 @@ func TestOllama_PSBoundedByMaxItems(t *testing.T) {
 		t.Errorf("running models must be bounded by max_items, got %d", running)
 	}
 }
+
+func TestOllama_ShowTruncatedBodyReportedAsTruncation(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/version":
+			_, _ = w.Write([]byte(`{"version":"0.3.12"}`))
+		case "/api/tags":
+			_, _ = w.Write([]byte(`{"models":[{"name":"a"}]}`))
+		case "/api/ps":
+			_, _ = w.Write([]byte(`{"models":[]}`))
+		case "/api/show":
+			_, _ = w.Write([]byte(`{"license":"MIT","model_info":"` + strings.Repeat("x", 4096) + `"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ts.Close()
+
+	cfg := config.Defaults()
+	cfg.Scope = "corp-scope"
+	cfg.VantageKey = "vantage-01"
+	cfg.OptIns.Prompts = true
+	cfg.Bounds.MaxResponseBytes = 256
+
+	vantage := helperVantage(t, cfg.Scope, cfg.VantageKey)
+	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	res, err := ollama.New(cfg).Collect(context.Background(), ts.URL, vantage, "scan-001", now, nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var reason string
+	for _, r := range res.Evidence {
+		if r.CheckID == ollama.CheckShow {
+			reason = r.Reason
+		}
+	}
+	if !strings.Contains(reason, "truncated") {
+		t.Errorf("expected show outcome to report truncation, got %q", reason)
+	}
+}

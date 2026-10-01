@@ -558,7 +558,9 @@ func (c *Collector) Collect(
 					continue
 				}
 				var sp ShowProvenance
-				if resp.StatusCode == http.StatusOK && json.Unmarshal(resp.Body, &sp) == nil {
+				if resp.StatusCode == http.StatusOK && resp.Truncated {
+					showErrors = append(showErrors, fmt.Sprintf("%s: response truncated at max_response_bytes limit", m.Name))
+				} else if resp.StatusCode == http.StatusOK && json.Unmarshal(resp.Body, &sp) == nil {
 					sp = redactProvenance(sp)
 					provenance[m.Name] = sp
 					showProvenance[m.Name] = map[string]any{

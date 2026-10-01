@@ -20,16 +20,17 @@ targets → network scan → OpenGraph payload + evidence sidecar → AI service
 ```
 
 > [!NOTE]
-> **Status: M1 CLI/input skeleton, graph primitives, and emission libraries.**
+> **Status: M1 CLI/input skeleton, graph primitives, emission libraries, M2a checkpoint journal, and Ollama collector.**
 > Help/version, strict YAML configuration, flag overrides, and offline bounded
 > target preparation work. Graph-identity, Computer-correlation, OpenGraph
-> payload emission, and evidence-sidecar primitives and `extension/schema.json`
-> exist as libraries. No collectors, DNS correlation, or upload are wired into
-> the CLI, and it writes no scan artifacts; `scan`, `plan`, and `upload` return nonzero not-implemented
+> payload emission, evidence-sidecar primitives, `extension/schema.json`, checkpoint
+> journal streaming/replay, and the Ollama collector exist as libraries.
+> No collectors, DNS correlation, or upload are wired into the CLI, and it writes
+> no scan artifacts; `scan`, `plan`, and `upload` return nonzero not-implemented
 > errors. The remaining sections describe the accepted design and roadmap, not
-> working collection.
-> See [configuration](docs/reference/configuration.md) for implemented behavior
-> and the [design](docs/plans/2026-09-29-llmhound-design.md) for future contracts.
+> working CLI collection.
+> See [configuration](docs/reference/configuration.md) and [Ollama collector](docs/reference/ollama-collector.md)
+> for implemented behavior and the [design](docs/plans/2026-09-29-llmhound-design.md) for future contracts.
 > The reproducible [M0 lab](lab/README.md) records CE spike results, not full
 > collector/adapter support.
 

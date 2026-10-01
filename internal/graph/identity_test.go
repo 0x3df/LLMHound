@@ -203,4 +203,3 @@ func TestRestoreIdentity(t *testing.T) {
 		})
 	}
 }
-

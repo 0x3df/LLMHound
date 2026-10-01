@@ -128,4 +128,3 @@ func RestoreIdentity(id, scope string, kind Kind, ownerID string) (Identity, err
 	}
 	return Identity{id: id, scope: scope, kind: kind, ownerID: ownerID}, nil
 }
-

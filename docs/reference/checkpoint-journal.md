@@ -33,7 +33,7 @@ type Journal interface {
 - **`RecordResult(Result)`**: records composite collection results for a target and surface,
   including nodes, edges, sidecar evidence records, coverage outcome, and optional bounded details.
   Automatically records target progress according to the observation's coverage.
-- **`RecordTarget(TargetRecord)`**: records target lifecycle events (`started`, `completed`, `failed`, `skipped`).
+- **`RecordTarget(TargetRecord)`**: records target lifecycle events (`started`, `completed`, `partial`, `failed`, `skipped`).
 - **`RecordNode(emitter.NodeItem)`**: records an individual OpenGraph node with flat validated properties.
 - **`RecordEdge(graph.Edge)`**: records an individual topology or access edge.
 - **`RecordEvidence(evidence.Record)`**: records an individual `.evidence.jsonl` sidecar entry.
@@ -89,5 +89,12 @@ rather than refreshing stale evidence as newly observed:
   validating kind transitions and non-traversability rules.
 - **Native Computer Separation**: Replayed edges touching native AD `Computer` nodes preserve
   `TouchesNative() == true` and empty `SourceKind()`, ensuring safe segregation between owned and linking payloads.
+- **Completion Semantics**: A surface counts as completed only when its record has status `completed`
+  and a valid observation with `complete` coverage whose surface matches the record. `partial`/`truncated`
+  coverage, a nil observation, or a surface-less record never count, and an explicit status never overrides
+  observed coverage. `State.IsCompleted(target, surface)` reports this per surface; `State.CompletedTargets()`
+  means only "every recorded surface is completed". The journal records what happened and cannot attest
+  surfaces that were never recorded, so the M3 resume command must derive the expected surface set from
+  config/targets and check `IsCompleted` per surface instead of skipping targets via `CompletedTargets()`.
 - **Crash Recovery**: If a scan process terminates abruptly mid-write, the incomplete trailing line at EOF
   is detected as `*TruncatedEntryError`. Replay preserves all successfully committed records prior to the crash.

@@ -1119,4 +1119,3 @@ func TestClosedJournal(t *testing.T) {
 		t.Fatalf("expected ErrClosedJournal, got: %v", err)
 	}
 }
-

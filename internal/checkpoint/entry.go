@@ -598,3 +598,17 @@ func sanitizeEvidence(ev evidence.Record, maxLen int) evidence.Record {
 	ev.Details = SanitizeMap(ev.Details, maxLen)
 	return ev
 }
+
+// validateObservation checks the target record's observation is fully valid for vantage and belongs to the record's surface.
+func (r TargetRecord) validateObservation(vantage graph.Identity) error {
+	if r.Observation == nil {
+		return nil
+	}
+	if _, err := fromObservationRecord(*r.Observation, vantage); err != nil {
+		return fmt.Errorf("target observation: %w", err)
+	}
+	if r.Observation.Surface != r.Surface {
+		return errors.New("target observation surface does not match target surface")
+	}
+	return nil
+}

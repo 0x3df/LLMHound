@@ -365,3 +365,46 @@ func TestUnrecordedSurfaceIsNotAttestable(t *testing.T) {
 		t.Fatal("per-surface completion must reflect only recorded coverage")
 	}
 }
+
+func TestTargetObservationContentsValidated(t *testing.T) {
+	var buf bytes.Buffer
+	header := sampleHeader()
+	j, _ := checkpoint.NewWriter(&buf, header)
+	vantage := sampleVantage(t, header.DeploymentScope, header.VantageKey)
+	obs := sampleObservation(t, vantage, "ev-1", semanticsTime)
+	good := checkpoint.ObservationRecord{
+		SchemaVersion: "1", ScanID: obs.ScanID, CollectorVersion: obs.CollectorVersion,
+		EvidenceID: obs.EvidenceID, Source: obs.Source, Surface: "ollama",
+		ObservedAt: semanticsTime.Format(time.RFC3339), VantageKey: vantage.ID(), Coverage: string(graph.CoverageComplete),
+	}
+	rec := func(o checkpoint.ObservationRecord) checkpoint.TargetRecord {
+		return checkpoint.TargetRecord{Target: "h", Surface: "ollama", Status: checkpoint.TargetStatusCompleted, Observation: &o}
+	}
+
+	wrongSurface, noScan, badSchema := good, good, good
+	wrongSurface.Surface = "mcp"
+	noScan.ScanID = ""
+	badSchema.SchemaVersion = "9"
+	for name, o := range map[string]checkpoint.ObservationRecord{"surface": wrongSurface, "scan_id": noScan, "schema": badSchema} {
+		if err := j.RecordTarget(rec(o)); err == nil {
+			t.Fatalf("%s: expected write rejection", name)
+		}
+	}
+
+	forged := `{"entry_type":"target","target":{"target":"h","surface":"ollama","status":"completed","observation":{"coverage":"complete","surface":"mcp"}}}` + "\n"
+	hdr := bytes.Split(buf.Bytes(), []byte("\n"))[0]
+	if _, err := checkpoint.Replay(strings.NewReader(string(hdr) + "\n" + forged)); err == nil {
+		t.Fatal("replay must reject hollow target observation")
+	}
+
+	if err := j.RecordTarget(rec(good)); err != nil {
+		t.Fatalf("valid target record rejected: %v", err)
+	}
+	state, err := checkpoint.Replay(&buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !state.IsCompleted("h", "ollama") {
+		t.Fatal("valid completed record must count")
+	}
+}

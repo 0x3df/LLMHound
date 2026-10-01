@@ -164,8 +164,8 @@ func (j *WriterJournal) RecordTarget(target TargetRecord) error {
 		return fmt.Errorf("invalid target record: %w", err)
 	}
 	if target.Observation != nil {
-		if target.Observation.VantageKey != j.vantage.ID() {
-			return errors.New("target observation vantage does not match journal vantage")
+		if err := target.validateObservation(j.vantage); err != nil {
+			return fmt.Errorf("invalid target record: %w", err)
 		}
 		obs := *target.Observation
 		obs.Source = boundString(SanitizeURL(obs.Source), j.opts.maxStringSize)

@@ -309,6 +309,9 @@ func ReplayStream(r io.Reader, handler ReplayHandler, opts ...Option) error {
 			if err := entry.Target.Validate(); err != nil {
 				return fmt.Errorf("line %d: invalid target record: %w", lineNum, err)
 			}
+			if err := entry.Target.validateObservation(vantage); err != nil {
+				return fmt.Errorf("line %d: invalid target record: %w", lineNum, err)
+			}
 			if handler.OnTarget != nil {
 				if err := handler.OnTarget(*entry.Target); err != nil {
 					return fmt.Errorf("handle target: %w", err)

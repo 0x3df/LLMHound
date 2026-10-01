@@ -70,6 +70,10 @@ func (s *State) Targets() map[string]TargetRecord {
 
 // CompletedTargets lists targets that have at least one recorded surface and
 // whose every recorded surface is fully completed. Surface-less records never count.
+// The journal records what happened and cannot attest surfaces that were never
+// recorded, so this is not proof a target was fully scanned: a resume must derive
+// the expected surfaces from config/targets and check IsCompleted per surface
+// rather than skip targets based on this list.
 func (s *State) CompletedTargets() []string {
 	complete := make(map[string]bool)
 	for _, tr := range s.targets {
@@ -90,6 +94,8 @@ func (s *State) CompletedTargets() []string {
 }
 
 // IsCompleted reports whether the given surface of target was recorded as fully covered.
+// A surface with no record is never completed; the journal cannot attest surfaces it
+// never saw, so resume must ask this per expected surface.
 func (s *State) IsCompleted(target, surface string) bool {
 	if surface == "" {
 		return false

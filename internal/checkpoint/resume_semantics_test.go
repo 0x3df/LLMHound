@@ -339,3 +339,29 @@ func TestReplayDerivesStatusFromCoverageNotClaim(t *testing.T) {
 		t.Fatalf("status = %q, want partial", got)
 	}
 }
+
+func TestUnrecordedSurfaceIsNotAttestable(t *testing.T) {
+	var buf bytes.Buffer
+	header := sampleHeader()
+	j, _ := checkpoint.NewWriter(&buf, header)
+	obs := sampleObservation(t, sampleVantage(t, header.DeploymentScope, header.VantageKey), "ev-1", semanticsTime)
+	recordSurface(t, j, obs, "h", "mcp", graph.CoverageComplete)
+
+	state, err := checkpoint.Replay(&buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	planned := []string{"mcp", "ollama"}
+	allDone := true
+	for _, surface := range planned {
+		if !state.IsCompleted("h", surface) {
+			allDone = false
+		}
+	}
+	if allDone {
+		t.Fatal("target with an unrecorded planned surface must not be attestable as fully scanned")
+	}
+	if !state.IsCompleted("h", "mcp") || state.IsCompleted("h", "ollama") {
+		t.Fatal("per-surface completion must reflect only recorded coverage")
+	}
+}

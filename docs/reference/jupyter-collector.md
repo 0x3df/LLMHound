@@ -11,6 +11,17 @@ of Jupyter notebook and server instances (Jupyter Server, Jupyter Notebook, Jupy
 It produces structured OpenGraph nodes, edges, sidecar evidence records, and
 journal entries without performing code execution, mutations, or downloading file contents.
 
+## Discovery Gate
+
+Before any check runs, the collector calls `discovery.Probe` with the shared
+`discovery.JupyterDefinition()` fingerprint (`internal/discovery/fingerprint.go`).
+Only Jupyter-specific evidence matches: a `jupyter` Server header or
+`X-Jupyter-Version` header, a Jupyter-shaped 200 body, a 401/403 body naming
+Jupyter, or a `/login?next=` redirect targeting `/tree` or `/lab`. Generic JSON
+version bodies, generic auth errors, bare `Server: tornado`, and generic `/login`
+redirects do not match. An unmatched target yields a `failed` result with the reason
+(`target not identified as jupyter` or `target unreachable`) and emits no graph nodes.
+
 ## Allowlisted Operations
 
 The collector strictly executes only three allowlisted read-only checks:
@@ -33,7 +44,11 @@ The collector strictly executes only three allowlisted read-only checks:
    responses and HTTP 200/302 HTML login pages are recognized as honest access denials (`denied`),
    not mistaken for successful API enumeration.
 5. **Bounded Listings**: Workspace file enumeration is bounded by `config.Bounds.MaxItems`
-   (default 10,000). When items exceed the limit, enumeration stops and reports `CoverageTruncated`.
+   (default 10,000), as are sessions. When items exceed the limit, enumeration stops and
+   reports `CoverageTruncated`.
+   Only the root directory is listed; subdirectories are not recursed, and when any are
+   skipped coverage is `partial` with a "root listing only" reason. Coverage is `complete`
+   only when every check succeeds and nothing was truncated or skipped.
 6. **Redaction**: URL credentials, query strings, and sensitive token/password substrings in paths
    or session metadata are stripped or redacted with `[REDACTED]`.
 

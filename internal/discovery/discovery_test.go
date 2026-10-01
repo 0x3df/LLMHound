@@ -12,10 +12,10 @@ import (
 
 func TestJupyterDefinitionMatch(t *testing.T) {
 	tests := []struct {
-		name       string
-		handler    http.HandlerFunc
-		path       string
-		wantMatch  bool
+		name      string
+		handler   http.HandlerFunc
+		path      string
+		wantMatch bool
 	}{
 		{
 			name: "api version json response",

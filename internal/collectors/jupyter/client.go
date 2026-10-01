@@ -183,4 +183,3 @@ func makeCheckRedirect(maxRedirects int) func(req *http.Request, via []*http.Req
 		return nil
 	}
 }
-

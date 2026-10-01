@@ -1,6 +1,5 @@
 package jupyter
 
-
 // apiVersionResponse parses the response from GET /api.
 type apiVersionResponse struct {
 	Version              string `json:"version"`

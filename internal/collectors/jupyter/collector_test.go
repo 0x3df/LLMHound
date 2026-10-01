@@ -1036,7 +1036,6 @@ func TestEndToEndTargetDiscoveryAndEmission(t *testing.T) {
 	}
 }
 
-
 func TestNonJupyterServerYieldsNoGraph(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Server", "TornadoServer/6.3.3")

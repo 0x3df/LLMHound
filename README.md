@@ -94,9 +94,10 @@ Ollama. Resume and CE upload remain later milestones.
    deduplicated (`llmhound targets` stays offline).
 2. **Discovery.** Data-driven HTTP path fingerprints (`internal/discovery`)
    type services on known default ports; definitions are embedded and
-   overridable via `--discovery-file`. Jupyter gates collection on a probe
-   match; Ollama/MCP collectors record honest failed/partial coverage when
-   endpoints are unreachable, denied, or non-matching.
+   overridable via `--discovery-file`. Scan probes each configured surface
+   once and collects only on a match; unreachable or unmatched surfaces are
+   journaled as failed coverage, and a cancelled scan stops instead of
+   recording fabricated coverage.
 3. **Enumeration.** A read-only collector per surface. Each one records how
    far it got as a coverage outcome: `complete`, `partial`, `failed`, or
    `truncated` (stopped at a configured page or size bound). Separately, each

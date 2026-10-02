@@ -110,7 +110,9 @@ sidecar is emitted.
   `<prefix>.journal.jsonl`, `<prefix>.json` (and a linking payload when native
   Computer correlation applies), and `<prefix>.evidence.jsonl`.
   Flags: `--output-dir`, `--prefix`, `--discovery-file` (optional JSON fingerprint
-  port/path overrides that inherit builtin matchers).
+  port/path overrides that inherit builtin matchers). Only surfaces present in
+  the active definitions are scanned, so `plan` and `scan` agree. See
+  [m2a-integration.md](m2a-integration.md) for probe and coverage behavior.
 
 ### Bounds
 

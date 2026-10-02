@@ -333,4 +333,3 @@ func LoadDefinitionsFile(path string) ([]Definition, error) {
 	}
 	return LoadDefinitions(data)
 }
-

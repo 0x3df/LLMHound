@@ -102,10 +102,10 @@ func newRootCommand() *cobra.Command {
 		},
 	})
 	root.AddCommand(&cobra.Command{
-		Use:   "plan",
-		Short: "Print planned targets × checks offline (no traffic)",
-		Long:  "Prints the target hosts and allowlisted metadata checks planned for each\nsupported surface. No network traffic or DNS queries occur.",
-		Args:  cobra.NoArgs,
+		Use:     "plan",
+		Short:   "Print planned targets × checks offline (no traffic)",
+		Long:    "Prints the target hosts and allowlisted metadata checks planned for each\nsupported surface. No network traffic or DNS queries occur.",
+		Args:    cobra.NoArgs,
 		PreRunE: prepare,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			s, err := scanner.New(effectiveConfig, scanner.WithCollectorVersion(version))
@@ -135,10 +135,10 @@ func newRootCommand() *cobra.Command {
 	var discoveryFile string
 
 	scanCmd := &cobra.Command{
-		Use:   "scan",
-		Short: "Remotely enumerate AI infrastructure across configured targets",
-		Long:  "Discovers and enumerates AI services (Jupyter, MCP, Ollama) on prepared\ntargets, writing through a checkpoint journal and emitting OpenGraph JSON\nand evidence sidecar files.",
-		Args:  cobra.NoArgs,
+		Use:     "scan",
+		Short:   "Remotely enumerate AI infrastructure across configured targets",
+		Long:    "Discovers and enumerates AI services (Jupyter, MCP, Ollama) on prepared\ntargets, writing through a checkpoint journal and emitting OpenGraph JSON\nand evidence sidecar files.",
+		Args:    cobra.NoArgs,
 		PreRunE: prepare,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			var scanOpts []scanner.Option

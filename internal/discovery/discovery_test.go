@@ -418,7 +418,6 @@ func TestProbeHostAndLoadDefinitions(t *testing.T) {
 	}
 }
 
-
 func TestProbeReturnsContextErrorOnCancellation(t *testing.T) {
 	srv := httptest.NewServer(http.NotFoundHandler())
 	defer srv.Close()

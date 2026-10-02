@@ -20,27 +20,25 @@ targets → network scan → OpenGraph payload + evidence sidecar → AI service
 ```
 
 > [!NOTE]
-> **Status: M1 CLI/input skeleton, graph primitives, emission libraries, M2a checkpoint journal, and Ollama collector.**
-> Help/version, strict YAML configuration, flag overrides, and offline bounded
-> target preparation work. Graph-identity, Computer-correlation, OpenGraph
-> payload emission, evidence-sidecar primitives, `extension/schema.json`, checkpoint
-> journal streaming/replay, and the Ollama collector exist as libraries.
-> No collectors, DNS correlation, or upload are wired into the CLI, and it writes
-> no scan artifacts; `scan`, `plan`, and `upload` return nonzero not-implemented
-> errors. The remaining sections describe the accepted design and roadmap, not
-> working CLI collection.
-> See [configuration](docs/reference/configuration.md) and [Ollama collector](docs/reference/ollama-collector.md)
-> for implemented behavior and the [design](docs/plans/2026-09-29-llmhound-design.md) for future contracts.
-> The reproducible [M0 lab](lab/README.md) records CE spike results, not full
-> collector/adapter support.
+> **Status: M2a vertical slice wired into the CLI.** Offline `targets` and
+> `plan`, plus `scan` for Jupyter, MCP, and Ollama, write OpenGraph payloads,
+> evidence sidecars, and checkpoint journals through the shared discovery,
+> collector, checkpoint, graph, and emitter contracts. Computer correlation via
+> mapping file / AD-suffix matching is exercised in scan integration tests;
+> CE API lookup, resume, and `upload` remain M3. Sensitive content defaults stay
+> off (metadata-only / read-only). See [configuration](docs/reference/configuration.md),
+> [collector capabilities](docs/reference/collector-capabilities.md), and the
+> [M2a integration note](docs/reference/m2a-integration.md) for live vs unit
+> coverage. The [design](docs/plans/2026-09-29-llmhound-design.md) covers the
+> full roadmap; the [M0 lab](lab/README.md) records CE spike results.
 
 ## Contents
 
 - [What it finds](#what-it-finds)
 - [How it works](#how-it-works)
 - [BloodHound integration](#bloodhound-integration)
-- [Quick start (offline M1)](#quick-start-offline-m1)
-- [Collection workflow (planned)](#collection-workflow-planned)
+- [Quick start](#quick-start)
+- [Collection workflow](#collection-workflow)
 - [Operational model](#operational-model)
 - [Responsible use](#responsible-use)
 - [Roadmap](#roadmap)
@@ -48,10 +46,12 @@ targets → network scan → OpenGraph payload + evidence sidecar → AI service
 
 ## What it finds
 
-**Planned; no collectors are implemented in the CLI yet.** v1 collection is
-**anonymous, bounded, and read-only**: LLMHound sends no credentials to scanned services and checks only allowlisted metadata operations.
-Sensitive existing resource content is collected only with explicit opt-in,
-size limits, and redaction. The [collector capability matrix](docs/reference/collector-capabilities.md)
+**M2a surfaces (Jupyter, MCP, Ollama) are implemented in `scan`.** Remaining
+rows are roadmap. v1 collection is **anonymous, bounded, and read-only**:
+LLMHound sends no credentials to scanned services and checks only allowlisted
+metadata operations. Sensitive existing resource content is collected only with
+explicit opt-in, size limits, and redaction. The
+[collector capability matrix](docs/reference/collector-capabilities.md)
 defines each surface's checks and evidence contract; endpoint availability
 varies by product, version, and deployment, so collection is not guaranteed.
 
@@ -80,33 +80,37 @@ applicable allowlisted version checks and report unknown honestly; product
 versions stay distinct from protocol, API, and model versions. Advertised
 references and model provenance retain their sources, not assumed verification.
 
-Collection is network-only; host-local scanning is out of scope. The M1 CLI
-reads only operator-supplied configuration and target/exclusion input files,
-not target-service configs, environment variables, or keychains.
+Collection is network-only; host-local scanning is out of scope. The CLI
+reads only operator-supplied configuration, target/exclusion input files, and
+optional discovery fingerprint overrides — not target-service configs,
+environment variables, or keychains.
 
 ## How it works
 
-**Planned pipeline:** only offline target-input preparation is wired into the CLI today.
+**M2a pipeline (targets → plan/scan → payload):** wired for Jupyter, MCP, and
+Ollama. Resume and CE upload remain later milestones.
 
 1. **Targets.** CIDR ranges and/or a targets file of IPs and FQDNs,
-   deduplicated.
-2. **Discovery.** Bounded-concurrency TCP probes against known AI-service
-   ports, then HTTP path fingerprinting to confirm what each service is.
-   Fingerprints are data-driven definitions you can extend.
+   deduplicated (`llmhound targets` stays offline).
+2. **Discovery.** Data-driven HTTP path fingerprints (`internal/discovery`)
+   type services on known default ports; definitions are embedded and
+   overridable via `--discovery-file`. Scan probes each configured surface
+   once and collects only on a match; unreachable or unmatched surfaces are
+   journaled as failed coverage, and a cancelled scan stops instead of
+   recording fabricated coverage.
 3. **Enumeration.** A read-only collector per surface. Each one records how
    far it got as a coverage outcome: `complete`, `partial`, `failed`, or
    `truncated` (stopped at a configured page or size bound). Separately, each
    check records `success`, `denied`, `unsupported`, `failed`, or `skipped`,
    with a reason. `unsupported` requires evidence; HTTP 404 alone is ambiguous.
 4. **Correlation.** Each target is matched to an existing AD `Computer`
-   (mapping file, configured AD domain suffixes, or a CE API lookup). An
+   (mapping file or configured AD domain suffixes; CE API lookup is M3). An
    unmatched target becomes a `NetworkEndpoint` node.
-5. **Emission.** One OpenGraph payload (JSON, or a ZIP stream for large
-   scans) plus an `.evidence.jsonl` sidecar with per-check results. Deterministic IDs include tenant/deployment scope; service IDs
-   include concrete kind and canonical scheme/host/port/base path. Rescans
-   retain identity within that scope.
+5. **Emission.** One OpenGraph payload plus an `.evidence.jsonl` sidecar and
+   a checkpoint journal. Deterministic IDs include tenant/deployment scope;
+   service IDs include concrete kind and canonical scheme/host/port/base path.
 6. **Upload.** Register the extension schema, upload the payload, and import
-   saved queries through the BloodHound CE API. Or skip this step and let
+   saved queries through the BloodHound CE API (M3). Or skip this step and let
    your existing ingest pipeline pick up the file.
 
 ## BloodHound integration
@@ -144,7 +148,7 @@ observation time; one successful check does not establish service-wide access.
 The full node and edge model, including identity rules and coverage
 properties, is in [`docs/reference/graph-model.md`](docs/reference/graph-model.md).
 
-## Quick start (offline M1)
+## Quick start
 
 Requires Go 1.27 or newer (tested with 1.27.1):
 
@@ -156,44 +160,51 @@ CGO_ENABLED=0 go build -o llmhound ./cmd/llmhound
 # 192.0.2.3
 # ai.example.test
 
+# Offline targets × checks inventory (no traffic)
+./llmhound plan --config llmhound.example.yaml
+
+# Scan prepared targets (writes journal + OpenGraph + evidence sidecar)
+./llmhound scan --config llmhound.example.yaml --output-dir ./out --prefix lab
+
 go test -race ./...
 go vet ./...
 ```
 
 `targets` validates required deployment scope/vantage and bounds, expands
 bounded IP/FQDN/CIDR inputs, deduplicates, removes exact-name/IP/CIDR exclusions,
-and prints sorted targets without DNS or target traffic. It does **not** list
-checks or produce a scan payload. Copy `llmhound.example.yaml` to `llmhound.yaml`
-and replace the example scope/vantage and inputs for your environment.
-Explicit flags replace only their own fields; omitted flags preserve file values.
-See [configuration and limits](docs/reference/configuration.md) for precedence,
-path resolution, strict input rules, policy bounds, and reserved fields.
+and prints sorted targets without DNS or target traffic. `plan` prints the
+allowlisted check inventory without contacting targets. `scan` discovers and
+enumerates Jupyter/MCP/Ollama on prepared targets. Copy `llmhound.example.yaml`
+to `llmhound.yaml` and replace the example scope/vantage and inputs for your
+environment. Explicit flags replace only their own fields; omitted flags
+preserve file values. See [configuration and limits](docs/reference/configuration.md)
+for precedence, path resolution, strict input rules, policy bounds, and
+reserved fields.
 
-## Collection workflow (planned)
-
-**Not executable yet.** `plan`/`scan` (M2) and `upload` (M3) are honest stubs,
-not collectors or an ingest pipeline. Future command examples:
+## Collection workflow
 
 ```bash
 # Review what a scan would do (targets × checks), without touching targets
 llmhound plan --config llmhound.yaml
 
-# Scan; write an OpenGraph payload plus an .evidence.jsonl sidecar
+# Scan; write an OpenGraph payload, evidence sidecar, and checkpoint journal
 llmhound scan --config llmhound.yaml \
     --cidr 10.0.0.0/24 \
     --targets-file known-ai-hosts.txt \
-    --output llmhound-2026-09-29.json
+    --output-dir ./out \
+    --prefix llmhound-2026-09-29
 
-# Register the extension schema, upload the payload, import saved queries
+# Register the extension schema, upload the payload, import saved queries (M3)
 llmhound upload \
     --server https://bloodhound.corp.example \
     --token-file ~/.config/llmhound/bh-token \
-    --payload llmhound-2026-09-29.json
+    --payload ./out/llmhound-2026-09-29.json
 ```
 
 `llmhound.yaml` holds the deployment scope, collection vantage, targets and
 exclusions, rate/size bounds, sensitive-content opt-ins, TLS mode, User-Agent,
-and Computer-correlation settings. Flags override it.
+and Computer-correlation settings. Flags override it. `upload` remains an
+honest not-implemented stub until M3.
 
 TLS certificate verification is on by default. Record available certificate,
 negotiated TLS, and verification metadata without bypassing a verification

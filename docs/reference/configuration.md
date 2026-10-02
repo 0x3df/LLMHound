@@ -1,11 +1,12 @@
-# Configuration and offline target preparation
+# Configuration, plan, and scan
 
-**Implemented M1 slice:** Cobra help/version, strict YAML loading, explicit flag
-replacements, policy validation, and offline target preparation. No discovery,
-collectors, DNS resolution/correlation, graph assembly, emission, resume, or CE
-upload is wired into the CLI (emission exists only as internal libraries). `scan`, `plan`, and `upload` exit nonzero with honest
-not-implemented diagnostics and write no artifacts. `targets` is not the M2
-`plan` command: it does not invent a check inventory.
+**Implemented M2a slice:** Cobra help/version, strict YAML loading, explicit flag
+replacements, policy validation, offline `targets` preparation, offline
+`plan` (targets × allowlisted checks, no traffic), and `scan` for Jupyter / MCP /
+Ollama through `internal/scanner` (checkpoint journal, OpenGraph payload, evidence
+sidecar). `upload` and resume remain honest not-implemented stubs (M3). Sensitive
+content opt-ins default false (metadata-only / read-only). Live CLI vs package
+coverage is recorded in [m2a-integration.md](m2a-integration.md).
 
 ## Build and use
 
@@ -24,12 +25,17 @@ CGO_ENABLED=0 go build -o llmhound ./cmd/llmhound
 ./llmhound targets --scope lab --vantage scanner-a \
   --targets AI.Example.Test.,192.0.2.1 --exclude 192.0.2.0/24
 # ai.example.test
+
+./llmhound plan --scope lab --vantage scanner-a --targets 192.0.2.1
+./llmhound scan --scope lab --vantage scanner-a --targets 127.0.0.1 \
+  --output-dir ./out --prefix lab
 ```
 
 An implicit `llmhound.yaml` is loaded if it exists in the working directory;
 only a missing implicit default is ignored. Explicit `--config PATH` must exist
 and be readable. Help/version require no configuration. Configuration and
-input files are the only local files read by this slice; target service files,
+input files are the only local files read for preparation; `scan` may also read
+an optional `--discovery-file` fingerprint override. Target service files,
 credentials, and host-local scanning are not supported.
 
 ## Precedence and strictness
@@ -94,12 +100,30 @@ input fails without a partial target list. The CLI errors when exclusions leave
 no targets; the internal helper returns an empty list. No scan payload or
 sidecar is emitted.
 
+### Scan and plan commands
+
+- `llmhound plan`: prints prepared targets × embedded allowlisted checks for
+  Jupyter, MCP, and Ollama. No DNS, no target connections, no artifacts.
+  Inactive checks (for example default-skipped `ollama_show`) include a policy
+  skip reason.
+- `llmhound scan`: discovers and enumerates those surfaces, writes
+  `<prefix>.journal.jsonl`, `<prefix>.json` (and a linking payload when native
+  Computer correlation applies), and `<prefix>.evidence.jsonl`.
+  Flags: `--output-dir`, `--prefix`, `--discovery-file` (optional JSON fingerprint
+  port/path overrides that inherit builtin matchers). Only surfaces present in
+  the active definitions are scanned, so `plan` and `scan` agree. See
+  [m2a-integration.md](m2a-integration.md) for probe and coverage behavior.
+  Known limitation: only the Jupyter, MCP, and Ollama surfaces have collectors
+  in M2a; a custom `--discovery-file` entry for any other surface is honored
+  by `plan` (listed with no checks) and probed by `scan`, but no collector can
+  enumerate it yet, so its coverage record stays at the probe result.
+
 ### Bounds
 
 All keys below live under `bounds`; the flag has the same name with hyphens.
-Only `max_targets` currently governs executed preparation. Other bounds are
-validated/stored policy for future network collectors, **not claims of currently
-implemented rate limiting, pagination, redirects, or content limits**.
+`max_targets` governs executed preparation. Collectors honor configured
+timeouts, concurrency, response-size, page, and item bounds where implemented;
+see per-collector references.
 
 | Key | Default | Accepted range |
 |---|---:|---|
@@ -122,24 +146,25 @@ input entries, 128 files, 1 MiB aggregate file bytes, and file lines shorter tha
 unbounded memory expansion; they are not an authorization system for future
 DNS connections or redirects.
 
-### Reserved collection and correlation policy
+### Collection and correlation policy
 
-These values are parsed/validated, but have **no network/content effects** in M1:
+These values are parsed/validated. Scan collectors apply TLS, User-Agent, opt-in,
+and mapping-file / AD-suffix correlation where implemented:
 
-- `insecure` (`--insecure`): default false; future explicit TLS verification
-  bypass. Verification failure must never silently retry unverified.
+- `insecure` (`--insecure`): default false; explicit TLS verification bypass.
+  Verification failure must never silently retry unverified.
 - `user_agent` (`--user-agent`): default `LLMHound/dev`; nonblank printable ASCII
   up to 256 bytes. Add non-secret operator contact information if desired.
 - `opt_ins.resource_content`, `.prompts`, `.configuration_content`, and
   `.workspace_content`: all default false; flags `--resource-content`,
-  `--prompts`, `--configuration-content`, `--workspace-content`. Future content
-  reads still require allowlisted semantics, authorization, bounds, and redaction.
+  `--prompts`, `--configuration-content`, `--workspace-content`. Content reads
+  still require allowlisted semantics, authorization, bounds, and redaction.
 - `correlation.mapping_file` (`--mapping-file`), `.ad_domain_suffixes`
   (`--ad-domain-suffix`), `.reverse_dns` (`--reverse-dns`, default false), and
   `.ce_lookup` (`--ce-lookup`, default false). Suffixes must be exact ASCII FQDNs,
-  not IPs/wildcards. The CLI does not read mappings (the `internal/correlate` library can), infer machine identity,
-  resolve PTR records, or query CE. Correlation implementation belongs to its
-  own package/milestone, per [graph-model.md](graph-model.md).
+  not IPs/wildcards. Scan loads mapping files and applies AD-suffix matching via
+  `internal/correlate`. Reverse DNS and CE lookup remain reserved (no PTR or CE
+  queries in M2a). See [graph-model.md](graph-model.md).
 
 ## Verification
 
@@ -151,6 +176,7 @@ CGO_ENABLED=0 go build ./cmd/llmhound
 
 Tests cover unchanged file values, explicit false/zero/empty overrides, strict
 YAML types, required keys and policy ranges, normalization, bounded expansion,
-file limits, deterministic exclusions, help/errors, and no DNS or loopback
-connections during target preparation. Test listeners are local-only fixtures;
-no production network or service credentials are needed.
+file limits, deterministic exclusions, help/errors, offline plan (no DNS /
+loopback connections), and CLI scan against disposable loopback fixtures for
+Jupyter/MCP/Ollama. No production network or service credentials are needed.
+See [m2a-integration.md](m2a-integration.md) for live vs unit coverage.

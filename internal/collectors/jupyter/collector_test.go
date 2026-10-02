@@ -1114,3 +1114,38 @@ func TestSessionListTruncation(t *testing.T) {
 		t.Errorf("got coverage %q, want truncated", res.Observation.Coverage)
 	}
 }
+
+func TestCollectIdentifiedSkipsFingerprintProbe(t *testing.T) {
+	var apiHits int
+	inner := mockJupyterHandler(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api" {
+			apiHits++
+		}
+		inner(w, r)
+	}))
+	defer server.Close()
+
+	col, err := jupyter.New(jupyter.Config{
+		Scope: "test-scope", VantageKey: "vantage-dc01", ScanID: "scan-ident-001",
+		Now: testFixedTime, HTTPClient: server.Client(),
+	})
+	if err != nil {
+		t.Fatalf("jupyter.New: %v", err)
+	}
+	if _, err := col.Collect(context.Background(), server.URL); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	probed := apiHits
+	apiHits = 0
+	res, err := col.CollectIdentified(context.Background(), server.URL)
+	if err != nil {
+		t.Fatalf("CollectIdentified: %v", err)
+	}
+	if apiHits != probed-1 {
+		t.Errorf("/api hits identified=%d probed=%d, want exactly one fewer", apiHits, probed)
+	}
+	if res.Observation.Coverage == graph.CoverageFailed {
+		t.Errorf("identified collection failed: %s", res.Observation.CoverageReason)
+	}
+}

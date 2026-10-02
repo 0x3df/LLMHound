@@ -237,7 +237,10 @@ func Probe(ctx context.Context, client *http.Client, baseURL string, def Definit
 		resp, err := probeClient.Do(req)
 		latency := time.Since(start)
 		if err != nil {
-			continue // try next probe path if network error or connection refused
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ProbeResult{}, ctxErr
+			}
+			continue
 		}
 
 		reachable = true

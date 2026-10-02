@@ -99,6 +99,16 @@ type checkExecution struct {
 
 // CollectTarget runs allowlisted checks against a target and returns the composite Result.
 func (c *Collector) Collect(ctx context.Context, rawTarget string) (checkpoint.Result, error) {
+	return c.collect(ctx, rawTarget, true)
+}
+
+// CollectIdentified runs allowlisted checks against a target the caller has already
+// fingerprinted as Jupyter, without probing it again.
+func (c *Collector) CollectIdentified(ctx context.Context, rawTarget string) (checkpoint.Result, error) {
+	return c.collect(ctx, rawTarget, false)
+}
+
+func (c *Collector) collect(ctx context.Context, rawTarget string, probeFirst bool) (checkpoint.Result, error) {
 	if strings.TrimSpace(rawTarget) == "" {
 		return checkpoint.Result{}, errors.New("target cannot be empty")
 	}
@@ -141,26 +151,28 @@ func (c *Collector) Collect(ctx context.Context, rawTarget string) (checkpoint.R
 
 	baseURL := strings.TrimRight(canonicalURL, "/")
 
-	probe, err := discovery.Probe(ctx, c.httpClient.client, baseURL, discovery.JupyterDefinition())
-	if err != nil {
-		return checkpoint.Result{}, fmt.Errorf("probe target: %w", err)
-	}
-	if !probe.Matched {
-		failedObs := baseObs
-		failedObs.Coverage = graph.CoverageFailed
-		if probe.Reachable {
-			failedObs.CoverageReason = "target not identified as jupyter: " + probe.Reason
-		} else {
-			failedObs.CoverageReason = "target unreachable: " + probe.Reason
+	if probeFirst {
+		probe, err := discovery.Probe(ctx, c.httpClient.client, baseURL, discovery.JupyterDefinition())
+		if err != nil {
+			return checkpoint.Result{}, fmt.Errorf("probe target: %w", err)
 		}
-		return checkpoint.Result{
-			Target:      rawTarget,
-			Surface:     "jupyter",
-			Observation: failedObs,
-			Status:      checkpoint.TargetStatusFailed,
-			Error:       failedObs.CoverageReason,
-			Details:     map[string]any{"endpoint": canonicalURL},
-		}, nil
+		if !probe.Matched {
+			failedObs := baseObs
+			failedObs.Coverage = graph.CoverageFailed
+			if probe.Reachable {
+				failedObs.CoverageReason = "target not identified as jupyter: " + probe.Reason
+			} else {
+				failedObs.CoverageReason = "target unreachable: " + probe.Reason
+			}
+			return checkpoint.Result{
+				Target:      rawTarget,
+				Surface:     "jupyter",
+				Observation: failedObs,
+				Status:      checkpoint.TargetStatusFailed,
+				Error:       failedObs.CoverageReason,
+				Details:     map[string]any{"endpoint": canonicalURL},
+			}, nil
+		}
 	}
 
 	// Track TLS and collected information across checks

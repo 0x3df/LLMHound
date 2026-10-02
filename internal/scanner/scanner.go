@@ -403,6 +403,9 @@ func (s *Scanner) Scan(ctx context.Context, targets []string, outputDir, prefix 
 	}
 
 	for _, tgt := range targets {
+		if ctx.Err() != nil {
+			break
+		}
 		targetHost := tgt
 		wg.Add(1)
 		sem <- struct{}{}
@@ -435,7 +438,7 @@ func (s *Scanner) Scan(ctx context.Context, targets []string, outputDir, prefix 
 					if def.DefaultPort != 8888 {
 						target = baseURL
 					}
-					res, err := jupCol.Collect(ctx, target)
+					res, err := jupCol.CollectIdentified(ctx, target)
 					if err != nil {
 						recordFailure(fmt.Errorf("jupyter collect %s: %w", host, err))
 						continue
@@ -470,6 +473,9 @@ func (s *Scanner) Scan(ctx context.Context, targets []string, outputDir, prefix 
 
 	wg.Wait()
 
+	if firstRecordErr == nil {
+		firstRecordErr = ctx.Err()
+	}
 	if firstRecordErr != nil {
 		_ = journal.Close()
 		return nil, firstRecordErr

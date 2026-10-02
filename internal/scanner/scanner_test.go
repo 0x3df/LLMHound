@@ -3,6 +3,7 @@ package scanner_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -688,5 +689,33 @@ func TestScanner_UnreachableSurfaceJournaledWithoutCollectorRequests(t *testing.
 	}
 	if len(res.State.Nodes()) != 0 {
 		t.Errorf("unreachable surface must not emit nodes")
+	}
+}
+
+func TestScanner_CancelledContextFailsInsteadOfFabricatingCoverage(t *testing.T) {
+	srv := setupMockOllama(t)
+	defer srv.Close()
+
+	cfg := config.Defaults()
+	cfg.Scope = "cancel-scope"
+	cfg.Targets = []string{"127.0.0.1"}
+	cfg.VantageKey = "vantage-test"
+	s, err := scanner.New(cfg, scanner.WithDefinitions([]discovery.Definition{{
+		Surface:     discovery.SurfaceOllama,
+		DefaultPort: parsePort(srv.URL),
+		ProbePaths:  []string{"/api/version"},
+		Match:       discovery.OllamaDefinition().Match,
+	}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	res, err := s.Scan(ctx, []string{"127.0.0.1"}, t.TempDir(), "cancel-scan")
+	if err == nil {
+		t.Fatalf("cancelled scan must fail, got result %+v", res)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v, want context.Canceled", err)
 	}
 }

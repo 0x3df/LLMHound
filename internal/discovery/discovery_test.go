@@ -2,6 +2,7 @@ package discovery_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -417,3 +418,14 @@ func TestProbeHostAndLoadDefinitions(t *testing.T) {
 	}
 }
 
+
+func TestProbeReturnsContextErrorOnCancellation(t *testing.T) {
+	srv := httptest.NewServer(http.NotFoundHandler())
+	defer srv.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	res, err := discovery.Probe(ctx, nil, srv.URL, discovery.OllamaDefinition())
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled (result %+v)", err, res)
+	}
+}

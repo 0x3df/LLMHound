@@ -2,10 +2,13 @@ package discovery
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 )
@@ -34,7 +37,100 @@ type Definition struct {
 func BuiltinDefinitions() []Definition {
 	return []Definition{
 		JupyterDefinition(),
+		OllamaDefinition(),
+		MCPDefinition(),
 	}
+}
+
+// DefinitionForSurface returns the embedded definition for the given surface.
+func DefinitionForSurface(surface Surface) (Definition, bool) {
+	for _, def := range BuiltinDefinitions() {
+		if def.Surface == surface {
+			return def, true
+		}
+	}
+	return Definition{}, false
+}
+
+// OllamaDefinition returns the fingerprint definition for Ollama LLM server.
+func OllamaDefinition() Definition {
+	return Definition{
+		Surface:     SurfaceOllama,
+		DefaultPort: 11434,
+		ProbePaths:  []string{"/api/version", "/api/tags", "/"},
+		Match: func(status int, headers http.Header, body []byte) bool {
+			serverHeader := strings.ToLower(headers.Get("Server"))
+			if strings.Contains(serverHeader, "ollama") {
+				return true
+			}
+			bodyStr := strings.ToLower(string(body))
+			if status == http.StatusOK {
+				if strings.Contains(bodyStr, "ollama is running") {
+					return true
+				}
+				if strings.Contains(bodyStr, `"version"`) && (strings.Contains(bodyStr, "ollama") || strings.Contains(bodyStr, ".")) {
+					return true
+				}
+				if strings.Contains(bodyStr, `"models"`) {
+					return true
+				}
+			}
+			if status == http.StatusUnauthorized || status == http.StatusForbidden {
+				if strings.Contains(bodyStr, "ollama") {
+					return true
+				}
+			}
+			return false
+		},
+	}
+}
+
+// MCPDefinition returns the fingerprint definition for Model Context Protocol servers.
+func MCPDefinition() Definition {
+	return Definition{
+		Surface:     SurfaceMCP,
+		DefaultPort: 8080,
+		ProbePaths:  []string{"/mcp", "/sse", "/", "/.well-known/oauth-protected-resource"},
+		Match: func(status int, headers http.Header, body []byte) bool {
+			contentType := strings.ToLower(headers.Get("Content-Type"))
+			if strings.Contains(contentType, "text/event-stream") {
+				return true
+			}
+			if headers.Get("Mcp-Session-Id") != "" {
+				return true
+			}
+			authHeader := strings.ToLower(headers.Get("Www-Authenticate"))
+			if strings.Contains(authHeader, "oauth") || strings.Contains(authHeader, "resource") {
+				return true
+			}
+			bodyStr := strings.ToLower(string(body))
+			if strings.Contains(bodyStr, `"jsonrpc"`) || strings.Contains(bodyStr, `"mcp"`) {
+				return true
+			}
+			if strings.Contains(bodyStr, `"authorization_servers"`) || strings.Contains(bodyStr, `"resource"`) {
+				return true
+			}
+			return false
+		},
+	}
+}
+
+// BaseURLForHost constructs a canonical base URL from host, port, and security setting.
+func BaseURLForHost(host string, port int, secure bool) string {
+	scheme := "http"
+	if secure {
+		scheme = "https"
+	}
+	if strings.Contains(host, ":") && !strings.HasPrefix(host, "[") {
+		return fmt.Sprintf("%s://[%s]:%d", scheme, host, port)
+	}
+	return fmt.Sprintf("%s://%s:%d", scheme, host, port)
+}
+
+// ProbeHost probes a target host against a definition using its default port.
+func ProbeHost(ctx context.Context, client *http.Client, host string, def Definition, secure bool) (ProbeResult, error) {
+	baseURL := BaseURLForHost(host, def.DefaultPort, secure)
+	return Probe(ctx, client, baseURL, def)
 }
 
 // JupyterDefinition returns the fingerprint definition for Jupyter Server / Notebook.
@@ -165,3 +261,67 @@ func Probe(ctx context.Context, client *http.Client, baseURL string, def Definit
 		Reason:    reason,
 	}, nil
 }
+
+// DefinitionFileEntry represents a single fingerprint definition in JSON/YAML.
+type DefinitionFileEntry struct {
+	Surface     string   `json:"surface"`
+	DefaultPort int      `json:"default_port"`
+	ProbePaths  []string `json:"probe_paths"`
+}
+
+// LoadDefinitions parses custom definitions from JSON data. Builtin match functions
+// are associated with recognized surface names.
+func LoadDefinitions(data []byte) ([]Definition, error) {
+	var entries []DefinitionFileEntry
+	if err := json.Unmarshal(data, &entries); err != nil {
+		return nil, fmt.Errorf("decode definitions: %w", err)
+	}
+	if len(entries) == 0 {
+		return nil, errors.New("definitions file contains no entries")
+	}
+
+	var out []Definition
+	for _, e := range entries {
+		s := Surface(strings.ToLower(strings.TrimSpace(e.Surface)))
+		if s == "" {
+			return nil, errors.New("definition missing surface")
+		}
+		port := e.DefaultPort
+		if port <= 0 || port > 65535 {
+			return nil, fmt.Errorf("surface %s has invalid default_port %d", s, port)
+		}
+		paths := e.ProbePaths
+		if len(paths) == 0 {
+			paths = []string{"/"}
+		}
+
+		// Inherit builtin matcher if available
+		var match MatchFunc
+		if builtin, ok := DefinitionForSurface(s); ok {
+			match = builtin.Match
+		} else {
+			// Generic fallback matcher
+			match = func(status int, headers http.Header, body []byte) bool {
+				return status >= 200 && status < 300
+			}
+		}
+
+		out = append(out, Definition{
+			Surface:     s,
+			DefaultPort: port,
+			ProbePaths:  paths,
+			Match:       match,
+		})
+	}
+	return out, nil
+}
+
+// LoadDefinitionsFile reads and parses a fingerprint definitions JSON file.
+func LoadDefinitionsFile(path string) ([]Definition, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read definitions file: %w", err)
+	}
+	return LoadDefinitions(data)
+}
+

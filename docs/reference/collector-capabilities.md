@@ -1,10 +1,12 @@
 # Collector capability matrix
 
-**Status: M2a Jupyter collector implemented (`internal/collectors/jupyter`); other surfaces pending.** This is the v1 collection contract
+**Status: M2a Jupyter, MCP, and Ollama collectors implemented and wired through
+`llmhound plan` / `llmhound scan` (`internal/scanner`).** This is the v1 collection contract
 for the [design](../plans/2026-09-29-llmhound-design.md) and
 [graph model](graph-model.md), not a claim that every product release exposes
 every field anonymously. Exact operations and supported releases must be verified
 against official product/protocol documentation and recorded in collector tests.
+Live CLI coverage vs package-only tests: [m2a-integration.md](m2a-integration.md).
 
 ## Default collection policy
 

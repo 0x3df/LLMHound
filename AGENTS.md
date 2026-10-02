@@ -31,7 +31,8 @@ Goal: eventually listed on the SpecterOps OpenGraph community library page
 | `docs/reference/ce-compatibility.md` | M0 spike questions and recorded CE answers. |
 | `docs/reference/saved-queries.md` | Starter saved queries (drive which properties must be queryable). |
 | `README.md` | Public-facing overview; implemented CLI vs planned collector behavior. |
-| `docs/reference/configuration.md` | Working M1 CLI/configuration/target-input contract, limits, build and test commands. |
+| `docs/reference/configuration.md` | Working CLI/configuration/target-input and M2a plan/scan contract, limits, build and test commands. |
+| `docs/reference/m2a-integration.md` | M2a live CLI vs unit-test coverage and remaining gaps. |
 | `docs/plans/.future/` | Parked ideas only. Not a roadmap; nothing there is in scope. |
 | `extension/schema.json` | OpenGraph extension schema (M1). `extension/saved_searches/` is not yet created (M3). |
 
@@ -103,7 +104,9 @@ Goal: eventually listed on the SpecterOps OpenGraph community library page
    targets, graph model, OpenGraph emitter + evidence sidecar,
    `extension/schema.json`, `LICENSE`, golden-file tests.
 2. **M2a — Vertical slice:** discovery, checkpoint journal interface, and
-   MCP, Ollama, Jupyter collectors end-to-end to payload.
+   MCP, Ollama, Jupyter collectors end-to-end to payload. **Complete on QA
+   path:** `llmhound plan`/`scan` wired via `internal/scanner`; see
+   `docs/reference/m2a-integration.md` for live vs unit coverage and gaps.
 3. **M2b — Remaining core surfaces:** A2A, vLLM, LiteLLM, Qdrant, MLflow,
    Open WebUI, LangServe.
 4. **M2c — Long tail:** generic `OpenAICompatibleEndpoint`, Ray dashboard,
@@ -120,20 +123,20 @@ Goal: eventually listed on the SpecterOps OpenGraph community library page
   `LLMHound` may exist; the directory was renamed mid-session).
 - Integration branch `QA` for implementation; PRs target `QA`, not `main`.
   Small committed steps; docs live under `docs/`.
-- CLI/input implementation and verification: `docs/reference/configuration.md`.
-  `targets` is offline; scan/plan/upload remain honest stubs until their milestones.
+- CLI/input and M2a scan orchestration: `docs/reference/configuration.md`
+  and `docs/reference/m2a-integration.md`. `targets` and `plan` are offline;
+  `scan` enumerates Jupyter/MCP/Ollama; `upload`/resume remain M3 stubs.
 - Discovery ports/paths are data-driven fingerprint definitions (embedded,
-  overridable). Baseline: Ollama 11434, vLLM 8000, MLflow 5000, Jupyter 8888,
-  Qdrant 6333, Open WebUI 3000/8080, LiteLLM 4000, MCP/A2A on 80/443/8080 +
-  well-known paths.
+  overridable via `--discovery-file`). Baseline: Ollama 11434, vLLM 8000,
+  MLflow 5000, Jupyter 8888, Qdrant 6333, Open WebUI 3000/8080, LiteLLM 4000,
+  MCP/A2A on 80/443/8080 + well-known paths.
 - Design decisions follow the brainstorming-first process: design docs in
   `docs/plans/` before code.
 - M0 CE-compatibility answers (kind naming, property types, upload pipeline,
   cleanup semantics) are recorded in `docs/reference/ce-compatibility.md`;
   the reproducible lab and check suite live in `lab/` (see `lab/README.md`).
-- M1 graph, correlation, and OpenGraph/evidence emission primitives are documented
-  in `docs/reference/graph-model.md`. Test locally without network activity:
-  `go test -race ./...` and `go vet ./...`.
+- Graph, correlation, and OpenGraph/evidence emission: `docs/reference/graph-model.md`.
+  Test locally without external targets: `go test -race ./...` and `go vet ./...`.
 
 ## Maintaining this file
 

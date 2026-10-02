@@ -5,6 +5,8 @@ import (
 	"os"
 
 	"github.com/0x3df/LLMHound/internal/config"
+	"github.com/0x3df/LLMHound/internal/discovery"
+	"github.com/0x3df/LLMHound/internal/scanner"
 	"github.com/0x3df/LLMHound/internal/targets"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -15,7 +17,7 @@ var version = "dev"
 func newRootCommand() *cobra.Command {
 	root := &cobra.Command{
 		Use: "llmhound", Short: "LLMHound — AI infrastructure inventory for BloodHound",
-		Long:    "LLMHound M1 skeleton. Only offline configuration and target preparation\nare implemented. No discovery, scan, DNS correlation, or upload runs.",
+		Long:    "LLMHound remotely maps the attack surface of LLM and agentic AI infrastructure\nfor BloodHound Community Edition.",
 		Version: version, Args: cobra.NoArgs, SilenceUsage: true, SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, _ []string) error { return cmd.Help() },
 	}
@@ -52,6 +54,7 @@ func newRootCommand() *cobra.Command {
 	flags.BoolVar(&overrides.Correlation.CELookup, "ce-lookup", false, "Reserved CE lookup opt-in (no CE calls in M1)")
 
 	var prepared []string
+	var effectiveConfig config.Config
 	prepare := func(cmd *cobra.Command, _ []string) error {
 		c := config.Defaults()
 		// Missing implicit default is harmless; an explicit --config is never ignored.
@@ -82,6 +85,7 @@ func newRootCommand() *cobra.Command {
 		if len(prepared) == 0 {
 			return fmt.Errorf("no targets remain after exclusions")
 		}
+		effectiveConfig = c
 		return nil
 	}
 	root.AddCommand(&cobra.Command{
@@ -97,15 +101,78 @@ func newRootCommand() *cobra.Command {
 			return nil
 		},
 	})
-	for _, name := range []string{"scan", "plan"} {
-		command := name
-		root.AddCommand(&cobra.Command{
-			Use: command, Short: command + " (not implemented; reserved for M2)", Args: cobra.NoArgs, PreRunE: prepare,
-			RunE: func(*cobra.Command, []string) error {
-				return fmt.Errorf("%s is not implemented; use 'llmhound targets' for offline input validation only; no scan artifacts were written", command)
-			},
-		})
+	root.AddCommand(&cobra.Command{
+		Use:   "plan",
+		Short: "Print planned targets × checks offline (no traffic)",
+		Long:  "Prints the target hosts and allowlisted metadata checks planned for each\nsupported surface. No network traffic or DNS queries occur.",
+		Args:  cobra.NoArgs,
+		PreRunE: prepare,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			s, err := scanner.New(effectiveConfig, scanner.WithCollectorVersion(version))
+			if err != nil {
+				return err
+			}
+			plans := s.Plan(prepared)
+			for _, tp := range plans {
+				fmt.Fprintf(cmd.OutOrStdout(), "TARGET: %s\n", tp.Target)
+				for _, sp := range tp.Surfaces {
+					fmt.Fprintf(cmd.OutOrStdout(), "  SURFACE: %s (port %d)\n", sp.Surface, sp.Port)
+					for _, chk := range sp.Checks {
+						status := ""
+						if !chk.Active {
+							status = fmt.Sprintf(" [%s]", chk.SkipReason)
+						}
+						fmt.Fprintf(cmd.OutOrStdout(), "    - %s: %s (%s %s)%s\n", chk.CheckID, chk.Operation, chk.Method, chk.Endpoint, status)
+					}
+				}
+			}
+			return nil
+		},
+	})
+
+	var outputDir string
+	var artifactPrefix string
+	var discoveryFile string
+
+	scanCmd := &cobra.Command{
+		Use:   "scan",
+		Short: "Remotely enumerate AI infrastructure across configured targets",
+		Long:  "Discovers and enumerates AI services (Jupyter, MCP, Ollama) on prepared\ntargets, writing through a checkpoint journal and emitting OpenGraph JSON\nand evidence sidecar files.",
+		Args:  cobra.NoArgs,
+		PreRunE: prepare,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			var scanOpts []scanner.Option
+			scanOpts = append(scanOpts, scanner.WithCollectorVersion(version))
+			if discoveryFile != "" {
+				defs, err := discovery.LoadDefinitionsFile(discoveryFile)
+				if err != nil {
+					return fmt.Errorf("load discovery definitions: %w", err)
+				}
+				scanOpts = append(scanOpts, scanner.WithDefinitions(defs))
+			}
+			s, err := scanner.New(effectiveConfig, scanOpts...)
+			if err != nil {
+				return err
+			}
+			res, err := s.Scan(cmd.Context(), prepared, outputDir, artifactPrefix)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Scan completed for %d target(s)\n", res.TargetsCount)
+			fmt.Fprintf(cmd.OutOrStdout(), "  Base payload: %s\n", res.Artifacts.BasePayloadPath)
+			if res.Artifacts.LinkingPayloadPath != "" {
+				fmt.Fprintf(cmd.OutOrStdout(), "  Linking payload: %s\n", res.Artifacts.LinkingPayloadPath)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "  Evidence sidecar: %s\n", res.Artifacts.EvidenceSidecarPath)
+			fmt.Fprintf(cmd.OutOrStdout(), "  Checkpoint journal: %s\n", res.JournalPath)
+			return nil
+		},
 	}
+	scanCmd.Flags().StringVar(&outputDir, "output-dir", "", "Directory to write emitted scan artifacts (default: current directory)")
+	scanCmd.Flags().StringVar(&artifactPrefix, "prefix", "", "Filename prefix for emitted scan artifacts (default: llmhound-<timestamp>)")
+	scanCmd.Flags().StringVar(&discoveryFile, "discovery-file", "", "Optional custom discovery fingerprint definitions file")
+	root.AddCommand(scanCmd)
+
 	root.AddCommand(&cobra.Command{
 		Use: "upload", Short: "upload (not implemented; reserved for M3)", Args: cobra.NoArgs,
 		RunE: func(*cobra.Command, []string) error {

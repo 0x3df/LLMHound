@@ -50,7 +50,7 @@ Exercised by `cmd/llmhound` tests (`TestScanCLIEndToEndLoopbackFixtures`,
 - CE API client, extension upload, saved-query import, CE Computer lookup (M3)
 - M2b/M2c collectors (A2A, vLLM, LiteLLM, Qdrant, MLflow, Open WebUI, LangServe, long tail)
 - Credential-driven enumeration (M4)
-- TCP-first port sweep distinct from HTTP fingerprint probes (orchestration today
-  drives collectors from definition default ports; Jupyter still gates on
-  `discovery.Probe`)
+- TCP-first port sweep distinct from HTTP fingerprint probes (scan iterates the
+  configured definitions, probes each with its paths/matcher, and collects only
+  surfaces that match or are unreachable so failures stay visible)
 - ZIP-streaming emission for very large scans

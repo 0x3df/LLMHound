@@ -104,6 +104,9 @@ func MCPDefinition() Definition {
 				return true
 			}
 			bodyStr := strings.ToLower(string(body))
+			if status >= http.StatusBadRequest && status < http.StatusInternalServerError && strings.Contains(bodyStr, "mcp-session-id") {
+				return true
+			}
 			if strings.Contains(bodyStr, `"jsonrpc"`) || strings.Contains(bodyStr, `"mcp"`) {
 				return true
 			}

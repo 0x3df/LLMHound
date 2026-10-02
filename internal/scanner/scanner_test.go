@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -446,7 +447,7 @@ func TestScanner_MixedTargetsAndHonestCoverage(t *testing.T) {
 	deniedSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("WWW-Authenticate", `Bearer realm="ollama"`)
 		w.WriteHeader(http.StatusUnauthorized)
-		_, _ = w.Write([]byte(`{"error": "unauthorized"}`))
+		_, _ = w.Write([]byte(`{"error": "ollama: unauthorized"}`))
 	}))
 	defer deniedSrv.Close()
 	deniedPort := parsePort(deniedSrv.URL)
@@ -538,5 +539,86 @@ func TestScanner_MixedTargetsAndHonestCoverage(t *testing.T) {
 	}
 	if targetRecUnreach.Status != "failed" {
 		t.Errorf("unreachable status = %q, want failed", targetRecUnreach.Status)
+	}
+}
+
+func TestScanner_DefinitionsSelectSurfaces(t *testing.T) {
+	ollamaSrv := setupMockOllama(t)
+	defer ollamaSrv.Close()
+	jupyterSrv := setupMockJupyter(t)
+	defer jupyterSrv.Close()
+
+	cfg := config.Defaults()
+	cfg.Scope = "select-scope"
+	cfg.Targets = []string{"127.0.0.1"}
+	cfg.Targets = []string{"127.0.0.1"}
+	cfg.VantageKey = "vantage-test"
+
+	s, err := scanner.New(cfg, scanner.WithDefinitions([]discovery.Definition{
+		{
+			Surface:     discovery.SurfaceOllama,
+			DefaultPort: parsePort(ollamaSrv.URL),
+			ProbePaths:  []string{"/api/version"},
+			Match:       discovery.OllamaDefinition().Match,
+		},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := s.Scan(context.Background(), []string{"127.0.0.1"}, t.TempDir(), "select-scan")
+	if err != nil {
+		t.Fatalf("scan failed: %v", err)
+	}
+	targets := res.State.Targets()
+	if _, ok := targets["127.0.0.1|ollama"]; !ok {
+		t.Errorf("configured ollama surface missing: %+v", targets)
+	}
+	for key := range targets {
+		if key != "127.0.0.1|ollama" {
+			t.Errorf("unconfigured surface scanned: %s", key)
+		}
+	}
+}
+
+func TestScanner_ConfiguredProbePathsAndMatchGateCollection(t *testing.T) {
+	var paths []string
+	var mu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		paths = append(paths, r.URL.Path)
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`generic web page`))
+	}))
+	defer srv.Close()
+
+	cfg := config.Defaults()
+	cfg.Scope = "gate-scope"
+	cfg.Targets = []string{"127.0.0.1"}
+	cfg.Targets = []string{"127.0.0.1"}
+	cfg.VantageKey = "vantage-test"
+
+	def := discovery.Definition{
+		Surface:     discovery.SurfaceOllama,
+		DefaultPort: parsePort(srv.URL),
+		ProbePaths:  []string{"/custom-probe"},
+		Match:       discovery.OllamaDefinition().Match,
+	}
+	s, err := scanner.New(cfg, scanner.WithDefinitions([]discovery.Definition{def}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := s.Scan(context.Background(), []string{"127.0.0.1"}, t.TempDir(), "gate-scan")
+	if err != nil {
+		t.Fatalf("scan failed: %v", err)
+	}
+	if len(res.State.Targets()) != 0 {
+		t.Errorf("non-matching reachable service must not be collected: %+v", res.State.Targets())
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(paths) != 1 || paths[0] != "/custom-probe" {
+		t.Errorf("probed paths = %v, want only [/custom-probe]", paths)
 	}
 }

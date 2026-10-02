@@ -9,8 +9,8 @@ import (
 	"time"
 
 	"github.com/0x3df/LLMHound/internal/checkpoint"
-	collectormcp "github.com/0x3df/LLMHound/internal/collectors/mcp"
 	"github.com/0x3df/LLMHound/internal/collectors/jupyter"
+	collectormcp "github.com/0x3df/LLMHound/internal/collectors/mcp"
 	"github.com/0x3df/LLMHound/internal/collectors/ollama"
 	"github.com/0x3df/LLMHound/internal/config"
 	"github.com/0x3df/LLMHound/internal/correlate"
@@ -21,13 +21,13 @@ import (
 
 // PlannedCheck describes an allowlisted check planned for a surface.
 type PlannedCheck struct {
-	CheckID     string `json:"check_id"`
-	Operation   string `json:"operation"`
-	Method      string `json:"method"`
-	Endpoint    string `json:"endpoint"`
-	Purpose     string `json:"purpose"`
-	Active      bool   `json:"active"`
-	SkipReason  string `json:"skip_reason,omitempty"`
+	CheckID    string `json:"check_id"`
+	Operation  string `json:"operation"`
+	Method     string `json:"method"`
+	Endpoint   string `json:"endpoint"`
+	Purpose    string `json:"purpose"`
+	Active     bool   `json:"active"`
+	SkipReason string `json:"skip_reason,omitempty"`
 }
 
 // SurfacePlan describes planned collection operations for a specific surface on a target.
@@ -377,18 +377,6 @@ func (s *Scanner) Scan(ctx context.Context, targets []string, outputDir, prefix 
 		return nil, fmt.Errorf("create vantage identity: %w", err)
 	}
 
-	// 4. Map definition ports
-	ports := map[discovery.Surface]int{
-		discovery.SurfaceJupyter: 8888,
-		discovery.SurfaceOllama:  11434,
-		discovery.SurfaceMCP:     8080,
-	}
-	for _, def := range s.definitions {
-		if def.DefaultPort > 0 {
-			ports[def.Surface] = def.DefaultPort
-		}
-	}
-
 	// 5. Worker pool for bounded concurrency
 	concurrency := s.cfg.Bounds.Concurrency
 	if concurrency <= 0 {
@@ -399,13 +387,16 @@ func (s *Scanner) Scan(ctx context.Context, targets []string, outputDir, prefix 
 	var wg sync.WaitGroup
 	var recordMu sync.Mutex
 	var firstRecordErr error
+	recordFailure := func(err error) {
+		recordMu.Lock()
+		if firstRecordErr == nil {
+			firstRecordErr = err
+		}
+		recordMu.Unlock()
+	}
 	record := func(res checkpoint.Result) {
 		if err := journal.RecordResult(res); err != nil {
-			recordMu.Lock()
-			if firstRecordErr == nil {
-				firstRecordErr = err
-			}
-			recordMu.Unlock()
+			recordFailure(err)
 		}
 	}
 
@@ -418,58 +409,56 @@ func (s *Scanner) Scan(ctx context.Context, targets []string, outputDir, prefix 
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			// Evaluate Jupyter
-			if _, hasJup := ports[discovery.SurfaceJupyter]; hasJup {
-				jupTarget := host
-				if ports[discovery.SurfaceJupyter] != 8888 {
-					jupTarget = discovery.BaseURLForHost(host, ports[discovery.SurfaceJupyter], false)
+			for _, def := range s.definitions {
+				switch def.Surface {
+				case discovery.SurfaceJupyter, discovery.SurfaceOllama, discovery.SurfaceMCP:
+				default:
+					continue
 				}
-				res, err := jupCol.Collect(ctx, jupTarget)
+				baseURL := discovery.BaseURLForHost(host, def.DefaultPort, false)
+				probe, err := discovery.Probe(ctx, s.httpClient, baseURL, def)
 				if err != nil {
-					recordMu.Lock()
-					if firstRecordErr == nil {
-						firstRecordErr = fmt.Errorf("jupyter collect %s: %w", host, err)
+					recordFailure(fmt.Errorf("probe %s %s: %w", def.Surface, host, err))
+					continue
+				}
+				if probe.Reachable && !probe.Matched {
+					continue
+				}
+
+				switch def.Surface {
+				case discovery.SurfaceJupyter:
+					target := host
+					if def.DefaultPort != 8888 {
+						target = baseURL
 					}
-					recordMu.Unlock()
-				} else {
+					res, err := jupCol.Collect(ctx, target)
+					if err != nil {
+						recordFailure(fmt.Errorf("jupyter collect %s: %w", host, err))
+						continue
+					}
 					res.Target = host
 					record(res)
-				}
-			}
-
-			// Evaluate Ollama
-			if _, hasOllama := ports[discovery.SurfaceOllama]; hasOllama {
-				ollamaTarget := host
-				if ports[discovery.SurfaceOllama] != 11434 {
-					ollamaTarget = discovery.BaseURLForHost(host, ports[discovery.SurfaceOllama], false)
-				}
-				res, err := ollamaCol.Collect(ctx, ollamaTarget, vantage, scanID, now, resolver, s.verifiedComputers)
-				if err != nil {
-					recordMu.Lock()
-					if firstRecordErr == nil {
-						firstRecordErr = fmt.Errorf("ollama collect %s: %w", host, err)
+				case discovery.SurfaceOllama:
+					target := host
+					if def.DefaultPort != 11434 {
+						target = baseURL
 					}
-					recordMu.Unlock()
-				} else {
+					res, err := ollamaCol.Collect(ctx, target, vantage, scanID, now, resolver, s.verifiedComputers)
+					if err != nil {
+						recordFailure(fmt.Errorf("ollama collect %s: %w", host, err))
+						continue
+					}
 					res.Target = host
 					record(res)
-				}
-			}
-
-			// Evaluate MCP
-			if _, hasMCP := ports[discovery.SurfaceMCP]; hasMCP {
-				mcpURL := discovery.BaseURLForHost(host, ports[discovery.SurfaceMCP], false)
-				mcpTarget := collectormcp.Target{
-					URL:            mcpURL,
-					OriginalTarget: host,
-					Transport:      "auto",
-				}
-				if _, err := mcpCol.CollectTarget(ctx, mcpTarget, journal); err != nil {
-					recordMu.Lock()
-					if firstRecordErr == nil {
-						firstRecordErr = fmt.Errorf("mcp collect %s: %w", host, err)
+				case discovery.SurfaceMCP:
+					mcpTarget := collectormcp.Target{
+						URL:            baseURL,
+						OriginalTarget: host,
+						Transport:      "auto",
 					}
-					recordMu.Unlock()
+					if _, err := mcpCol.CollectTarget(ctx, mcpTarget, journal); err != nil {
+						recordFailure(fmt.Errorf("mcp collect %s: %w", host, err))
+					}
 				}
 			}
 		}(targetHost)

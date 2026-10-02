@@ -113,6 +113,10 @@ sidecar is emitted.
   port/path overrides that inherit builtin matchers). Only surfaces present in
   the active definitions are scanned, so `plan` and `scan` agree. See
   [m2a-integration.md](m2a-integration.md) for probe and coverage behavior.
+  Known limitation: only the Jupyter, MCP, and Ollama surfaces have collectors
+  in M2a; a custom `--discovery-file` entry for any other surface is honored
+  by `plan` (listed with no checks) and probed by `scan`, but no collector can
+  enumerate it yet, so its coverage record stays at the probe result.
 
 ### Bounds
 

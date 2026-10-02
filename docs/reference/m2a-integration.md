@@ -50,8 +50,7 @@ Exercised by `cmd/llmhound` tests (`TestScanCLIEndToEndLoopbackFixtures`,
 - CE API client, extension upload, saved-query import, CE Computer lookup (M3)
 - M2b/M2c collectors (A2A, vLLM, LiteLLM, Qdrant, MLflow, Open WebUI, LangServe, long tail)
 - Credential-driven enumeration (M4)
-- TCP-first port sweep and fingerprint-gated collection (scan iterates the
-  configured definitions for surface and port selection; each collector runs
-  once per target and journals its own coverage, so unreachable, denied, and
-  unrecognized services stay visible as failed/partial)
+- TCP-first port sweep (scan probes each configured definition once with its
+  probe paths and matcher; unmatched or unreachable surfaces are journaled as
+  failed coverage without collector requests, matched surfaces are collected)
 - ZIP-streaming emission for very large scans

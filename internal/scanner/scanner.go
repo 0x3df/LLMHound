@@ -2,6 +2,8 @@ package scanner
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net/http"
 	"path/filepath"
@@ -417,6 +419,16 @@ func (s *Scanner) Scan(ctx context.Context, targets []string, outputDir, prefix 
 				}
 				baseURL := discovery.BaseURLForHost(host, def.DefaultPort, false)
 
+				probe, err := discovery.Probe(ctx, s.httpClient, baseURL, def)
+				if err != nil {
+					recordFailure(fmt.Errorf("probe %s %s: %w", def.Surface, host, err))
+					continue
+				}
+				if !probe.Matched {
+					record(unmatchedResult(host, baseURL, def.Surface, probe, vantage, scanID, s.collectorVersion, now))
+					continue
+				}
+
 				switch def.Surface {
 				case discovery.SurfaceJupyter:
 					target := host
@@ -489,4 +501,31 @@ func (s *Scanner) Scan(ctx context.Context, targets []string, outputDir, prefix 
 		TargetsCount: len(targets),
 		State:        state,
 	}, nil
+}
+
+func unmatchedResult(host, baseURL string, surface discovery.Surface, probe discovery.ProbeResult, vantage graph.Identity, scanID, collectorVersion string, now time.Time) checkpoint.Result {
+	reason := "target not identified as " + string(surface) + ": " + probe.Reason
+	if !probe.Reachable {
+		reason = "target unreachable: " + probe.Reason
+	}
+	sum := sha256.Sum256([]byte(scanID + "|" + host + "|" + string(surface)))
+	return checkpoint.Result{
+		Target:  host,
+		Surface: string(surface),
+		Observation: graph.Observation{
+			SchemaVersion:    "1",
+			ScanID:           scanID,
+			CollectorVersion: collectorVersion,
+			EvidenceID:       "ev-" + string(surface) + "-" + hex.EncodeToString(sum[:8]),
+			Source:           baseURL,
+			Surface:          string(surface),
+			ObservedAt:       now,
+			Vantage:          vantage,
+			Coverage:         graph.CoverageFailed,
+			CoverageReason:   reason,
+		},
+		Status:  checkpoint.TargetStatusFailed,
+		Error:   reason,
+		Details: map[string]any{"endpoint": baseURL},
+	}
 }

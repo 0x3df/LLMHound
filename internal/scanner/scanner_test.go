@@ -447,7 +447,7 @@ func TestScanner_MixedTargetsAndHonestCoverage(t *testing.T) {
 	deniedSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("WWW-Authenticate", `Bearer realm="ollama"`)
 		w.WriteHeader(http.StatusUnauthorized)
-		_, _ = w.Write([]byte(`{"error": "unauthorized"}`))
+		_, _ = w.Write([]byte(`{"error": "ollama: unauthorized"}`))
 	}))
 	defer deniedSrv.Close()
 	deniedPort := parsePort(deniedSrv.URL)
@@ -581,17 +581,17 @@ func TestScanner_DefinitionsSelectSurfaces(t *testing.T) {
 	}
 }
 
-func TestScanner_UnrecognizedServiceRecordsFailedCoverageOnce(t *testing.T) {
+func scanOllamaDefinition(t *testing.T, handler http.HandlerFunc, probePaths []string, match discovery.MatchFunc) (*scanner.ScanResult, *[]string) {
+	t.Helper()
 	var paths []string
 	var mu sync.Mutex
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		paths = append(paths, r.URL.Path)
 		mu.Unlock()
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`generic web page`))
+		handler(w, r)
 	}))
-	defer srv.Close()
+	t.Cleanup(srv.Close)
 
 	cfg := config.Defaults()
 	cfg.Scope = "gate-scope"
@@ -601,8 +601,8 @@ func TestScanner_UnrecognizedServiceRecordsFailedCoverageOnce(t *testing.T) {
 	s, err := scanner.New(cfg, scanner.WithDefinitions([]discovery.Definition{{
 		Surface:     discovery.SurfaceOllama,
 		DefaultPort: parsePort(srv.URL),
-		ProbePaths:  []string{"/custom-probe"},
-		Match:       discovery.OllamaDefinition().Match,
+		ProbePaths:  probePaths,
+		Match:       match,
 	}}))
 	if err != nil {
 		t.Fatal(err)
@@ -611,25 +611,82 @@ func TestScanner_UnrecognizedServiceRecordsFailedCoverageOnce(t *testing.T) {
 	if err != nil {
 		t.Fatalf("scan failed: %v", err)
 	}
+	mu.Lock()
+	defer mu.Unlock()
+	return res, &paths
+}
+
+func TestScanner_UnmatchedServiceJournalsFailedCoverageWithoutCollecting(t *testing.T) {
+	res, paths := scanOllamaDefinition(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`generic web page`))
+	}, []string{"/custom-probe"}, discovery.OllamaDefinition().Match)
+
 	rec, ok := res.State.Targets()["127.0.0.1|ollama"]
 	if !ok {
 		t.Fatalf("attempted surface must have journal coverage: %+v", res.State.Targets())
 	}
 	if rec.Status != "failed" || res.State.IsCompleted("127.0.0.1", "ollama") {
-		t.Errorf("unrecognized service status = %q, want failed and not completed", rec.Status)
+		t.Errorf("status = %q, want failed and not completed", rec.Status)
 	}
-	for _, n := range res.State.Nodes() {
-		if n.Properties["coverage"] != "failed" {
-			t.Errorf("unrecognized service node %v claims coverage %v, want failed", n.Properties["name"], n.Properties["coverage"])
-		}
+	if !strings.Contains(rec.Error, "not identified as ollama") {
+		t.Errorf("reason %q should explain the unmatched fingerprint", rec.Error)
 	}
-	mu.Lock()
-	defer mu.Unlock()
-	seen := map[string]int{}
-	for _, p := range paths {
-		seen[p]++
-		if seen[p] > 1 {
-			t.Errorf("path %s requested %d times, want once", p, seen[p])
+	if len(res.State.Nodes()) != 0 {
+		t.Errorf("unmatched service must not emit nodes: %d", len(res.State.Nodes()))
+	}
+	if len(*paths) != 1 || (*paths)[0] != "/custom-probe" {
+		t.Errorf("requests = %v, want exactly [/custom-probe]", *paths)
+	}
+}
+
+func TestScanner_ConfiguredMatchGatesCollection(t *testing.T) {
+	res, paths := scanOllamaDefinition(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/version" {
+			_, _ = w.Write([]byte(`{"version": "0.3.12"}`))
+			return
 		}
+		w.WriteHeader(http.StatusNotFound)
+	}, []string{"/custom-probe"}, func(int, http.Header, []byte) bool { return true })
+
+	seen := map[string]bool{}
+	for _, p := range *paths {
+		seen[p] = true
+	}
+	if !seen["/custom-probe"] || !seen["/api/version"] {
+		t.Errorf("requests = %v, want configured probe then collector checks", *paths)
+	}
+	if _, ok := res.State.Targets()["127.0.0.1|ollama"]; !ok {
+		t.Errorf("matched surface must be collected and journaled")
+	}
+}
+
+func TestScanner_UnreachableSurfaceJournaledWithoutCollectorRequests(t *testing.T) {
+	srv := httptest.NewServer(http.NotFoundHandler())
+	port := parsePort(srv.URL)
+	srv.Close()
+
+	cfg := config.Defaults()
+	cfg.Scope = "gate-scope"
+	cfg.Targets = []string{"127.0.0.1"}
+	cfg.VantageKey = "vantage-test"
+	s, err := scanner.New(cfg, scanner.WithDefinitions([]discovery.Definition{{
+		Surface:     discovery.SurfaceOllama,
+		DefaultPort: port,
+		ProbePaths:  []string{"/api/version"},
+		Match:       discovery.OllamaDefinition().Match,
+	}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := s.Scan(context.Background(), []string{"127.0.0.1"}, t.TempDir(), "unreach")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := res.State.Targets()["127.0.0.1|ollama"]
+	if rec.Status != "failed" || !strings.Contains(rec.Error, "unreachable") {
+		t.Errorf("record = %+v, want failed unreachable", rec)
+	}
+	if len(res.State.Nodes()) != 0 {
+		t.Errorf("unreachable surface must not emit nodes")
 	}
 }

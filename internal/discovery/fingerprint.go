@@ -68,11 +68,14 @@ func OllamaDefinition() Definition {
 				if strings.Contains(bodyStr, "ollama is running") {
 					return true
 				}
-				if strings.Contains(bodyStr, `"version"`) && (strings.Contains(bodyStr, "ollama") || strings.Contains(bodyStr, ".")) {
-					return true
-				}
-				if strings.Contains(bodyStr, `"models"`) {
-					return true
+				var doc map[string]json.RawMessage
+				if json.Unmarshal(body, &doc) == nil {
+					if _, ok := doc["version"]; ok && len(doc) == 1 {
+						return true
+					}
+					if _, ok := doc["models"]; ok && len(doc) == 1 {
+						return true
+					}
 				}
 			}
 			if status == http.StatusUnauthorized || status == http.StatusForbidden {
@@ -100,17 +103,17 @@ func MCPDefinition() Definition {
 				return true
 			}
 			authHeader := strings.ToLower(headers.Get("Www-Authenticate"))
-			if strings.Contains(authHeader, "oauth") || strings.Contains(authHeader, "resource") {
+			if strings.Contains(authHeader, "resource_metadata") {
 				return true
 			}
 			bodyStr := strings.ToLower(string(body))
 			if status >= http.StatusBadRequest && status < http.StatusInternalServerError && strings.Contains(bodyStr, "mcp-session-id") {
 				return true
 			}
-			if strings.Contains(bodyStr, `"jsonrpc"`) || strings.Contains(bodyStr, `"mcp"`) {
+			if strings.Contains(bodyStr, `"jsonrpc"`) {
 				return true
 			}
-			if strings.Contains(bodyStr, `"authorization_servers"`) || strings.Contains(bodyStr, `"resource"`) {
+			if strings.Contains(bodyStr, `"authorization_servers"`) {
 				return true
 			}
 			return false

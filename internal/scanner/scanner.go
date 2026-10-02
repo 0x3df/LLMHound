@@ -416,14 +416,6 @@ func (s *Scanner) Scan(ctx context.Context, targets []string, outputDir, prefix 
 					continue
 				}
 				baseURL := discovery.BaseURLForHost(host, def.DefaultPort, false)
-				probe, err := discovery.Probe(ctx, s.httpClient, baseURL, def)
-				if err != nil {
-					recordFailure(fmt.Errorf("probe %s %s: %w", def.Surface, host, err))
-					continue
-				}
-				if probe.Reachable && !probe.Matched {
-					continue
-				}
 
 				switch def.Surface {
 				case discovery.SurfaceJupyter:

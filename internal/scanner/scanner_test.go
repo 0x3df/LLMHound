@@ -447,7 +447,7 @@ func TestScanner_MixedTargetsAndHonestCoverage(t *testing.T) {
 	deniedSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("WWW-Authenticate", `Bearer realm="ollama"`)
 		w.WriteHeader(http.StatusUnauthorized)
-		_, _ = w.Write([]byte(`{"error": "ollama: unauthorized"}`))
+		_, _ = w.Write([]byte(`{"error": "unauthorized"}`))
 	}))
 	defer deniedSrv.Close()
 	deniedPort := parsePort(deniedSrv.URL)
@@ -581,7 +581,7 @@ func TestScanner_DefinitionsSelectSurfaces(t *testing.T) {
 	}
 }
 
-func TestScanner_ConfiguredProbePathsAndMatchGateCollection(t *testing.T) {
+func TestScanner_UnrecognizedServiceRecordsFailedCoverageOnce(t *testing.T) {
 	var paths []string
 	var mu sync.Mutex
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -596,16 +596,14 @@ func TestScanner_ConfiguredProbePathsAndMatchGateCollection(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.Scope = "gate-scope"
 	cfg.Targets = []string{"127.0.0.1"}
-	cfg.Targets = []string{"127.0.0.1"}
 	cfg.VantageKey = "vantage-test"
 
-	def := discovery.Definition{
+	s, err := scanner.New(cfg, scanner.WithDefinitions([]discovery.Definition{{
 		Surface:     discovery.SurfaceOllama,
 		DefaultPort: parsePort(srv.URL),
 		ProbePaths:  []string{"/custom-probe"},
 		Match:       discovery.OllamaDefinition().Match,
-	}
-	s, err := scanner.New(cfg, scanner.WithDefinitions([]discovery.Definition{def}))
+	}}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -613,12 +611,25 @@ func TestScanner_ConfiguredProbePathsAndMatchGateCollection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("scan failed: %v", err)
 	}
-	if len(res.State.Targets()) != 0 {
-		t.Errorf("non-matching reachable service must not be collected: %+v", res.State.Targets())
+	rec, ok := res.State.Targets()["127.0.0.1|ollama"]
+	if !ok {
+		t.Fatalf("attempted surface must have journal coverage: %+v", res.State.Targets())
+	}
+	if rec.Status != "failed" || res.State.IsCompleted("127.0.0.1", "ollama") {
+		t.Errorf("unrecognized service status = %q, want failed and not completed", rec.Status)
+	}
+	for _, n := range res.State.Nodes() {
+		if n.Properties["coverage"] != "failed" {
+			t.Errorf("unrecognized service node %v claims coverage %v, want failed", n.Properties["name"], n.Properties["coverage"])
+		}
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if len(paths) != 1 || paths[0] != "/custom-probe" {
-		t.Errorf("probed paths = %v, want only [/custom-probe]", paths)
+	seen := map[string]int{}
+	for _, p := range paths {
+		seen[p]++
+		if seen[p] > 1 {
+			t.Errorf("path %s requested %d times, want once", p, seen[p])
+		}
 	}
 }

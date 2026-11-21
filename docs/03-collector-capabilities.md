@@ -9,8 +9,10 @@ every field anonymously. Exact operations and supported releases must be verifie
 against official product/protocol documentation and recorded in collector tests.
 Live CLI coverage vs package-only tests: [scan coverage](internals/scan-coverage.md);
 per-collector behavior: [`collectors/`](collectors/).
-The content tier and secret detection described below are specified but not yet
-built; today's collectors are metadata-only (see the
+Default-on, bounded content-tier reads (`ollama_show`, `jupyter_file_content`,
+and `mcp_resources_read`) are implemented and isolated in `<prefix>.content.jsonl`
+(mode `0600`); high-precision secret detection over those bodies is implemented
+in `internal/secrets` (`private_key`, `github_token`, `aws_access_key`; see the
 [implementation status](02-graph-model.md#implementation-status)).
 
 ## Default collection policy
@@ -77,14 +79,14 @@ deployment; denied checks remain denied, not a reason to authenticate.
 
 | Surface | Default metadata checks | Version distinctions and content-tier reads |
 |---|---|---|
-| MCP | Server implementation identity, negotiated protocol, advertised capabilities; tools with bounded descriptions/input schemas/annotations; resource metadata/templates and URI schemes; prompt metadata. On a 401, anonymous RFC 9728 protected-resource metadata (`/.well-known/oauth-protected-resource`) recording the advertised authorization server(s) | Implementation version is separate from protocol version. Resource body reads (content tier) are limited to reviewed read semantics; listing is sufficient for inventory. Authorization-server URLs are recorded, not followed. Network transports only (Streamable HTTP, legacy SSE); stdio servers are out of scope. |
+| MCP | Server implementation identity, negotiated protocol, advertised capabilities; tools with bounded descriptions/input schemas/annotations; resource metadata/templates and URI schemes; prompt metadata. On a 401, anonymous RFC 9728 protected-resource metadata (`/.well-known/oauth-protected-resource`) recording the advertised authorization server(s) | Implementation version is separate from protocol version. Text resource bodies (`mcp_resources_read`, content tier) are read by default into `.content.jsonl` within `content.*` bounds and skip binary MIME types; `tools` are never invoked. Authorization-server URLs are recorded, not followed. Network transports only (Streamable HTTP, legacy SSE); stdio servers are out of scope. |
 | A2A | Public agent card at `/.well-known/agent-card.json`, falling back to legacy `/.well-known/agent.json`; provider/interface metadata, advertised skills, protocol support, security requirements | Agent-reported version is separate from protocol version; security declarations are not observed enforcement. Record which card path answered. No automatic retrieval of protected cards or arbitrary linked documents. |
-| Ollama | Reported runtime version; model catalog, reported digests, size, and available model metadata | Verify the documented version operation (such as `/api/version`) for supported releases. Model tag/digest is separate from runtime version. Templates, modelfiles, and system prompts are content-tier reads (for example via the documented model-show operation). |
+| Ollama | Reported runtime version; model catalog, reported digests, size, and available model metadata | Verify the documented version operation (such as `/api/version`) for supported releases. Model tag/digest is separate from runtime version. Templates, modelfiles, and system prompts are read by default (`ollama_show`, content tier) via `/api/show` into `.content.jsonl` within `content.*` bounds. |
 | vLLM | Reported server identity/version where available; served model identifiers and exposed metadata | OpenAI-compatible API shape alone does not establish vLLM identity/version. Preserve reported model aliases without guessing backend artifacts. |
 | LiteLLM | Gateway identity/version where exposed; model catalog; allowlisted provider/backend and alias metadata | Gateway version and backend versions remain separate. Configuration is a content-tier read; a high-precision secret match sets only a presence flag; the value is discarded. |
 | Qdrant | Reported service version/build; collection inventory, counts, schema and storage metadata when exposed | Point payloads are content-tier bounded samples (default 5 per collection) that preserve collection scope; vectors are never fetched. |
 | MLflow | Reported server identity/version; experiment and registered-model metadata; model versions, stages/aliases where supported, and sanitized artifact-store references | Registry model version is separate from MLflow version. Artifact listings are inventory; small text artifacts (MLmodel, requirements, parameters) are content-tier reads; model weights are never fetched. |
-| Jupyter | Reported server/API metadata; authentication outcomes; session metadata and contents listings without file bodies | API version does not imply a particular server/package version. Notebook/file bodies are content-tier reads, bounded per item and per service. |
+| Jupyter | Reported server/API metadata; authentication outcomes; session metadata and contents listings without file bodies | API version does not imply a particular server/package version. Non-binary notebook and file bodies are read by default (`jupyter_file_content`, content tier) into `.content.jsonl` within `content.*` bounds. |
 | Open WebUI | Reported application identity/version; model inventory and explicitly exposed backend references | Application version is distinct from Ollama or other backends. Configuration is a content-tier read. |
 | LangServe | Fingerprint, exposed route/schema metadata and runnable descriptions | An OpenAPI document's application/API version is not automatically the LangServe package version. Bound schemas and avoid treating examples as observed results. |
 

@@ -14,15 +14,19 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/netip"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/0x3df/LLMHound/internal/checkpoint"
 	"github.com/0x3df/LLMHound/internal/config"
+	"github.com/0x3df/LLMHound/internal/content"
 	"github.com/0x3df/LLMHound/internal/correlate"
 	"github.com/0x3df/LLMHound/internal/emitter"
 	"github.com/0x3df/LLMHound/internal/evidence"
 	"github.com/0x3df/LLMHound/internal/graph"
+	"github.com/0x3df/LLMHound/internal/secrets"
 	"github.com/0x3df/LLMHound/internal/transport"
 )
 
@@ -82,19 +86,31 @@ type ShowRequest struct {
 	Name string `json:"name"`
 }
 
-// ShowProvenance is the only part of the POST /api/show payload that is decoded.
-// Modelfile, system prompt, and template content are never decoded or retained.
+// ShowProvenance holds the redacted non-content provenance from POST /api/show.
 type ShowProvenance struct {
 	Details ModelDetails `json:"details,omitempty"`
 	License string       `json:"license,omitempty"`
+}
+
+// ShowResponse decodes POST /api/show. Content fields (modelfile, template,
+// system, parameters) are written only to the restricted .content.jsonl sink
+// under configured bounds and never copied into graph nodes or evidence.
+type ShowResponse struct {
+	Details    ModelDetails `json:"details,omitempty"`
+	License    string       `json:"license,omitempty"`
+	Modelfile  string       `json:"modelfile,omitempty"`
+	Parameters string       `json:"parameters,omitempty"`
+	Template   string       `json:"template,omitempty"`
+	System     string       `json:"system,omitempty"`
 }
 
 const maxProvenanceFieldLen = 200
 
 // Collector implements Ollama surface enumeration.
 type Collector struct {
-	cfg       config.Config
-	transport *transport.Client
+	cfg         config.Config
+	transport   *transport.Client
+	contentSink content.Sink
 }
 
 // Option configures Collector behavior.
@@ -104,6 +120,13 @@ type Option func(*Collector)
 func WithTransport(tc *transport.Client) Option {
 	return func(c *Collector) {
 		c.transport = tc
+	}
+}
+
+// WithContentSink configures where bounded content-tier records are written.
+func WithContentSink(sink content.Sink) Option {
+	return func(c *Collector) {
+		c.contentSink = sink
 	}
 }
 
@@ -133,21 +156,13 @@ func ParseTargetEndpoint(targetStr string) (graph.Endpoint, string, error) {
 
 	rawURL := trimmed
 	if !strings.Contains(rawURL, "://") {
-		// Determine default scheme and port
-		scheme := "http"
 		hostPart := rawURL
-		if strings.HasPrefix(hostPart, "https://") {
-			scheme = "https"
-			hostPart = strings.TrimPrefix(hostPart, "https://")
-		} else if strings.HasPrefix(hostPart, "http://") {
-			hostPart = strings.TrimPrefix(hostPart, "http://")
-		}
-
-		if _, _, err := net.SplitHostPort(hostPart); err != nil {
-			// No port specified, append standard Ollama port
-			rawURL = fmt.Sprintf("%s://%s:%d", scheme, hostPart, DefaultPort)
+		if _, err := netip.ParseAddr(hostPart); err == nil {
+			rawURL = "http://" + net.JoinHostPort(hostPart, strconv.Itoa(DefaultPort))
+		} else if _, _, err := net.SplitHostPort(hostPart); err != nil {
+			rawURL = fmt.Sprintf("http://%s:%d", hostPart, DefaultPort)
 		} else {
-			rawURL = fmt.Sprintf("%s://%s", scheme, hostPart)
+			rawURL = "http://" + hostPart
 		}
 	}
 
@@ -198,6 +213,7 @@ func (c *Collector) Collect(
 	var rawReportedVersion string
 	var catalogModels []ModelInfo
 	var catalogTruncated bool
+	var psTruncated bool
 	var runningModels []ModelInfo
 	var degraded []string
 	absorb := func(resp *transport.Response) {
@@ -223,6 +239,7 @@ func (c *Collector) Collect(
 		op := "ollama_version"
 		verURL := baseURL + "/api/version"
 		resp, reqErr := c.transport.Get(ctx, verURL)
+		absorb(resp)
 
 		if reqErr != nil {
 			versionCheckErr = reqErr
@@ -236,20 +253,7 @@ func (c *Collector) Collect(
 				Reason:    reason,
 			})
 			checkDetails[checkID] = map[string]any{"error": reason}
-			if resp != nil && resp.TLS != nil {
-				tlsInfo = resp.TLS
-			}
-			if resp != nil && len(resp.Redirects) > 0 {
-				redirects = append(redirects, resp.Redirects...)
-			}
 		} else {
-			if resp.TLS != nil {
-				tlsInfo = resp.TLS
-			}
-			if len(resp.Redirects) > 0 {
-				redirects = append(redirects, resp.Redirects...)
-			}
-
 			switch resp.StatusCode {
 			case http.StatusOK:
 				var v VersionResponse
@@ -329,6 +333,7 @@ func (c *Collector) Collect(
 		op := "ollama_tags"
 		tagsURL := baseURL + "/api/tags"
 		resp, reqErr := c.transport.Get(ctx, tagsURL)
+		absorb(resp)
 
 		if reqErr != nil {
 			tagsCheckErr = reqErr
@@ -342,20 +347,7 @@ func (c *Collector) Collect(
 				Reason:    reason,
 			})
 			checkDetails[checkID] = map[string]any{"error": reason}
-			if resp != nil && resp.TLS != nil && tlsInfo == nil {
-				tlsInfo = resp.TLS
-			}
-			if resp != nil && len(resp.Redirects) > 0 {
-				redirects = append(redirects, resp.Redirects...)
-			}
 		} else {
-			if resp.TLS != nil && tlsInfo == nil {
-				tlsInfo = resp.TLS
-			}
-			if len(resp.Redirects) > 0 {
-				redirects = append(redirects, resp.Redirects...)
-			}
-
 			switch resp.StatusCode {
 			case http.StatusOK:
 				var t TagsResponse
@@ -467,6 +459,7 @@ func (c *Collector) Collect(
 				if err := json.Unmarshal(resp.Body, &ps); err == nil {
 					runningModels = ps.Models
 					if maxItems := c.cfg.Bounds.MaxItems; maxItems > 0 && len(runningModels) > maxItems {
+						psTruncated = true
 						runningModels = runningModels[:maxItems]
 					}
 					checkResults = append(checkResults, graph.CheckResult{
@@ -479,6 +472,7 @@ func (c *Collector) Collect(
 					checkDetails[checkID] = map[string]any{
 						"http_status":          resp.StatusCode,
 						"running_models_count": len(ps.Models),
+						"truncated":            psTruncated,
 					}
 				} else {
 					psReason := "invalid JSON response from ps endpoint"
@@ -530,21 +524,23 @@ func (c *Collector) Collect(
 		}
 	}
 
-	// 4. Check: Detailed Model Metadata (POST /api/show) - Sensitive reads requiring opt-in
+	// 4. Check: Model Provenance & Content Tier (POST /api/show)
+	var contentSummary *graph.ContentSummary
+	var contentTruncated bool
 	{
 		checkID := CheckShow
 		op := "ollama_show"
-		hasOptIn := c.cfg.OptIns.Prompts || c.cfg.OptIns.ConfigurationContent || c.cfg.OptIns.ResourceContent
+		contentEnabled := c.cfg.Content.EnabledFor(Surface)
 
-		if !hasOptIn {
+		if !contentEnabled {
 			checkResults = append(checkResults, graph.CheckResult{
 				CheckID:   checkID,
 				Operation: op,
 				TargetID:  srvID.ID(),
 				Outcome:   graph.OutcomeSkipped,
-				Reason:    "sensitive template/modelfile read requires explicit opt-in",
+				Reason:    "content collection disabled by policy",
 			})
-			checkDetails[checkID] = map[string]any{"skipped": true, "policy": "default_read_only"}
+			checkDetails[checkID] = map[string]any{"skipped": true, "policy": "content_disabled"}
 		} else if len(catalogModels) == 0 {
 			checkResults = append(checkResults, graph.CheckResult{
 				CheckID:   checkID,
@@ -555,35 +551,146 @@ func (c *Collector) Collect(
 			})
 			checkDetails[checkID] = map[string]any{"skipped": true}
 		} else {
-			// Query /api/show for models with bounds and sanitization
+			budget := content.NewBudget(c.cfg.Content, secrets.NewRedactor(c.cfg.Secrets))
 			successCount := 0
+			sysFound := false
+			cfgFound := false
 			showProvenance := make(map[string]map[string]any)
 			var showErrors []string
+			maxShowAttempts := c.cfg.Bounds.MaxItems
+			if maxShowAttempts <= 0 {
+				maxShowAttempts = 10000
+			}
+			showAttempts := 0
 			for _, m := range catalogModels {
-				showReqBody, _ := json.Marshal(ShowRequest{Name: m.Name})
+				modelName := strings.TrimSpace(m.Name)
+				if modelName == "" {
+					modelName = strings.TrimSpace(m.Model)
+				}
+				if modelName == "" {
+					continue
+				}
+				reqName := m.Name
+				if showAttempts >= maxShowAttempts {
+					budget.MarkTruncated(fmt.Sprintf("model show reads reached max_items (%d)", maxShowAttempts))
+					break
+				}
+				showAttempts++
+				if reqName == "" {
+					reqName = m.Model
+				}
+				showReqBody, _ := json.Marshal(ShowRequest{Name: reqName})
 				resp, showErr := c.transport.Post(ctx, baseURL+"/api/show", "application/json", showReqBody)
 				absorb(resp)
 				if showErr != nil {
-					showErrors = append(showErrors, fmt.Sprintf("%s: %s", m.Name, sanitizeError(showErr)))
+					showErrors = append(showErrors, fmt.Sprintf("%s: %s", reqName, sanitizeError(showErr)))
 					continue
 				}
-				var sp ShowProvenance
-				if resp.StatusCode == http.StatusOK && resp.Truncated {
-					showErrors = append(showErrors, fmt.Sprintf("%s: response truncated at max_response_bytes limit", m.Name))
-				} else if resp.StatusCode == http.StatusOK && json.Unmarshal(resp.Body, &sp) == nil {
-					sp = redactProvenance(sp)
-					provenance[m.Name] = sp
-					showProvenance[m.Name] = map[string]any{
-						"parent_model": sp.Details.ParentModel,
-						"family":       sp.Details.Family,
-						"license":      sp.License,
-					}
-					successCount++
-				} else if resp.StatusCode == http.StatusOK {
-					showErrors = append(showErrors, fmt.Sprintf("%s: invalid JSON", m.Name))
-				} else {
-					showErrors = append(showErrors, fmt.Sprintf("%s: HTTP %d", m.Name, resp.StatusCode))
+				if resp.StatusCode != http.StatusOK {
+					showErrors = append(showErrors, fmt.Sprintf("%s: HTTP %d", reqName, resp.StatusCode))
+					continue
 				}
+				if resp.Truncated {
+					responseTruncated = true
+					budget.MarkTruncated(fmt.Sprintf("show response for %s truncated at max_response_bytes", reqName))
+					showErrors = append(showErrors, fmt.Sprintf("%s: response truncated at max_response_bytes limit", reqName))
+					continue
+				}
+				var showResp ShowResponse
+				if err := json.Unmarshal(resp.Body, &showResp); err != nil {
+					showErrors = append(showErrors, fmt.Sprintf("%s: invalid JSON", reqName))
+					continue
+				}
+				sp := redactProvenance(ShowProvenance{Details: showResp.Details, License: showResp.License})
+				provenance[m.Name] = sp
+				showProvenance[m.Name] = map[string]any{
+					"parent_model": sp.Details.ParentModel,
+					"family":       sp.Details.Family,
+					"license":      sp.License,
+				}
+				successCount++
+
+				resID := ""
+				if modelID, idErr := graph.NewResourceIdentity(scope, graph.AIModel, srvID, modelName); idErr == nil {
+					resID = modelID.ID()
+				}
+				for _, part := range []struct {
+					kind   content.Kind
+					suffix string
+					body   string
+					isSys  bool
+					isCfg  bool
+				}{
+					{content.KindSystemPrompt, "#system", showResp.System, true, false},
+					{content.KindModelfile, "#modelfile", showResp.Modelfile, false, true},
+					{content.KindTemplate, "#template", showResp.Template, false, true},
+					{content.KindConfig, "#parameters", showResp.Parameters, false, true},
+				} {
+					if strings.TrimSpace(part.body) == "" {
+						continue
+					}
+					if ok, _ := budget.ClaimResourceItem(modelName); !ok {
+						break
+					}
+					rec, added, addErr := budget.Add(content.RecordInput{
+						DeploymentScope: scope,
+						ScanID:          scanID,
+						VantageKey:      vantageKey,
+						ServiceID:       srvID.ID(),
+						ResourceID:      resID,
+						Surface:         Surface,
+						CheckID:         checkID,
+						Source:          baseURL + "/api/show",
+						Kind:            part.kind,
+						Location:        modelName + part.suffix,
+						MediaType:       "text/plain",
+						ObservedAt:      obsTime,
+						Body:            part.body,
+					})
+					if addErr != nil {
+						return checkpoint.Result{}, fmt.Errorf("create ollama content record: %w", addErr)
+					}
+					if added {
+						if part.isSys {
+							sysFound = true
+						}
+						if part.isCfg {
+							cfgFound = true
+						}
+						if c.contentSink != nil {
+							if err := c.contentSink.Write(rec); err != nil {
+								return checkpoint.Result{}, fmt.Errorf("write ollama content record: %w", err)
+							}
+						}
+					}
+				}
+			}
+
+			contentTruncated = budget.Truncated()
+			allClean := successCount == len(catalogModels) && len(showErrors) == 0 && !contentTruncated
+			var sysPtr, cfgPtr *bool
+			if sysFound {
+				v := true
+				sysPtr = &v
+			} else if allClean {
+				v := false
+				sysPtr = &v
+			}
+			if cfgFound {
+				v := true
+				cfgPtr = &v
+			} else if allClean {
+				v := false
+				cfgPtr = &v
+			}
+			contentSummary = &graph.ContentSummary{
+				Collected:           true,
+				Bytes:               budget.Bytes(),
+				Truncated:           contentTruncated,
+				SystemPromptPresent: sysPtr,
+				ConfigCollected:     cfgPtr,
+				SecretTypes:         budget.SecretTypes(),
+				SecretConfirmedAt:   obsTime,
 			}
 
 			if successCount > 0 {
@@ -594,11 +701,18 @@ func (c *Collector) Collect(
 					Outcome:   graph.OutcomeSuccess,
 					Reason:    fmt.Sprintf("model provenance retrieved for %d of %d models", successCount, len(catalogModels)),
 				})
-				checkDetails[checkID] = map[string]any{
-					"success_count": successCount,
-					"provenance":    showProvenance,
-					"errors":        showErrors,
+				successDetails := map[string]any{
+					"success_count":     successCount,
+					"provenance":        showProvenance,
+					"content_items":     len(budget.Records()),
+					"content_bytes":     budget.Bytes(),
+					"content_truncated": contentTruncated,
+					"errors":            showErrors,
 				}
+				if found := budget.Findings(); len(found) > 0 {
+					successDetails["detected_exposures"] = content.ExposureDetails(found)
+				}
+				checkDetails[checkID] = successDetails
 				if len(showErrors) > 0 {
 					degraded = append(degraded, fmt.Sprintf("model provenance retrieved for %d of %d models", successCount, len(catalogModels)))
 				}
@@ -649,10 +763,23 @@ func (c *Collector) Collect(
 		finalStatus = checkpoint.TargetStatusPartial
 		finalCoverageReason = "authentication required: all metadata endpoints denied access"
 	} else if verSuccess && tagsSuccess {
-		if catalogTruncated || responseTruncated {
+		if catalogTruncated || psTruncated || responseTruncated || contentTruncated {
+			var reasons []string
+			if catalogTruncated {
+				reasons = append(reasons, "model catalog truncated at max_items bound")
+			}
+			if psTruncated {
+				reasons = append(reasons, "running models truncated at max_items bound")
+			}
+			if responseTruncated {
+				reasons = append(reasons, "response body truncated at max_response_bytes bound")
+			}
+			if contentTruncated {
+				reasons = append(reasons, "content tier truncated at configured bounds")
+			}
 			finalCoverage = graph.CoverageTruncated
 			finalStatus = checkpoint.TargetStatusPartial
-			finalCoverageReason = "model catalog or running models truncated by max_items or max_response_bytes limit"
+			finalCoverageReason = strings.Join(reasons, "; ")
 		} else if len(degraded) > 0 {
 			finalCoverage = graph.CoveragePartial
 			finalStatus = checkpoint.TargetStatusPartial
@@ -712,173 +839,182 @@ func (c *Collector) Collect(
 	}
 	access := graph.SummarizeAccess(accessEvidence)
 
-	// 7. Build Graph Nodes
+	// 7. Build Graph Nodes (only when the target was positively fingerprinted or denied)
 	var nodes []emitter.NodeItem
-
-	// Service node: OllamaInstance
-	srvNode, err := graph.NewNode(srvID, obs)
-	if err != nil {
-		return checkpoint.Result{}, fmt.Errorf("create service node: %w", err)
-	}
-
-	facts := graph.ServiceFacts{
-		Endpoint: ep, Name: fmt.Sprintf("OLLAMA · %s:%d", ep.Host(), ep.Port()),
-		Product: "Ollama", Vendor: "Ollama", VantageKey: vantageKey, Access: access,
-		// Ollama's documented API includes pull, copy, and delete; this is
-		// inferred from product identity, not exercised.
-		ExecSurface: []string{graph.ExecModelMutation}, ExecSurfaceBasis: graph.BasisInferred,
-	}
-	if tlsInfo != nil {
-		facts.TLS = &graph.TLSSummary{
-			Result: tlsInfo.VerificationResult, Reason: tlsInfo.VerificationReason,
-			LeafSHA256: tlsInfo.CertFingerprint, Issuer: tlsInfo.Issuer, NotAfter: tlsInfo.ValidTo,
-			TLSVersion: tlsInfo.NegotiatedVersion, InsecureSet: tlsInfo.InsecureOverride,
-		}
-	}
-	srvProps := facts.Properties()
-	if reportedVersion != "" {
-		srvProps["software_version"] = reportedVersion
-	}
-	if rawReportedVersion != "" {
-		srvProps["software_version_raw"] = rawReportedVersion
-	}
-
-	srvItem, err := emitter.NewNodeItem(srvNode, srvProps)
-	if err != nil {
-		return checkpoint.Result{}, fmt.Errorf("create service node item: %w", err)
-	}
-	nodes = append(nodes, srvItem)
-
-	// Map of running model names for fast lookup
-	runningMap := make(map[string]ModelInfo)
-	for _, rm := range runningModels {
-		runningMap[rm.Name] = rm
-		if rm.Model != "" {
-			runningMap[rm.Model] = rm
-		}
-	}
-
-	// Model nodes: AIModel
 	var edges []graph.Edge
-	for _, m := range catalogModels {
-		modelName := strings.TrimSpace(m.Name)
-		if modelName == "" {
-			modelName = strings.TrimSpace(m.Model)
-		}
-		if modelName == "" {
-			continue
-		}
-
-		modelID, mErr := graph.NewResourceIdentity(scope, graph.AIModel, srvID, modelName)
-		if mErr != nil {
-			continue
-		}
-		modelNode, mErr := graph.NewNode(modelID, obs)
-		if mErr != nil {
-			continue
-		}
-
-		modelProps := map[string]any{
-			"name": strings.ToUpper(modelName),
-		}
-		if m.Digest != "" {
-			modelProps["digest"] = m.Digest
-		}
-		if m.Size > 0 {
-			modelProps["size"] = m.Size
-		}
-		if m.Details.Format != "" {
-			modelProps["format"] = m.Details.Format
-		}
-		if m.Details.Family != "" {
-			modelProps["family"] = m.Details.Family
-		}
-		if m.Details.ParameterSize != "" {
-			modelProps["parameter_size"] = m.Details.ParameterSize
-		}
-		if m.Details.QuantizationLevel != "" {
-			modelProps["quantization_level"] = m.Details.QuantizationLevel
-		}
-		if m.Details.ParentModel != "" {
-			modelProps["parent_model"] = m.Details.ParentModel
-		}
-		if m.ModifiedAt != "" {
-			modelProps["modified_at"] = m.ModifiedAt
-		}
-		if sp, ok := provenance[m.Name]; ok {
-			if sp.Details.ParentModel != "" {
-				modelProps["parent_model"] = sp.Details.ParentModel
-			}
-			if sp.Details.Family != "" {
-				modelProps["family"] = sp.Details.Family
-			}
-			if sp.License != "" {
-				modelProps["license"] = sp.License
-			}
-			modelProps["provenance_source"] = "api_show"
-		}
-		if rm, ok := runningMap[modelName]; ok {
-			modelProps["running"] = true
-			if rm.SizeVRAM > 0 {
-				modelProps["size_vram"] = rm.SizeVRAM
-			}
-			if rm.ExpiresAt != "" {
-				modelProps["expires_at"] = rm.ExpiresAt
-			}
-		}
-
-		modelItem, mErr := emitter.NewNodeItem(modelNode, modelProps)
-		if mErr != nil {
-			continue
-		}
-		nodes = append(nodes, modelItem)
-
-		// Topology Edge: ProvidesModel (OllamaInstance -> AIModel)
-		pmEdge, pmErr := graph.NewTopologyEdge(graph.ProvidesModel, srvID.Reference(), modelID.Reference(), obs)
-		if pmErr == nil {
-			edges = append(edges, pmEdge)
-		}
-	}
-
-	// 8. Attachment: an existing native node when the mapping names one,
-	// otherwise a scoped NetworkEndpoint fallback.
 	var evidenceRecords []evidence.Record
-	corrResult, cErr := resolver.Resolve(scope, targetHost)
-	if cErr != nil {
-		return checkpoint.Result{}, fmt.Errorf("correlate target: %w", cErr)
-	}
-	if fbID, ok := corrResult.FallbackIdentity(); ok {
-		netNode, err := graph.NewNode(fbID, obs)
+
+	if finalCoverage != graph.CoverageFailed {
+		// Service node: OllamaInstance
+		srvNode, err := graph.NewNode(srvID, obs)
 		if err != nil {
-			return checkpoint.Result{}, fmt.Errorf("create fallback node: %w", err)
+			return checkpoint.Result{}, fmt.Errorf("create service node: %w", err)
 		}
-		netItem, err := emitter.NewNodeItem(netNode, map[string]any{
-			"name":         strings.ToUpper(corrResult.Evidence().NormalizedTarget),
-			"target_type":  string(corrResult.Evidence().TargetType),
-			"target_value": corrResult.Evidence().NormalizedTarget,
-		})
+
+		facts := graph.ServiceFacts{
+			Endpoint: ep, Name: fmt.Sprintf("OLLAMA · %s:%d", ep.Host(), ep.Port()),
+			Product: "Ollama", Vendor: "Ollama", VantageKey: vantageKey, Access: access,
+			// Ollama's documented API includes pull, copy, and delete; this is
+			// inferred from product identity, not exercised.
+			ExecSurface: []string{graph.ExecModelMutation}, ExecSurfaceBasis: graph.BasisInferred,
+			Content: contentSummary,
+		}
+		if tlsInfo != nil {
+			facts.TLS = &graph.TLSSummary{
+				Result: tlsInfo.VerificationResult, Reason: tlsInfo.VerificationReason,
+				LeafSHA256: tlsInfo.CertFingerprint, Issuer: tlsInfo.Issuer, NotAfter: tlsInfo.ValidTo,
+				TLSVersion: tlsInfo.NegotiatedVersion, InsecureSet: tlsInfo.InsecureOverride,
+			}
+		}
+		srvProps := facts.Properties()
+		if reportedVersion != "" {
+			srvProps["software_version"] = reportedVersion
+		}
+		if rawReportedVersion != "" {
+			srvProps["software_version_raw"] = rawReportedVersion
+		}
+
+		srvItem, err := emitter.NewNodeItem(srvNode, srvProps)
 		if err != nil {
-			return checkpoint.Result{}, fmt.Errorf("create fallback node item: %w", err)
+			return checkpoint.Result{}, fmt.Errorf("create service node item: %w", err)
 		}
-		nodes = append(nodes, netItem)
+		nodes = append(nodes, srvItem)
+
+		// Map of running model names for fast lookup
+		runningMap := make(map[string]ModelInfo)
+		for _, rm := range runningModels {
+			runningMap[rm.Name] = rm
+			if rm.Model != "" {
+				runningMap[rm.Model] = rm
+			}
+		}
+
+		// Model nodes: AIModel
+		for _, m := range catalogModels {
+			modelName := strings.TrimSpace(m.Name)
+			if modelName == "" {
+				modelName = strings.TrimSpace(m.Model)
+			}
+			if modelName == "" {
+				continue
+			}
+
+			modelID, mErr := graph.NewResourceIdentity(scope, graph.AIModel, srvID, modelName)
+			if mErr != nil {
+				continue
+			}
+			modelNode, mErr := graph.NewNode(modelID, obs)
+			if mErr != nil {
+				continue
+			}
+
+			modelProps := map[string]any{
+				"name": strings.ToUpper(modelName),
+			}
+			if m.Digest != "" {
+				modelProps["digest"] = m.Digest
+			}
+			if m.Size > 0 {
+				modelProps["size"] = m.Size
+			}
+			if m.Details.Format != "" {
+				modelProps["format"] = m.Details.Format
+			}
+			if m.Details.Family != "" {
+				modelProps["family"] = m.Details.Family
+			}
+			if m.Details.ParameterSize != "" {
+				modelProps["parameter_size"] = m.Details.ParameterSize
+			}
+			if m.Details.QuantizationLevel != "" {
+				modelProps["quantization_level"] = m.Details.QuantizationLevel
+			}
+			if m.Details.ParentModel != "" {
+				modelProps["parent_model"] = m.Details.ParentModel
+			}
+			if m.ModifiedAt != "" {
+				modelProps["modified_at"] = m.ModifiedAt
+			}
+			if sp, ok := provenance[m.Name]; ok {
+				if sp.Details.ParentModel != "" {
+					modelProps["parent_model"] = sp.Details.ParentModel
+				}
+				if sp.Details.Family != "" {
+					modelProps["family"] = sp.Details.Family
+				}
+				if sp.License != "" {
+					modelProps["license"] = sp.License
+				}
+				modelProps["provenance_source"] = "api_show"
+			}
+			if rm, ok := runningMap[modelName]; ok {
+				modelProps["running"] = true
+				if rm.SizeVRAM > 0 {
+					modelProps["size_vram"] = rm.SizeVRAM
+				}
+				if rm.ExpiresAt != "" {
+					modelProps["expires_at"] = rm.ExpiresAt
+				}
+			}
+
+			modelItem, mErr := emitter.NewNodeItem(modelNode, modelProps)
+			if mErr != nil {
+				continue
+			}
+			nodes = append(nodes, modelItem)
+
+			// Topology Edge: ProvidesModel (OllamaInstance -> AIModel)
+			pmEdge, pmErr := graph.NewTopologyEdge(graph.ProvidesModel, srvID.Reference(), modelID.Reference(), obs)
+			if pmErr == nil {
+				edges = append(edges, pmEdge)
+			}
+		}
+
+		// 8. Attachment: an existing native node when the mapping names one,
+		// otherwise a scoped NetworkEndpoint fallback.
+		corrResult, cErr := resolver.Resolve(scope, targetHost)
+		if cErr != nil {
+			return checkpoint.Result{}, fmt.Errorf("correlate target: %w", cErr)
+		}
+		if fbID, ok := corrResult.FallbackIdentity(); ok {
+			netNode, err := graph.NewNode(fbID, obs)
+			if err != nil {
+				return checkpoint.Result{}, fmt.Errorf("create fallback node: %w", err)
+			}
+			netItem, err := emitter.NewNodeItem(netNode, map[string]any{
+				"name":         strings.ToUpper(corrResult.Evidence().NormalizedTarget),
+				"target_type":  string(corrResult.Evidence().TargetType),
+				"target_value": corrResult.Evidence().NormalizedTarget,
+			})
+			if err != nil {
+				return checkpoint.Result{}, fmt.Errorf("create fallback node item: %w", err)
+			}
+			nodes = append(nodes, netItem)
+		}
+		observedAt, err := corrResult.ObservedAt(srvID, obs)
+		if err != nil {
+			return checkpoint.Result{}, fmt.Errorf("create ObservedAt edge: %w", err)
+		}
+		edges = append(edges, observedAt)
+		corrObs := obs
+		corrObs.EvidenceID = evidenceID + "-correlation"
+		corrRec, err := evidence.NewCorrelationRecord(corrResult.Evidence(), corrObs)
+		if err != nil {
+			return checkpoint.Result{}, fmt.Errorf("create correlation record: %w", err)
+		}
+		evidenceRecords = append(evidenceRecords, corrRec)
 	}
-	observedAt, err := corrResult.ObservedAt(srvID, obs)
-	if err != nil {
-		return checkpoint.Result{}, fmt.Errorf("create ObservedAt edge: %w", err)
-	}
-	edges = append(edges, observedAt)
-	corrRec, err := evidence.NewCorrelationRecord(corrResult.Evidence(), obs)
-	if err != nil {
-		return checkpoint.Result{}, fmt.Errorf("create correlation record: %w", err)
-	}
-	evidenceRecords = append(evidenceRecords, corrRec)
 
 	// 10. Assemble Evidence Sidecar Records
 	for _, cr := range checkResults {
-		cr.Observation = obs
+		crObs := obs
+		crObs.EvidenceID = evidenceID + "-" + cr.CheckID
+		cr.Observation = crObs
 		details := checkDetails[cr.CheckID]
 		if cr.CheckID == CheckTags && accessEv != nil {
-			rec, err := evidence.NewAccessEvidenceRecord(*accessEv, details)
+			ev := *accessEv
+			ev.Observation = crObs
+			rec, err := evidence.NewAccessEvidenceRecord(ev, details)
 			if err == nil {
 				evidenceRecords = append(evidenceRecords, rec)
 				continue
@@ -891,7 +1027,9 @@ func (c *Collector) Collect(
 	}
 
 	if fpInput != nil {
-		fpInput.Observation = obs
+		fpObs := obs
+		fpObs.EvidenceID = evidenceID + "-fingerprint"
+		fpInput.Observation = fpObs
 		rec, err := evidence.NewFingerprintRecord(*fpInput)
 		if err == nil {
 			evidenceRecords = append(evidenceRecords, rec)
@@ -899,8 +1037,10 @@ func (c *Collector) Collect(
 	}
 
 	if tlsInfo != nil {
+		tlsObs := obs
+		tlsObs.EvidenceID = evidenceID + "-tls"
 		tlsInput := evidence.TLSRecordInput{
-			Observation:        obs,
+			Observation:        tlsObs,
 			TargetID:           srvID.ID(),
 			CertFingerprint:    tlsInfo.CertFingerprint,
 			Issuer:             tlsInfo.Issuer,
@@ -919,9 +1059,11 @@ func (c *Collector) Collect(
 		}
 	}
 
-	for _, red := range redirects {
+	for i, red := range redirects {
+		redObs := obs
+		redObs.EvidenceID = fmt.Sprintf("%s-redirect-%d", evidenceID, i)
 		redInput := evidence.RedirectRecordInput{
-			Observation: obs,
+			Observation: redObs,
 			FromURL:     red.FromURL,
 			ToURL:       red.ToURL,
 			StatusCode:  red.StatusCode,

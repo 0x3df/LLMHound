@@ -17,7 +17,6 @@ exclude_files: []
 bounds:
   # Raw expansion includes duplicates, before exclusions. Hard cap: 65536.
   max_targets: 4096
-  # Remaining bounds are validated but reserved for future collectors.
   concurrency: 16
   per_host_rate: 2
   connect_timeout: 3s
@@ -27,14 +26,24 @@ bounds:
   max_items: 10000
   max_redirects: 0
 
-# Reserved collection policy; no TLS or HTTP operations in M1.
 insecure: false
 user_agent: "LLMHound/dev (+operator@example.test)"
-opt_ins:
-  resource_content: false
-  prompts: false
-  configuration_content: false
-  workspace_content: false
+
+# Bounded, anonymous, read-only content-tier collection (written to <prefix>.content.jsonl,
+# mode 0600, never shipped to BloodHound). Enabled by default; disable globally or per surface.
+content:
+  enabled: true
+  max_item_bytes: 262144
+  max_items_per_resource: 10
+  max_service_bytes: 5242880
+  max_sample_points: 5
+  surfaces: {}
+
+# High-precision secret detectors over content bodies. A match is replaced by
+# [secret:<type>] in .content.jsonl and flagged on the graph as a boolean; the
+# value is never stored. All detectors are on; set one to false to disable it.
+secrets:
+  detectors: {}
 
 # Attribution belongs to the normalization program. Point mapping_file at its
 # asset mapping (target to existing BloodHound objectid and kind). Without one,

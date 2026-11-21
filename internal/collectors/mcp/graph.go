@@ -21,7 +21,11 @@ func boundString(s string, limit int) string {
 		limit = maxStringLen
 	}
 	if len(s) > limit {
-		return s[:limit] + "…[truncated]"
+		cut := limit
+		for cut > 0 && !utf8.RuneStart(s[cut]) {
+			cut--
+		}
+		return s[:cut] + "…[truncated]"
 	}
 	return s
 }
@@ -68,14 +72,14 @@ func extractCapabilities(caps *mcpsdk.ServerCapabilities) []string {
 	return out
 }
 
-func buildServerNode(srvID graph.Identity, ep graph.Endpoint, obs graph.Observation, initResult *mcpsdk.InitializeResult, tlsObs *tlsObservation, access graph.Access) (emitter.NodeItem, error) {
+func buildServerNode(srvID graph.Identity, ep graph.Endpoint, obs graph.Observation, initResult *mcpsdk.InitializeResult, tlsObs *tlsObservation, access graph.Access, contentSummary *graph.ContentSummary) (emitter.NodeItem, error) {
 	node, err := graph.NewNode(srvID, obs)
 	if err != nil {
 		return emitter.NodeItem{}, fmt.Errorf("create MCPServer node: %w", err)
 	}
 
 	displayName := fmt.Sprintf("MCP · %s:%d%s", ep.Host(), ep.Port(), ep.BasePath())
-	facts := graph.ServiceFacts{Endpoint: ep, Name: displayName, VantageKey: obs.VantageKey, Access: access}
+	facts := graph.ServiceFacts{Endpoint: ep, Name: displayName, VantageKey: obs.VantageKey, Access: access, Content: contentSummary}
 	if tlsObs != nil {
 		facts.TLS = &graph.TLSSummary{
 			Result: tlsObs.VerificationResult, Reason: tlsObs.VerificationReason,

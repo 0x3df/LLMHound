@@ -104,7 +104,7 @@ LIMIT 100
 MATCH (s:AIService)-[:ObservedAt]->(h)
 WHERE NOT h:NetworkEndpoint
   AND s.auth_observed IN ['anonymous', 'mixed']
-  AND any(x IN s.exec_surface WHERE x IN ['code_kernel','terminal','job_submit','code_eval','workflow_exec'])
+  AND any(x IN s.exec_surface WHERE x IN ['code_kernel','terminal','job_submit','code_eval','workflow_exec','tool_invocation'])
 RETURN s, h
 ```
 

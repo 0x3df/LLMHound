@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -15,6 +17,7 @@ import (
 	"github.com/0x3df/LLMHound/internal/checkpoint"
 	collectormcp "github.com/0x3df/LLMHound/internal/collectors/mcp"
 	"github.com/0x3df/LLMHound/internal/config"
+	"github.com/0x3df/LLMHound/internal/content"
 	"github.com/0x3df/LLMHound/internal/correlate"
 	"github.com/0x3df/LLMHound/internal/emitter"
 	"github.com/0x3df/LLMHound/internal/evidence"
@@ -64,8 +67,15 @@ func setupTestMCPServer(t *testing.T) *mcpsdk.Server {
 		MIMEType:    "text/plain",
 		Size:        1024,
 	}, func(ctx context.Context, req *mcpsdk.ReadResourceRequest) (*mcpsdk.ReadResourceResult, error) {
-		t.Fatal("ReadResource must never be called: resource descriptors authorize metadata only!")
-		return nil, nil
+		return &mcpsdk.ReadResourceResult{
+			Contents: []*mcpsdk.ResourceContents{
+				{
+					URI:      "file:///etc/hosts",
+					MIMEType: "text/plain",
+					Text:     "127.0.0.1 localhost\n",
+				},
+			},
+		}, nil
 	})
 
 	srv.AddPrompt(&mcpsdk.Prompt{
@@ -94,11 +104,13 @@ func TestMCPCollector_StreamableHTTP_Success(t *testing.T) {
 	cfg := testConfig()
 	fixedTime := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
 
+	var sink content.MemorySink
 	collector, err := collectormcp.New(
 		cfg,
 		collectormcp.WithClock(func() time.Time { return fixedTime }),
 		collectormcp.WithScanID("scan-test-001"),
 		collectormcp.WithEvidenceID("ev-test-001"),
+		collectormcp.WithContentSink(&sink),
 	)
 	if err != nil {
 		t.Fatalf("New collector: %v", err)
@@ -242,8 +254,20 @@ func TestMCPCollector_StreamableHTTP_Success(t *testing.T) {
 	if !slices.Contains(ops, collectormcp.CheckIDInitialize) || !slices.Contains(ops, collectormcp.CheckIDToolsList) {
 		t.Errorf("anon_operations %v must include the succeeded initialize and tools-list checks", ops)
 	}
+	if slices.Contains(ops, collectormcp.CheckIDResourcesRead) {
+		t.Errorf("anon_operations %v must not include content-tier %s", ops, collectormcp.CheckIDResourcesRead)
+	}
 	if props["vantage_key"] != "test-vantage" {
 		t.Errorf("vantage_key = %v, want test-vantage", props["vantage_key"])
+	}
+	if props["content_truncated"] != false {
+		t.Errorf("unexpected content_truncated property: %v", props["content_truncated"])
+	}
+	if b, _ := props["content_bytes"].(int64); b <= 0 {
+		t.Errorf("expected content_bytes > 0, got %v", props["content_bytes"])
+	}
+	if len(sink.Records()) != 1 || sink.Records()[0].Body != "127.0.0.1 localhost\n" {
+		t.Errorf("unexpected content sink records: %+v", sink.Records())
 	}
 
 	// Verify evidence records
@@ -892,6 +916,43 @@ func TestMCPCollector_ResourceContentNotFetched(t *testing.T) {
 	if !foundResource {
 		t.Error("expected resource descriptor to be collected without reading content")
 	}
+
+	// Verify per-surface opt-out skips reading even text/plain resources.
+	srvText := mcpsdk.NewServer(&mcpsdk.Implementation{Name: "optout-mcp", Version: "1.0.0"}, nil)
+	textReadCalled := false
+	srvText.AddResource(&mcpsdk.Resource{
+		URI:      "file:///notes.txt",
+		Name:     "notes.txt",
+		MIMEType: "text/plain",
+	}, func(ctx context.Context, req *mcpsdk.ReadResourceRequest) (*mcpsdk.ReadResourceResult, error) {
+		textReadCalled = true
+		return nil, nil
+	})
+	tsText := httptest.NewServer(mcpsdk.NewStreamableHTTPHandler(func(*http.Request) *mcpsdk.Server { return srvText }, nil))
+	defer tsText.Close()
+
+	cfgOff := testConfig()
+	cfgOff.Content.Surfaces = map[string]bool{"mcp": false}
+	colOff, err := collectormcp.New(cfgOff)
+	if err != nil {
+		t.Fatalf("New collector opt-out: %v", err)
+	}
+	resOff, err := colOff.Collect(context.Background(), collectormcp.Target{URL: tsText.URL + "/mcp"})
+	if err != nil {
+		t.Fatalf("Collect opt-out failed: %v", err)
+	}
+	if textReadCalled {
+		t.Error("ReadResource must not be called when mcp surface content is disabled")
+	}
+	var skippedContent bool
+	for _, ev := range resOff.Evidence {
+		if ev.CheckID == collectormcp.CheckIDResourcesRead && ev.Outcome == string(graph.OutcomeSkipped) {
+			skippedContent = true
+		}
+	}
+	if !skippedContent {
+		t.Error("expected mcp_resources_read check to be skipped when opted out")
+	}
 }
 
 func TestMCPCollector_UnreachableTarget_Failed(t *testing.T) {
@@ -952,5 +1013,235 @@ func TestMCPCollector_Redirect_CrossHostUnauthorized(t *testing.T) {
 	}
 	if !foundUnauthorizedRedirect {
 		t.Error("expected unauthorized cross-host redirect to be recorded in evidence")
+	}
+}
+
+func TestMCPCollector_ContentTruncationNonLeakAndTLS(t *testing.T) {
+	srv := mcpsdk.NewServer(&mcpsdk.Implementation{Name: "tls-content-mcp", Version: "1.0.0"}, nil)
+	srv.AddResource(&mcpsdk.Resource{
+		URI:      "file:///app/secret.txt",
+		Name:     "secret.txt",
+		MIMEType: "text/plain",
+	}, func(ctx context.Context, req *mcpsdk.ReadResourceRequest) (*mcpsdk.ReadResourceResult, error) {
+		return &mcpsdk.ReadResourceResult{
+			Contents: []*mcpsdk.ResourceContents{
+				{
+					URI:      "file:///app/secret.txt",
+					MIMEType: "text/plain",
+					Text:     "MCP_SECRET_PREFIX_" + strings.Repeat("Q", 80),
+				},
+			},
+		}, nil
+	})
+	handler := mcpsdk.NewStreamableHTTPHandler(func(*http.Request) *mcpsdk.Server { return srv }, nil)
+	ts := httptest.NewTLSServer(handler)
+	defer ts.Close()
+
+	cfg := testConfig()
+	cfg.Insecure = true
+	cfg.Content.MaxItemBytes = 20
+	cfg.Content.MaxServiceBytes = 20
+
+	var sink content.MemorySink
+	col, err := collectormcp.New(cfg, collectormcp.WithContentSink(&sink))
+	if err != nil {
+		t.Fatalf("New collector: %v", err)
+	}
+	res, err := col.Collect(context.Background(), collectormcp.Target{URL: ts.URL + "/mcp"})
+	if err != nil {
+		t.Fatalf("Collect failed: %v", err)
+	}
+	if res.Observation.Coverage != graph.CoverageTruncated {
+		t.Errorf("coverage = %s, want truncated", res.Observation.Coverage)
+	}
+	recs := sink.Records()
+	if len(recs) != 1 || !recs[0].Truncated || len(recs[0].Body) != 20 {
+		t.Fatalf("expected 1 truncated 20-byte content record, got %+v", recs)
+	}
+	var srvID string
+	var srvProps map[string]any
+	for _, n := range res.Nodes {
+		if n.Node.Identity().Kind() == graph.MCPServer {
+			srvID = n.Node.Identity().ID()
+			srvProps = n.Properties
+		}
+	}
+	if srvProps["tls_verification"] != "insecure_override" || srvProps["tls_failure_reason"] == "" {
+		t.Errorf("unexpected TLS properties for self-signed --insecure server: %v", srvProps)
+	}
+	var tlsTargetID string
+	for _, ev := range res.Evidence {
+		if ev.RecordType == evidence.RecordTLS {
+			tlsTargetID = ev.TargetID
+		}
+	}
+	if tlsTargetID != srvID {
+		t.Errorf("TLS record TargetID = %q, want service ID %q", tlsTargetID, srvID)
+	}
+	persisted, _ := json.Marshal(struct {
+		Nodes    any
+		Evidence any
+	}{Nodes: res.Nodes, Evidence: res.Evidence})
+	if strings.Contains(string(persisted), "MCP_SECRET_PREFIX_") {
+		t.Errorf("resource content leaked into graph nodes or evidence")
+	}
+}
+
+func TestMCPCollector_MultiTargetUniqueEvidenceIDs(t *testing.T) {
+	srv1 := setupTestMCPServer(t)
+	srv2 := setupTestMCPServer(t)
+	ts1 := httptest.NewServer(mcpsdk.NewStreamableHTTPHandler(func(*http.Request) *mcpsdk.Server { return srv1 }, nil))
+	defer ts1.Close()
+	ts2 := httptest.NewServer(mcpsdk.NewStreamableHTTPHandler(func(*http.Request) *mcpsdk.Server { return srv2 }, nil))
+	defer ts2.Close()
+
+	cfg := testConfig()
+	col, err := collectormcp.New(cfg, collectormcp.WithScanID("scan-multi-01"))
+	if err != nil {
+		t.Fatalf("New collector: %v", err)
+	}
+	r1, err := col.Collect(context.Background(), collectormcp.Target{URL: ts1.URL + "/mcp"})
+	if err != nil {
+		t.Fatalf("Collect 1: %v", err)
+	}
+	r2, err := col.Collect(context.Background(), collectormcp.Target{URL: ts2.URL + "/mcp"})
+	if err != nil {
+		t.Fatalf("Collect 2: %v", err)
+	}
+	seen := make(map[string]bool)
+	for _, ev := range append(r1.Evidence, r2.Evidence...) {
+		if seen[ev.EvidenceID] {
+			t.Errorf("duplicate EvidenceID across targets: %q", ev.EvidenceID)
+		}
+		seen[ev.EvidenceID] = true
+	}
+}
+func TestMCPCollector_ContentItemsPerResourceBound(t *testing.T) {
+	srv := mcpsdk.NewServer(&mcpsdk.Implementation{Name: "multi-content", Version: "1.0.0"}, nil)
+	srv.AddResource(&mcpsdk.Resource{
+		URI:      "file:///app/config.txt",
+		Name:     "config.txt",
+		MIMEType: "text/plain",
+	}, func(ctx context.Context, req *mcpsdk.ReadResourceRequest) (*mcpsdk.ReadResourceResult, error) {
+		return &mcpsdk.ReadResourceResult{Contents: []*mcpsdk.ResourceContents{
+			{URI: "file:///app/config.txt#1", MIMEType: "text/plain", Text: "first"},
+			{URI: "file:///app/config.txt#2", MIMEType: "text/plain", Text: "second"},
+		}}, nil
+	})
+	ts := httptest.NewServer(mcpsdk.NewStreamableHTTPHandler(func(*http.Request) *mcpsdk.Server { return srv }, nil))
+	defer ts.Close()
+
+	cfg := testConfig()
+	cfg.Content.MaxItemsPerResource = 1
+	var sink content.MemorySink
+	col, err := collectormcp.New(cfg, collectormcp.WithContentSink(&sink))
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := col.Collect(context.Background(), collectormcp.Target{URL: ts.URL + "/mcp"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := len(sink.Records()); got != 1 {
+		t.Fatalf("stored items = %d, want 1 for one listed resource", got)
+	}
+	if res.Observation.Coverage != graph.CoverageTruncated {
+		t.Fatalf("coverage = %s, want truncated", res.Observation.Coverage)
+	}
+}
+
+func TestMCPCollector_PartialReadRetainsPriorContentSummary(t *testing.T) {
+	srv := mcpsdk.NewServer(&mcpsdk.Implementation{Name: "partial-read", Version: "1.0.0"}, nil)
+	srv.AddResource(&mcpsdk.Resource{URI: "file:///a-good", Name: "good", MIMEType: "text/plain"}, func(ctx context.Context, req *mcpsdk.ReadResourceRequest) (*mcpsdk.ReadResourceResult, error) {
+		return &mcpsdk.ReadResourceResult{Contents: []*mcpsdk.ResourceContents{{URI: "file:///a-good", MIMEType: "text/plain", Text: "good body"}}}, nil
+	})
+	srv.AddResource(&mcpsdk.Resource{URI: "file:///z-bad", Name: "bad", MIMEType: "text/plain"}, func(ctx context.Context, req *mcpsdk.ReadResourceRequest) (*mcpsdk.ReadResourceResult, error) {
+		return nil, errors.New("method not found")
+	})
+	ts := httptest.NewServer(mcpsdk.NewStreamableHTTPHandler(func(*http.Request) *mcpsdk.Server { return srv }, nil))
+	defer ts.Close()
+
+	var sink content.MemorySink
+	col, err := collectormcp.New(testConfig(), collectormcp.WithContentSink(&sink))
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := col.Collect(context.Background(), collectormcp.Target{URL: ts.URL + "/mcp"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := len(sink.Records()); got != 1 {
+		t.Fatalf("stored items = %d, want prior successful item", got)
+	}
+	if res.Observation.Coverage != graph.CoveragePartial {
+		t.Fatalf("coverage = %s, want partial", res.Observation.Coverage)
+	}
+	var readEvidence *evidence.Record
+	for i := range res.Evidence {
+		if res.Evidence[i].CheckID == collectormcp.CheckIDResourcesRead {
+			readEvidence = &res.Evidence[i]
+			break
+		}
+	}
+	if readEvidence == nil || readEvidence.Outcome != string(graph.OutcomeFailed) {
+		t.Fatalf("resources/read evidence = %+v, want failed partial check", readEvidence)
+	}
+	for _, n := range res.Nodes {
+		if n.Node.Identity().Kind() == graph.MCPServer && n.Properties["content_bytes"] != int64(len("good body")) {
+			t.Fatalf("successful content summary was lost: %v", n.Properties)
+		}
+	}
+}
+func TestMCPCollector_TemplateListFailureKeepsConcreteResources(t *testing.T) {
+	srv := mcpsdk.NewServer(&mcpsdk.Implementation{Name: "template-partial", Version: "1.0.0"}, nil)
+	srv.AddResource(&mcpsdk.Resource{URI: "file:///config.txt", Name: "config.txt", MIMEType: "text/plain"}, func(ctx context.Context, req *mcpsdk.ReadResourceRequest) (*mcpsdk.ReadResourceResult, error) {
+		return &mcpsdk.ReadResourceResult{Contents: []*mcpsdk.ResourceContents{{URI: "file:///config.txt", MIMEType: "text/plain", Text: "kept"}}}, nil
+	})
+	sdkHandler := mcpsdk.NewStreamableHTTPHandler(func(*http.Request) *mcpsdk.Server { return srv }, nil)
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		var rpc struct {
+			Method string          `json:"method"`
+			ID     json.RawMessage `json:"id"`
+		}
+		if json.Unmarshal(body, &rpc) == nil && rpc.Method == "resources/templates/list" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%s,"error":{"code":-32601,"message":"templates method unsupported"}}`, rpc.ID)
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		sdkHandler.ServeHTTP(w, r)
+	})
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+
+	var sink content.MemorySink
+	col, err := collectormcp.New(testConfig(), collectormcp.WithContentSink(&sink))
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := col.Collect(context.Background(), collectormcp.Target{URL: ts.URL + "/mcp"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := len(sink.Records()); got != 1 {
+		t.Fatalf("stored items = %d, want concrete resource body", got)
+	}
+	if res.Observation.Coverage != graph.CoveragePartial {
+		t.Fatalf("coverage = %s, want partial", res.Observation.Coverage)
+	}
+	var found bool
+	for _, ev := range res.Evidence {
+		if ev.CheckID != collectormcp.CheckIDResourcesList {
+			continue
+		}
+		found = ev.Outcome == string(graph.OutcomeSuccess) && ev.Details["partial"] == true && ev.Details["templates_error"] != nil
+	}
+	if !found {
+		t.Fatalf("resources/list evidence did not retain partial template failure: %+v", res.Evidence)
 	}
 }

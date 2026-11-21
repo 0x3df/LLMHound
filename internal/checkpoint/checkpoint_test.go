@@ -1085,6 +1085,62 @@ func TestNestedRedactionAndBounding(t *testing.T) {
 	}
 }
 
+func TestClassificationKeysSurviveSanitization(t *testing.T) {
+	valid := map[string]any{
+		"has_exposed_secret":    true,
+		"secret_types":          []string{"private_key", "github_token", "github_token"},
+		"secret_last_confirmed": "2026-11-21T08:30:00Z",
+	}
+	sanitized := checkpoint.SanitizeMap(valid, 50)
+	if sanitized["has_exposed_secret"] != true {
+		t.Fatalf("has_exposed_secret must survive: %v", sanitized["has_exposed_secret"])
+	}
+	if got := sanitized["secret_types"].([]string); len(got) != 2 || got[0] != "github_token" || got[1] != "private_key" {
+		t.Fatalf("secret_types must be validated and normalized: %v", sanitized["secret_types"])
+	}
+	if got := sanitized["secret_last_confirmed"]; got != "2026-11-21T08:30:00Z" {
+		t.Fatalf("secret_last_confirmed must survive: %v", got)
+	}
+
+	replayed := checkpoint.SanitizeMap(map[string]any{
+		"secret_types": []any{"aws_access_key", "github_token"},
+	}, 50)
+	if got := replayed["secret_types"].([]string); len(got) != 2 || got[0] != "aws_access_key" || got[1] != "github_token" {
+		t.Fatalf("replayed []any secret_types must normalize to []string: %v", replayed["secret_types"])
+	}
+
+	invalid := map[string]any{
+		"has_exposed_secret":    "raw-token-value",
+		"secret_types":          []string{"github_token", "raw-token-value"},
+		"secret_last_confirmed": "not-a-time",
+		"secret_value":          "x",
+		"has_exposed_secret_2":  true,
+		"SECRET_TYPES":          []string{"github_token"},
+	}
+	invalidOut := checkpoint.SanitizeMap(invalid, 50)
+	for _, key := range []string{"has_exposed_secret", "secret_types", "secret_last_confirmed"} {
+		if value, ok := invalidOut[key]; ok {
+			t.Fatalf("invalid classification key %s must be omitted, got %v", key, value)
+		}
+	}
+	for _, key := range []string{"secret_value", "has_exposed_secret_2", "SECRET_TYPES"} {
+		if invalidOut[key] != checkpoint.RedactedPlaceholder {
+			t.Fatalf("%s must be redacted: %v", key, invalidOut[key])
+		}
+	}
+
+	for _, value := range []any{false, 1, "true"} {
+		out := checkpoint.SanitizeMap(map[string]any{"has_exposed_secret": value}, 50)
+		if _, ok := out["has_exposed_secret"]; ok {
+			t.Fatalf("non-canonical has_exposed_secret %v must be omitted: %v", value, out)
+		}
+	}
+	nonUTC := checkpoint.SanitizeMap(map[string]any{"secret_last_confirmed": "2026-11-21T10:30:00+02:00"}, 50)
+	if _, ok := nonUTC["secret_last_confirmed"]; ok {
+		t.Fatalf("non-UTC secret_last_confirmed must be omitted: %v", nonUTC)
+	}
+}
+
 func TestClosedJournal(t *testing.T) {
 	var buf bytes.Buffer
 	header := sampleHeader()

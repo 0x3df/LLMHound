@@ -498,9 +498,9 @@ PY
     t0=$(now_ms); res=$(qrun "MATCH p=shortestPath((g:Group)-[:$PK*1..]->(h:Computer)) WHERE g.objectid ENDS WITH '-513' AND (h)<-[:LLMHound_ObservedAt]-(:LLMHound_AIService) RETURN p"); t1=$(now_ms)
     record R2.22 info "$(jq -cn --argjson r "$res" --arg ms "$((t1-t0))" '{action:"shortestPath to a Computer with 3000 attached services (working P1 shape)", observed:$r, elapsed_ms:($ms|tonumber)}')"
     t0=$(now_ms); res=$(qrun "MATCH (s:LLMHound_AIService) WHERE s.auth_observed = 'anonymous' RETURN s"); t1=$(now_ms)
+    record R2.23 info "$(jq -cn --argjson r "$res" --arg ms "$((t1-t0))" '{action:"property filter over N services, no LIMIT", observed:$r, elapsed_ms:($ms|tonumber)}')"
     t0=$(now_ms); res=$(qrun "MATCH (s:LLMHound_AIService)-[:LLMHound_ObservedAt]->(h:Computer) MATCH p=(g:Group)-[:$PK*1..4]->(h) WHERE g.objectid ENDS WITH '-513' RETURN s,h,p LIMIT 100"); t1=$(now_ms)
     record R2.24 info "$(jq -cn --argjson r "$res" --arg ms "$((t1-t0))" '{action:"bounded join+var-length over 3000 services, LIMIT 100", observed:$r, elapsed_ms:($ms|tonumber)}')"
-    record R2.23 info "$(jq -cn --argjson r "$res" --arg ms "$((t1-t0))" '{action:"property filter over N services, no LIMIT", observed:$r, elapsed_ms:($ms|tonumber)}')"
 }
 
 # __SECTIONS_BEFORE_THIS_LINE__

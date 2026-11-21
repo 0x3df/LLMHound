@@ -29,21 +29,34 @@ const StartPlaceholder = "<START_OBJECTID>"
 // snapshot cannot inject Cypher.
 func ParsePathKinds(data string) ([]string, error) {
 	var kinds []string
+	seen := make(map[string]bool)
 	sc := bufio.NewScanner(strings.NewReader(data))
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		for _, r := range line {
-			if !(r == '_' || r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z') {
+		for i, r := range line {
+			isLetter := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')
+			isDigit := r >= '0' && r <= '9'
+			if i == 0 && !isLetter {
+				return nil, fmt.Errorf("invalid edge kind %q", line)
+			}
+			if !isLetter && !isDigit && r != '_' {
 				return nil, fmt.Errorf("invalid edge kind %q", line)
 			}
 		}
 		if strings.HasPrefix(line, graph.SourceKind+"_") {
 			return nil, fmt.Errorf("path kinds must not include LLMHound kinds: %q", line)
 		}
+		if seen[line] {
+			return nil, fmt.Errorf("duplicate edge kind %q", line)
+		}
+		seen[line] = true
 		kinds = append(kinds, line)
+	}
+	if err := sc.Err(); err != nil {
+		return nil, fmt.Errorf("scan path kinds: %w", err)
 	}
 	if len(kinds) == 0 {
 		return nil, fmt.Errorf("no path kinds")
@@ -91,9 +104,10 @@ func Generate(pathKinds []string) []Query {
 			Name:        "LLMHound P4: anonymous AI services with an execution surface",
 			Description: "Services that answered anonymous enumeration and expose a declared or inferred execution surface. exec_surface_basis says how; nothing was executed.",
 			Query: fmt.Sprintf("MATCH (s:%s)-[:%s]->(h)\n"+
-				"WHERE s.auth_observed IN ['anonymous', 'mixed']\n"+
+				"WHERE NOT h:%s\n"+
+				"  AND s.auth_observed IN ['anonymous', 'mixed']\n"+
 				"  AND any(x IN s.exec_surface WHERE x IN ['code_kernel','terminal','job_submit','code_eval','workflow_exec','tool_invocation'])\n"+
-				"RETURN s, h\nLIMIT 100", svc, obs),
+				"RETURN s, h\nLIMIT 100", svc, obs, nep),
 		},
 		{
 			Name:        "LLMHound P6: unattributed AI services",

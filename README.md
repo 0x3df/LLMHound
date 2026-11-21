@@ -38,8 +38,8 @@ second inventory.
 
 | | |
 |---|---|
-| **Works today** | Offline `targets` and `plan`; `scan` for **Jupyter, MCP, and Ollama**; checkpoint journal; graph and evidence output; validated against **BloodHound CE 9.7.1** in a reproducible [lab](lab/README.md). |
-| **Planned** | The other seven core surfaces (A2A, vLLM, LiteLLM, Qdrant, MLflow, Open WebUI, LangServe) and a long tail; reading prompts and config with secret *flagging*; opt-in attack-transition rules; `upload` and `resume`; saved BloodHound queries. |
+| **Works today** | Offline `targets` and `plan`; `scan` for **Jupyter, MCP, and Ollama** with default-on bounded content collection (`.content.jsonl`) and high-precision secret detection for private keys, classic GitHub tokens, and AWS access-key pairs; checkpoint journal; graph and evidence output; shipped saved BloodHound queries (`extension/saved_searches/`); validated against **BloodHound CE 9.7.1** in a reproducible [lab](lab/README.md). |
+| **Planned** | The other seven core surfaces (A2A, vLLM, LiteLLM, Qdrant, MLflow, Open WebUI, LangServe) and a long tail; opt-in attack-transition rules (M2d); `upload` and `resume` (M3). |
 | **Not yet done** | A scan of a real environment. Treat it as pre-release. |
 
 See the [roadmap](docs/06-roadmap.md) for the ordered plan.
@@ -51,9 +51,9 @@ secrets are never stored.
 
 | Surface | Status | What v1 records |
 |---|---|---|
-| **Jupyter** | ✅ | Whether auth is required, API version, sessions and kernels, workspace listing (names, not bodies) |
-| **MCP** | ✅ | Server identity and protocol version, tools, resources, prompts, advertised auth servers |
-| **Ollama** | ✅ | Runtime version, model catalog with digests, running models |
+| **Jupyter** | ✅ | Auth posture, API version, sessions and kernels, workspace listing, bounded text/notebook bodies (into `.content.jsonl`) |
+| **MCP** | ✅ | Server identity and protocol version, tools, resources, prompts, advertised auth servers, bounded text resource bodies (into `.content.jsonl`) |
+| **Ollama** | ✅ | Runtime version, model catalog with digests, running models, bounded `/api/show` prompts/modelfiles/templates (into `.content.jsonl`) |
 | A2A · vLLM · LiteLLM · Qdrant · MLflow · Open WebUI · LangServe | planned | See the [capability matrix](docs/03-collector-capabilities.md) |
 | OpenAI-compatible · Ray · Langflow · Flowise · ChromaDB | planned | Same |
 
@@ -76,7 +76,7 @@ BloodHound node (objectid and kind) for a target.
 
 ```json
 [{"target": "ai1.corp.example", "object_id": "S-1-5-21-…-1103", "kind": "Computer"},
- {"target": "10.1.2.3",         "object_id": "azure-vm-object-id", "kind": "AZVM"}]
+ {"target": "10.1.2.3",         "object_id": "/SUBSCRIPTIONS/…/VIRTUALMACHINES/AI-VM1", "kind": "AZVM"}]
 ```
 
 `scan` writes, under `./out`:
@@ -86,6 +86,7 @@ BloodHound node (objectid and kind) for a target.
 | `scan1-base.json` (or `scan1.json` when nothing was mapped) | The LLMHound subgraph, tagged `source_kind: LLMHound` |
 | `scan1-linking.json` | Edges to your existing nodes, deliberately **without** `source_kind` |
 | `scan1.evidence.jsonl` | Per-check results, fingerprints, TLS, redirects, attachment decisions |
+| `scan1.content.jsonl` | Bounded content bodies (mode `0600`), written lazily when content is collected |
 | `scan1.journal.jsonl` | Crash-safe record of the scan |
 
 **Loading into BloodHound today** is manual (`upload` is planned): ingest the base file first,

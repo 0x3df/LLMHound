@@ -1,8 +1,9 @@
 # LLMHound — Executive summary
 
 **Reading order:** 1 of 8 (see [docs index](README.md)) · **Audience:** anyone who needs the
-whole picture in five minutes · **Status as of 2026-11-20:** foundation built and tested;
-not yet used against a real environment.
+whole picture in five minutes · **Status as of 2026-11-21:** core engine, three collectors,
+shared property contract (D1), headline saved queries (D2), and bounded content tier (D3)
+built and tested; not yet used against a real environment.
 
 ## The one-minute version
 
@@ -77,8 +78,8 @@ anyone?*
 
 | | |
 |---|---|
-| **Built and tested** | The core engine; end-to-end collection for **3 of the 10 planned core services** (Jupyter, MCP servers, Ollama); a crash-safe scan journal (the resume command itself is planned); graph and evidence output; validated against **BloodHound CE 9.7.1** in a reproducible lab. |
-| **Not built yet** | The other 7 core services; reading of prompts/config (and secret flagging); the planned attack-transition rules; the built-in uploader; the saved BloodHound queries. |
+| **Built and tested** | The core engine; end-to-end collection for **3 of the 10 planned core services** (Jupyter, MCP servers, Ollama); shared service properties (D1); default-on, bounded content collection into restricted `.content.jsonl` (D3); high-precision `private_key`, `github_token`, and `aws_access_key` secret detection (D4); a crash-safe scan journal (the resume command itself is planned); graph and evidence output; shipped saved queries (`P1`, `P2`, `P4`, `P6`) validated against **BloodHound CE 9.7.1** in a reproducible lab (D2). |
+| **Not built yet** | The other 7 core services (M2b) and long tail (M2c); the planned attack-transition rules (M2d); the built-in uploader and `resume` command (M3). |
 | **Not yet done** | A scan of a real environment. Nothing here has run against production. |
 
 The [roadmap](06-roadmap.md) sequences the remaining work; it deliberately gives order and

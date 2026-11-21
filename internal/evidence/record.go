@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/0x3df/LLMHound/internal/correlate"
 	"github.com/0x3df/LLMHound/internal/graph"
@@ -356,7 +357,11 @@ func sanitizeValue(v any) any {
 		return t
 	case string:
 		if len(t) > MaxDetailSize {
-			return t[:MaxDetailSize] + "…[truncated]"
+			cut := MaxDetailSize
+			for cut > 0 && !utf8.RuneStart(t[cut]) {
+				cut--
+			}
+			return t[:cut] + "…[truncated]"
 		}
 		return t
 	case map[string]any:

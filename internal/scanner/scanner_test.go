@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/0x3df/LLMHound/internal/config"
+	"github.com/0x3df/LLMHound/internal/content"
 	"github.com/0x3df/LLMHound/internal/discovery"
 	"github.com/0x3df/LLMHound/internal/emitter"
 	"github.com/0x3df/LLMHound/internal/evidence"
@@ -52,21 +53,40 @@ func TestScanner_Plan(t *testing.T) {
 			}
 
 			if sp.Surface == discovery.SurfaceOllama {
-				// Default: ollama_show must be inactive/skipped
+				// Default: content tier enabled -> ollama_show must be active
 				foundShow := false
 				for _, chk := range sp.Checks {
 					if chk.CheckID == "ollama_show" {
 						foundShow = true
-						if chk.Active {
-							t.Errorf("ollama_show should be inactive by default")
-						}
-						if chk.SkipReason == "" {
-							t.Errorf("ollama_show should have a skip reason")
+						if !chk.Active {
+							t.Errorf("ollama_show should be active by default, skip=%q", chk.SkipReason)
 						}
 					}
 				}
 				if !foundShow {
 					t.Errorf("ollama surface missing ollama_show check in plan")
+				}
+			}
+			if sp.Surface == discovery.SurfaceJupyter {
+				foundContent := false
+				for _, chk := range sp.Checks {
+					if chk.CheckID == "jupyter_file_content" && chk.Active {
+						foundContent = true
+					}
+				}
+				if !foundContent {
+					t.Errorf("jupyter surface missing active jupyter_file_content check in plan")
+				}
+			}
+			if sp.Surface == discovery.SurfaceMCP {
+				foundContent := false
+				for _, chk := range sp.Checks {
+					if chk.CheckID == "mcp_resources_read" && chk.Active {
+						foundContent = true
+					}
+				}
+				if !foundContent {
+					t.Errorf("mcp surface missing active mcp_resources_read check in plan")
 				}
 			}
 		}
@@ -76,19 +96,45 @@ func TestScanner_Plan(t *testing.T) {
 		}
 	}
 
-	// Test with opt-in enabled
-	cfg.OptIns.Prompts = true
-	sOpt, err := scanner.New(cfg)
+	// Test with global content opt-out
+	cfgOff := config.Defaults()
+	cfgOff.Scope = "corp-scope"
+	cfgOff.VantageKey = "scanner-01"
+	cfgOff.Targets = []string{"192.0.2.1"}
+	cfgOff.Content.Enabled = false
+	sOff, err := scanner.New(cfgOff)
 	if err != nil {
-		t.Fatalf("scanner.New with opt-ins failed: %v", err)
+		t.Fatalf("scanner.New with content disabled failed: %v", err)
 	}
-	plansOpt := sOpt.Plan([]string{"192.0.2.1"})
-	for _, sp := range plansOpt[0].Surfaces {
-		if sp.Surface == discovery.SurfaceOllama {
-			for _, chk := range sp.Checks {
-				if chk.CheckID == "ollama_show" && !chk.Active {
-					t.Errorf("ollama_show should be active when --prompts is enabled")
+	plansOff := sOff.Plan([]string{"192.0.2.1"})
+	for _, sp := range plansOff[0].Surfaces {
+		for _, chk := range sp.Checks {
+			if chk.CheckID == "ollama_show" || chk.CheckID == "jupyter_file_content" || chk.CheckID == "mcp_resources_read" {
+				if chk.Active || chk.SkipReason == "" {
+					t.Errorf("%s should be inactive with skip reason when content disabled, active=%v reason=%q", chk.CheckID, chk.Active, chk.SkipReason)
 				}
+			}
+		}
+	}
+
+	// Test per-surface opt-out
+	cfgSurf := config.Defaults()
+	cfgSurf.Scope = "corp-scope"
+	cfgSurf.VantageKey = "scanner-01"
+	cfgSurf.Targets = []string{"192.0.2.1"}
+	cfgSurf.Content.Surfaces = map[string]bool{"ollama": false}
+	sSurf, err := scanner.New(cfgSurf)
+	if err != nil {
+		t.Fatalf("scanner.New with surface disable failed: %v", err)
+	}
+	plansSurf := sSurf.Plan([]string{"192.0.2.1"})
+	for _, sp := range plansSurf[0].Surfaces {
+		for _, chk := range sp.Checks {
+			if sp.Surface == discovery.SurfaceOllama && chk.CheckID == "ollama_show" && chk.Active {
+				t.Errorf("ollama_show should be inactive when content.surfaces[ollama]=false")
+			}
+			if sp.Surface == discovery.SurfaceJupyter && chk.CheckID == "jupyter_file_content" && !chk.Active {
+				t.Errorf("jupyter_file_content should remain active when only ollama disabled")
 			}
 		}
 	}
@@ -116,6 +162,9 @@ func setupMockOllama(t *testing.T) *httptest.Server {
 		case "/api/ps":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"models": []}`))
+		case "/api/show":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"license":"MIT","modelfile":"FROM llama3\nSYSTEM SCANNER_OLLAMA_SECRET","template":"{{ .Prompt }}","system":"SCANNER_OLLAMA_SECRET","details":{"parent_model":"llama3:8b","family":"llama"}}`))
 		default:
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`Ollama is running`))
@@ -152,6 +201,9 @@ func setupMockJupyter(t *testing.T) *httptest.Server {
 					}
 				]
 			}`))
+		case "/api/contents/analysis.ipynb":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"name":"analysis.ipynb","path":"analysis.ipynb","type":"notebook","format":"json","mimetype":"application/x-ipynb+json","content":{"cells":[{"source":["SCANNER_JUPYTER_SECRET"]}]}}`))
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -178,6 +230,17 @@ func setupMockMCP(t *testing.T) *httptest.Server {
 	}, func(ctx context.Context, req *mcpsdk.CallToolRequest) (*mcpsdk.CallToolResult, error) {
 		t.Fatal("CallTool must never be called during read-only enumeration")
 		return nil, nil
+	})
+	srv.AddResource(&mcpsdk.Resource{
+		URI:      "file:///app/notes.txt",
+		Name:     "notes.txt",
+		MIMEType: "text/plain",
+	}, func(ctx context.Context, req *mcpsdk.ReadResourceRequest) (*mcpsdk.ReadResourceResult, error) {
+		return &mcpsdk.ReadResourceResult{
+			Contents: []*mcpsdk.ResourceContents{
+				{URI: "file:///app/notes.txt", MIMEType: "text/plain", Text: "SCANNER_MCP_SECRET\n"},
+			},
+		}, nil
 	})
 
 	handler := mcpsdk.NewStreamableHTTPHandler(func(req *http.Request) *mcpsdk.Server {
@@ -333,17 +396,60 @@ func TestScanner_EndToEndScan(t *testing.T) {
 	}
 
 	foundEvidenceTypes := make(map[string]bool)
+	seenEvidenceIDs := make(map[string]bool)
 	for _, l := range lines {
 		var rec evidence.Record
 		if err := json.Unmarshal([]byte(l), &rec); err != nil {
 			t.Fatalf("unmarshal evidence record: %v", err)
 		}
+		if seenEvidenceIDs[rec.EvidenceID] {
+			t.Errorf("duplicate EvidenceID %q in sidecar", rec.EvidenceID)
+		}
+		seenEvidenceIDs[rec.EvidenceID] = true
 		foundEvidenceTypes[string(rec.RecordType)] = true
 	}
 
 	for _, et := range []string{string(evidence.RecordCheckResult), string(evidence.RecordFingerprint), string(evidence.RecordCorrelation)} {
 		if !foundEvidenceTypes[et] {
 			t.Errorf("expected evidence record type %s in sidecar, got: %+v", et, foundEvidenceTypes)
+		}
+	}
+
+	// 4. Verify restricted content JSONL exists, has 0600 mode, and never leaks bodies to base/sidecar
+	if res.ContentPath == "" {
+		t.Fatalf("expected non-empty ContentPath on default scan")
+	}
+	info, err := os.Stat(res.ContentPath)
+	if err != nil {
+		t.Fatalf("stat content file: %v", err)
+	}
+	if info.Mode().Perm() != 0600 {
+		t.Errorf("content file permissions = %o, want 0600", info.Mode().Perm())
+	}
+	contentRaw, err := os.ReadFile(res.ContentPath)
+	if err != nil {
+		t.Fatalf("read content file: %v", err)
+	}
+	contentLines := strings.Split(strings.TrimSpace(string(contentRaw)), "\n")
+	seenSurfaces := make(map[string]bool)
+	for _, l := range contentLines {
+		var crec content.Record
+		if err := json.Unmarshal([]byte(l), &crec); err != nil {
+			t.Fatalf("unmarshal content record: %v", err)
+		}
+		if err := crec.Validate(); err != nil {
+			t.Errorf("invalid content record: %v", err)
+		}
+		seenSurfaces[crec.Surface] = true
+	}
+	for _, surf := range []string{"ollama", "jupyter", "mcp"} {
+		if !seenSurfaces[surf] {
+			t.Errorf("missing content records for surface %s (got %+v)", surf, seenSurfaces)
+		}
+	}
+	for _, leak := range []string{"SCANNER_OLLAMA_SECRET", "SCANNER_JUPYTER_SECRET", "SCANNER_MCP_SECRET"} {
+		if strings.Contains(string(payloadData), leak) || strings.Contains(string(sidecarData), leak) {
+			t.Errorf("content secret %q leaked into base payload or evidence sidecar", leak)
 		}
 	}
 }
@@ -719,4 +825,57 @@ func TestScanner_CancelledContextFailsInsteadOfFabricatingCoverage(t *testing.T)
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("err = %v, want context.Canceled", err)
 	}
+}
+
+func TestScanner_DisabledContentPreservesExistingArtifactAndSkipsFresh(t *testing.T) {
+	ollamaSrv := setupMockOllama(t)
+	defer ollamaSrv.Close()
+
+	tmpDir := t.TempDir()
+	stalePath := filepath.Join(tmpDir, "nocontent.content.jsonl")
+	stale := []byte("{\"stale\":true}\n")
+	if err := os.WriteFile(stalePath, stale, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.Defaults()
+	cfg.Scope = "optout-scope"
+	cfg.Targets = []string{"127.0.0.1"}
+	cfg.VantageKey = "vantage-test"
+	cfg.Content.Enabled = false
+
+	s, err := scanner.New(cfg, scanner.WithDefinitions([]discovery.Definition{{
+		Surface:     discovery.SurfaceOllama,
+		DefaultPort: parsePort(ollamaSrv.URL),
+		ProbePaths:  []string{"/api/version"},
+		Match:       discovery.OllamaDefinition().Match,
+	}}))
+	if err != nil {
+		t.Fatalf("scanner.New: %v", err)
+	}
+	if res, err := s.Scan(context.Background(), []string{"127.0.0.1"}, tmpDir, "nocontent"); err == nil {
+		t.Fatalf("scan must reject an existing content prefix, got %+v", res)
+	}
+	got, err := os.ReadFile(stalePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(stale) {
+		t.Fatalf("collision changed content artifact: got %q want %q", got, stale)
+	}
+
+	res, err := s.Scan(context.Background(), []string{"127.0.0.1"}, tmpDir, "fresh-nocontent")
+	if err != nil {
+		t.Fatalf("fresh disabled-content scan: %v", err)
+	}
+	if res.ContentPath != "" {
+		t.Errorf("ContentPath = %q, want empty when no content collected", res.ContentPath)
+	}
+	if _, err := os.Stat(filepath.Join(tmpDir, "fresh-nocontent.content.jsonl")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("disabled content must not create a content file, stat err = %v", err)
+	}
+	if !res.State.IsCompleted("127.0.0.1", "ollama") {
+		t.Errorf("expected completed target even when content disabled")
+	}
+
 }

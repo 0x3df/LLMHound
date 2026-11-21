@@ -17,8 +17,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/0x3df/LLMHound/internal/content"
 	"github.com/0x3df/LLMHound/internal/emitter"
 	"github.com/0x3df/LLMHound/internal/evidence"
+	"github.com/0x3df/LLMHound/internal/secrets/secretstest"
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -86,13 +88,23 @@ func TestOfflineTargetCommand(t *testing.T) {
 
 func TestDefaultConfigAndExplicitFlagReplacements(t *testing.T) {
 	inEmptyDirectory(t)
-	data := "scope: file\nvantage_key: scanner\ntargets: [from-file.example.test]\ncidrs: [192.0.2.0/30]\nbounds:\n  concurrency: 17\n  max_redirects: 4\ninsecure: true\nopt_ins:\n  prompts: true\n"
+	data := "scope: file\nvantage_key: scanner\ntargets: [from-file.example.test]\ncidrs: [192.0.2.0/30]\nbounds:\n  concurrency: 17\n  max_redirects: 4\ninsecure: true\ncontent:\n  enabled: false\n"
 	if err := os.WriteFile("llmhound.yaml", []byte(data), 0600); err != nil {
 		t.Fatal(err)
 	}
-	out, err := execute("targets", "--targets", "flag.example.test", "--exclude", "192.0.2.0/31", "--insecure=false", "--prompts=false", "--max-redirects=0")
+	out, err := execute("targets", "--targets", "flag.example.test", "--exclude", "192.0.2.0/31", "--insecure=false", "--content=true", "--content-disable=ollama", "--content-max-item-bytes=2048", "--max-redirects=0")
 	if err != nil || out != "192.0.2.2\n192.0.2.3\nflag.example.test\n" {
 		t.Fatalf("%q %v", out, err)
+	}
+	// Legacy --prompts flag and opt_ins YAML keys must fail instead of silently ignoring content policy.
+	if _, err := execute("plan", "--scope", "file", "--vantage", "scanner", "--targets", "ai.example.test", "--prompts=true"); err == nil {
+		t.Fatal("expected legacy --prompts flag to be rejected")
+	}
+	if err := os.WriteFile("legacy.yaml", []byte("scope: file\nvantage_key: scanner\nopt_ins:\n  prompts: true\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := execute("targets", "--config", "legacy.yaml"); err == nil {
+		t.Fatal("expected legacy opt_ins YAML key to be rejected")
 	}
 	// Explicit empty scope is not silently replaced by the file value.
 	if _, err := execute("targets", "--scope="); err == nil || !strings.Contains(err.Error(), "scope") {
@@ -153,8 +165,21 @@ func TestUploadStillUnimplementedAndPlanWritesNoArtifacts(t *testing.T) {
 			t.Fatalf("plan missing surface %s: %q", surface, out)
 		}
 	}
-	if !strings.Contains(out, "ollama_show") || !strings.Contains(out, "policy:") {
-		t.Fatalf("plan should show inactive ollama_show with policy skip: %q", out)
+	for _, chk := range []string{"ollama_show", "jupyter_file_content", "mcp_resources_read"} {
+		if !strings.Contains(out, chk) {
+			t.Fatalf("plan missing content check %s: %q", chk, out)
+		}
+	}
+	if strings.Contains(out, "policy:") {
+		t.Fatalf("default plan should enable content checks, got skip policy: %q", out)
+	}
+
+	outOff, err := execute("plan", "--scope", "tenant", "--vantage", "scanner", "--targets", "ai.example.test", "--content=false")
+	if err != nil {
+		t.Fatalf("plan --content=false: %q %v", outOff, err)
+	}
+	if !strings.Contains(outOff, "ollama_show") || !strings.Contains(outOff, "policy:") {
+		t.Fatalf("plan --content=false should show inactive ollama_show with policy skip: %q", outOff)
 	}
 
 	files, err := os.ReadDir(".")
@@ -217,6 +242,9 @@ func cliMockOllama(t *testing.T) *httptest.Server {
 		case "/api/ps":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"models":[]}`))
+		case "/api/show":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"license":"MIT","modelfile":"FROM llama3\nSYSTEM CLI_OLLAMA_SECRET","template":"{{ .Prompt }}","system":"CLI_OLLAMA_SECRET"}`))
 		default:
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`Ollama is running`))
@@ -240,13 +268,16 @@ func cliMockJupyter(t *testing.T) *httptest.Server {
 		case "/api/contents":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"name":"","path":"","type":"directory","content":[{"name":"analysis.ipynb","path":"analysis.ipynb","type":"notebook","size":2048,"last_modified":"2026-10-01T12:00:00Z"}]}`))
+		case "/api/contents/analysis.ipynb":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"name":"analysis.ipynb","path":"analysis.ipynb","type":"notebook","format":"json","mimetype":"application/x-ipynb+json","content":{"cells":[{"source":["CLI_JUPYTER_SECRET"]}]}}`))
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
 	}))
 }
 
-func cliMockMCP(t *testing.T) *httptest.Server {
+func cliMockMCP(t *testing.T, extra string) *httptest.Server {
 	t.Helper()
 	impl := &mcpsdk.Implementation{Name: "cli-mcp", Version: "1.0.0", Title: "CLI MCP"}
 	srv := mcpsdk.NewServer(impl, nil)
@@ -257,6 +288,17 @@ func cliMockMCP(t *testing.T) *httptest.Server {
 	}, func(ctx context.Context, req *mcpsdk.CallToolRequest) (*mcpsdk.CallToolResult, error) {
 		t.Fatal("CallTool must never be called during read-only enumeration")
 		return nil, nil
+	})
+	srv.AddResource(&mcpsdk.Resource{
+		URI:      "file:///app/config.json",
+		Name:     "config.json",
+		MIMEType: "application/json",
+	}, func(ctx context.Context, req *mcpsdk.ReadResourceRequest) (*mcpsdk.ReadResourceResult, error) {
+		return &mcpsdk.ReadResourceResult{
+			Contents: []*mcpsdk.ResourceContents{
+				{URI: "file:///app/config.json", MIMEType: "application/json", Text: fmt.Sprintf(`{"token":"CLI_MCP_SECRET","gh":"%s"}`, extra)},
+			},
+		}, nil
 	})
 	handler := mcpsdk.NewStreamableHTTPHandler(func(req *http.Request) *mcpsdk.Server { return srv }, nil)
 	return httptest.NewServer(handler)
@@ -269,6 +311,20 @@ func portOf(urlStr string) int {
 	return port
 }
 
+// propsOfKind returns the properties of the first node carrying kind.
+func propsOfKind(t *testing.T, payload emitter.Payload, kind string) map[string]any {
+	t.Helper()
+	for _, n := range payload.Graph.Nodes {
+		for _, k := range n.Kinds {
+			if k == kind {
+				return n.Properties
+			}
+		}
+	}
+	t.Fatalf("no node with kind %s in payload", kind)
+	return nil
+}
+
 func TestScanCLIEndToEndLoopbackFixtures(t *testing.T) {
 	inEmptyDirectory(t)
 
@@ -276,12 +332,16 @@ func TestScanCLIEndToEndLoopbackFixtures(t *testing.T) {
 	defer ollamaSrv.Close()
 	jupyterSrv := cliMockJupyter(t)
 	defer jupyterSrv.Close()
-	mcpSrv := cliMockMCP(t)
+	// A checksum-valid classic GitHub token generated at test time: the MCP
+	// resource body must surface it on the graph, redact the content file,
+	// and leave the value nowhere on disk.
+	tok := secretstest.GitHubToken("ghp", "Zq3Lm9Tx2Vb7Nc4Hd8Kf1Pw6Rj5Ys0")
+	mcpSrv := cliMockMCP(t, tok)
 	defer mcpSrv.Close()
 	deniedSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("WWW-Authenticate", `Bearer realm="ollama"`)
 		w.WriteHeader(http.StatusUnauthorized)
-		_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
+		_, _ = w.Write([]byte(`{"error":"ollama: unauthorized"}`))
 	}))
 	defer deniedSrv.Close()
 
@@ -310,9 +370,36 @@ func TestScanCLIEndToEndLoopbackFixtures(t *testing.T) {
 	if !strings.Contains(out, "Scan completed for 1 target(s)") {
 		t.Fatalf("unexpected scan output: %q", out)
 	}
-	for _, name := range []string{"cli-live.json", "cli-live.evidence.jsonl", "cli-live.journal.jsonl"} {
+	for _, name := range []string{"cli-live.json", "cli-live.evidence.jsonl", "cli-live.journal.jsonl", "cli-live.content.jsonl"} {
 		if _, err := os.Stat(filepath.Join(outDir, name)); err != nil {
 			t.Fatalf("missing artifact %s: %v", name, err)
+		}
+	}
+	if !strings.Contains(out, "Content file:") {
+		t.Errorf("scan output missing Content file line: %q", out)
+	}
+	contentInfo, err := os.Stat(filepath.Join(outDir, "cli-live.content.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if contentInfo.Mode().Perm() != 0600 {
+		t.Errorf("content file mode = %o, want 0600", contentInfo.Mode().Perm())
+	}
+	contentRaw, err := os.ReadFile(filepath.Join(outDir, "cli-live.content.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	contentSurfaces := map[string]bool{}
+	for _, line := range strings.Split(strings.TrimSpace(string(contentRaw)), "\n") {
+		var crec content.Record
+		if err := json.Unmarshal([]byte(line), &crec); err != nil {
+			t.Fatalf("unmarshal content line: %v", err)
+		}
+		contentSurfaces[crec.Surface] = true
+	}
+	for _, wantSurf := range []string{"ollama", "jupyter", "mcp"} {
+		if !contentSurfaces[wantSurf] {
+			t.Errorf("missing surface %s in cli-live.content.jsonl: %+v", wantSurf, contentSurfaces)
 		}
 	}
 
@@ -362,6 +449,55 @@ func TestScanCLIEndToEndLoopbackFixtures(t *testing.T) {
 		}
 	}
 
+	for _, secret := range []string{"CLI_OLLAMA_SECRET", "CLI_JUPYTER_SECRET", "CLI_MCP_SECRET"} {
+		if strings.Contains(string(payloadData), secret) || strings.Contains(string(sidecar), secret) {
+			t.Errorf("content secret %q leaked into base payload or sidecar", secret)
+		}
+	}
+
+	// D4: the checksum-valid GitHub token in the MCP resource must be
+	// detected, flagged on the graph, redacted in the content file, recorded
+	// in the sidecar by type and location only, and stored nowhere.
+	mcpProps := propsOfKind(t, payload, "LLMHound_MCPServer")
+	if mcpProps["has_exposed_secret"] != true {
+		t.Errorf("MCPServer has_exposed_secret = %v, want true", mcpProps["has_exposed_secret"])
+	}
+	if got, ok := mcpProps["secret_types"].([]any); !ok || len(got) != 1 || got[0] != "github_token" {
+		t.Errorf("MCPServer secret_types = %v, want [github_token]", mcpProps["secret_types"])
+	}
+	if last, _ := mcpProps["secret_last_confirmed"].(string); last == "" {
+		t.Errorf("MCPServer secret_last_confirmed missing: %v", mcpProps["secret_last_confirmed"])
+	}
+	for _, kind := range []string{"LLMHound_OllamaInstance", "LLMHound_JupyterServer"} {
+		if props := propsOfKind(t, payload, kind); props["has_exposed_secret"] != nil {
+			t.Errorf("%s has_exposed_secret = %v, want key absent", kind, props["has_exposed_secret"])
+		}
+	}
+	if !strings.Contains(string(contentRaw), "[secret:github_token]") || strings.Contains(string(contentRaw), tok) {
+		t.Errorf("content file must carry [secret:github_token] and not the token value")
+	}
+	outDirEntries, err := os.ReadDir(outDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range outDirEntries {
+		raw, err := os.ReadFile(filepath.Join(outDir, e.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(raw), tok) {
+			t.Errorf("token value leaked into %s", e.Name())
+		}
+	}
+	if strings.Contains(out, tok) {
+		t.Errorf("token value leaked into scan output")
+	}
+	if !strings.Contains(string(sidecar), `"detected_exposures"`) ||
+		!strings.Contains(string(sidecar), `"type":"github_token"`) ||
+		!strings.Contains(string(sidecar), `"location":"file:///app/config.json"`) {
+		t.Errorf("sidecar missing detected_exposures details: %s", sidecar)
+	}
+
 	// Honest denied coverage via a second scan remapped to a 401 Ollama fixture.
 	deniedDefs := fmt.Sprintf(`[{"surface":"ollama","default_port":%d,"probe_paths":["/api/version","/"]}]`, portOf(deniedSrv.URL))
 	if err := os.WriteFile("denied-discovery.json", []byte(deniedDefs), 0600); err != nil {
@@ -385,8 +521,7 @@ func TestScanCLIEndToEndLoopbackFixtures(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(sidecar), "denied") && !strings.Contains(string(sidecar), "authentication") {
-		// Evidence should reflect auth boundary; journal coverage is asserted in scanner tests.
-		t.Logf("denied sidecar (best-effort assert): %s", sidecar)
+		t.Errorf("expected denied sidecar evidence, got: %s", sidecar)
 	}
 }
 

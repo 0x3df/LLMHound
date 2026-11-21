@@ -20,6 +20,18 @@ import (
 
 const MaxConfigBytes = 64 << 10
 
+const (
+	DefaultContentMaxItemBytes        int64 = 256 << 10 // 256 KiB
+	DefaultContentMaxItemsPerResource int   = 10
+	DefaultContentMaxServiceBytes     int64 = 5 << 20 // 5 MiB
+	DefaultContentMaxSamplePoints     int   = 5
+
+	HardMaxContentItemBytes        int64 = 16 << 20 // 16 MiB
+	HardMaxContentItemsPerResource int   = 1000
+	HardMaxContentServiceBytes     int64 = 256 << 20 // 256 MiB
+	HardMaxContentSamplePoints     int   = 1000
+)
+
 type Config struct {
 	Scope        string      `yaml:"scope"`
 	VantageKey   string      `yaml:"vantage_key"`
@@ -31,8 +43,37 @@ type Config struct {
 	Bounds       Bounds      `yaml:"bounds"`
 	Insecure     bool        `yaml:"insecure"`
 	UserAgent    string      `yaml:"user_agent"`
-	OptIns       OptIns      `yaml:"opt_ins"`
+	Content      Content     `yaml:"content"`
+	Secrets      Secrets     `yaml:"secrets"`
 	Correlation  Correlation `yaml:"correlation"`
+}
+
+// Secrets controls high-precision secret detectors run over content-tier
+// bodies. Every detector is enabled unless explicitly set to false.
+type Secrets struct {
+	Detectors map[string]bool `yaml:"detectors"`
+}
+
+// SecretDetectorNames is the closed list of detector names (sorted).
+var SecretDetectorNames = []string{"aws_access_key", "github_token", "private_key"}
+
+// IsKnownSecretDetector reports whether name is one of the built-in detectors.
+func IsKnownSecretDetector(name string) bool {
+	for _, known := range SecretDetectorNames {
+		if known == name {
+			return true
+		}
+	}
+	return false
+}
+
+// DetectorEnabled reports whether the named detector should run. A missing key
+// means enabled; only an explicit false disables it.
+func (s Secrets) DetectorEnabled(name string) bool {
+	if v, ok := s.Detectors[name]; ok {
+		return v
+	}
+	return true
 }
 
 type Bounds struct {
@@ -47,13 +88,52 @@ type Bounds struct {
 	MaxTargets       int           `yaml:"max_targets"`
 }
 
-// OptIns are explicit policy choices for future allowlisted, redacted reads.
-// No content reads are implemented by this M1 input-preparation slice.
-type OptIns struct {
-	ResourceContent      bool `yaml:"resource_content"`
-	Prompts              bool `yaml:"prompts"`
-	ConfigurationContent bool `yaml:"configuration_content"`
-	WorkspaceContent     bool `yaml:"workspace_content"`
+// Content controls bounded, anonymous, read-only collection of existing service
+// content (system prompts, modelfiles, configuration, workspace files, MCP
+// resource bodies, flow definitions, and bounded samples) into .content.jsonl.
+type Content struct {
+	Enabled             bool            `yaml:"enabled"`
+	MaxItemBytes        int64           `yaml:"max_item_bytes"`
+	MaxItemsPerResource int             `yaml:"max_items_per_resource"`
+	MaxServiceBytes     int64           `yaml:"max_service_bytes"`
+	MaxSamplePoints     int             `yaml:"max_sample_points"`
+	Surfaces            map[string]bool `yaml:"surfaces"`
+}
+
+// DefaultContent returns the default content-tier policy: enabled and bounded.
+func DefaultContent() Content {
+	return Content{
+		Enabled:             true,
+		MaxItemBytes:        DefaultContentMaxItemBytes,
+		MaxItemsPerResource: DefaultContentMaxItemsPerResource,
+		MaxServiceBytes:     DefaultContentMaxServiceBytes,
+		MaxSamplePoints:     DefaultContentMaxSamplePoints,
+	}
+}
+
+// EnabledFor reports whether content-tier reads are enabled for surface.
+func (c Content) EnabledFor(surface string) bool {
+	if !c.Enabled {
+		return false
+	}
+	if len(c.Surfaces) == 0 {
+		return true
+	}
+	if v, ok := c.Surfaces[strings.ToLower(strings.TrimSpace(surface))]; ok {
+		return v
+	}
+	return true
+}
+
+// IsKnownContentSurface reports whether name is a canonical capability-matrix surface key.
+func IsKnownContentSurface(name string) bool {
+	switch name {
+	case "ollama", "jupyter", "mcp",
+		"a2a", "vllm", "litellm", "qdrant", "mlflow", "open_webui", "langserve",
+		"openai_compatible", "ray", "langflow", "flowise", "chromadb":
+		return true
+	}
+	return false
 }
 
 // Correlation holds policy only; this package never reads mappings or looks up
@@ -65,7 +145,21 @@ type Correlation struct {
 }
 
 func Defaults() Config {
-	return Config{Bounds: Bounds{Concurrency: 16, PerHostRate: 2, ConnectTimeout: 3 * time.Second, ResponseTimeout: 10 * time.Second, MaxResponseBytes: 1 << 20, MaxPages: 100, MaxItems: 10000, MaxRedirects: 0, MaxTargets: 4096}, UserAgent: "LLMHound/dev"}
+	return Config{
+		Bounds: Bounds{
+			Concurrency:      16,
+			PerHostRate:      2,
+			ConnectTimeout:   3 * time.Second,
+			ResponseTimeout:  10 * time.Second,
+			MaxResponseBytes: 1 << 20,
+			MaxPages:         100,
+			MaxItems:         10000,
+			MaxRedirects:     0,
+			MaxTargets:       4096,
+		},
+		UserAgent: "LLMHound/dev",
+		Content:   DefaultContent(),
+	}
 }
 
 // Load overlays a single strict YAML document on defaults. Required fields are
@@ -198,6 +292,19 @@ func strictTypes(n *yaml.Node, typ reflect.Type) error {
 			}
 		}
 		return nil
+	case reflect.Map:
+		if n.Kind != yaml.MappingNode {
+			break
+		}
+		if typ.Key().Kind() != reflect.String {
+			return fmt.Errorf("invalid config map key type %s (line %d)", typ.Key(), n.Line)
+		}
+		for i := 0; i < len(n.Content); i += 2 {
+			if err := strictTypes(n.Content[i+1], typ.Elem()); err != nil {
+				return err
+			}
+		}
+		return nil
 	case reflect.String:
 		if n.Kind == yaml.ScalarNode && n.Tag == "!!str" {
 			return nil
@@ -259,14 +366,26 @@ func Apply(c, flags Config, fields []string) (Config, error) {
 			c.Insecure = flags.Insecure
 		case "user-agent":
 			c.UserAgent = flags.UserAgent
-		case "resource-content":
-			c.OptIns.ResourceContent = flags.OptIns.ResourceContent
-		case "prompts":
-			c.OptIns.Prompts = flags.OptIns.Prompts
-		case "configuration-content":
-			c.OptIns.ConfigurationContent = flags.OptIns.ConfigurationContent
-		case "workspace-content":
-			c.OptIns.WorkspaceContent = flags.OptIns.WorkspaceContent
+		case "content":
+			c.Content.Enabled = flags.Content.Enabled
+		case "content-max-item-bytes":
+			c.Content.MaxItemBytes = flags.Content.MaxItemBytes
+		case "content-max-items-per-resource":
+			c.Content.MaxItemsPerResource = flags.Content.MaxItemsPerResource
+		case "content-max-service-bytes":
+			c.Content.MaxServiceBytes = flags.Content.MaxServiceBytes
+		case "content-max-sample-points":
+			c.Content.MaxSamplePoints = flags.Content.MaxSamplePoints
+		case "content-disable":
+			if flags.Content.Surfaces == nil {
+				c.Content.Surfaces = nil
+			} else {
+				cp := make(map[string]bool, len(flags.Content.Surfaces))
+				for k, v := range flags.Content.Surfaces {
+					cp[k] = v
+				}
+				c.Content.Surfaces = cp
+			}
 		case "mapping-file":
 			c.Correlation.MappingFile = flags.Correlation.MappingFile
 		default:
@@ -332,6 +451,29 @@ func (c Config) Validate() error {
 	for _, ch := range c.UserAgent {
 		if ch < 32 || ch > 126 {
 			return fmt.Errorf("user_agent must contain printable ASCII without control characters")
+		}
+	}
+	for _, limit := range []struct {
+		name            string
+		value, min, max int64
+	}{
+		{"max_item_bytes", c.Content.MaxItemBytes, 1, HardMaxContentItemBytes},
+		{"max_items_per_resource", int64(c.Content.MaxItemsPerResource), 1, int64(HardMaxContentItemsPerResource)},
+		{"max_service_bytes", c.Content.MaxServiceBytes, 1, HardMaxContentServiceBytes},
+		{"max_sample_points", int64(c.Content.MaxSamplePoints), 1, int64(HardMaxContentSamplePoints)},
+	} {
+		if limit.value < limit.min || limit.value > limit.max {
+			return fmt.Errorf("content.%s must be between %d and %d", limit.name, limit.min, limit.max)
+		}
+	}
+	for surface := range c.Content.Surfaces {
+		if !IsKnownContentSurface(surface) {
+			return fmt.Errorf("content.surfaces contains unknown surface %q", surface)
+		}
+	}
+	for name := range c.Secrets.Detectors {
+		if !IsKnownSecretDetector(name) {
+			return fmt.Errorf("secrets.detectors contains unknown detector %q", name)
 		}
 	}
 	return nil

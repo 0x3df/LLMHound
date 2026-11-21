@@ -1,6 +1,6 @@
 # Jupyter Collector Reference
 
-> **Status: M2a Jupyter collector implemented.** Companion to
+> **Status: M2a + D3 Jupyter collector implemented.** Companion to
 > [design](../01-design.md),
 > [graph model](../02-graph-model.md), and
 > [capability matrix](../03-collector-capabilities.md).
@@ -8,8 +8,9 @@
 
 The Jupyter collector performs anonymous, bounded, read-only remote enumeration
 of Jupyter notebook and server instances (Jupyter Server, Jupyter Notebook, JupyterLab).
-It produces structured OpenGraph nodes, edges, sidecar evidence records, and
-journal entries without performing code execution, mutations, or downloading file contents.
+It produces structured OpenGraph nodes, edges, sidecar evidence records,
+restricted `.content.jsonl` entries (when enabled under `content.*`), and journal
+entries without executing kernels or mutating server state.
 
 ## Discovery Gate
 
@@ -24,13 +25,14 @@ redirects do not match. An unmatched target yields a `failed` result with the re
 
 ## Allowlisted Operations
 
-The collector strictly executes only three allowlisted read-only checks:
+The collector strictly executes only allowlisted read-only checks:
 
 | Check ID | Operation | Endpoint | Method | Purpose |
 |---|---|---|---|---|
 | `jupyter_version` | `jupyter_api_version` | `/api` | `GET` | Retrieve reported API version and server version metadata |
 | `jupyter_sessions` | `jupyter_sessions` | `/api/sessions` | `GET` | Enumerate active session count, kernel names, and execution states |
 | `jupyter_contents` | `jupyter_contents_list` | `/api/contents` | `GET` | Enumerate top-level workspace notebook and file metadata without bodies |
+| `jupyter_file_content` | `jupyter_file_content` | `/api/contents/<path>?content=1` | `GET` | Bounded read of non-binary notebook and text workspace files into `.content.jsonl` (excluded from `anon_operations`; skipped if disabled by `content.*` policy) |
 
 ### Safety Constraints
 
@@ -38,8 +40,15 @@ The collector strictly executes only three allowlisted read-only checks:
    WebSocket channels on `/api/kernels/<id>/channels`) are never contacted.
 2. **No Mutations**: Only HTTP `GET` requests are issued. Mutation endpoints (`POST`, `PUT`,
    `DELETE`, `PATCH`) are never called.
-3. **No Default File Content Reads**: File and notebook contents are never fetched. Only directory
-   metadata (names, paths, types, sizes, timestamps) is enumerated from `/api/contents`.
+3. **Bounded Content Reads & Binary Exclusion**: When `content.enabled` and
+   `content.surfaces.jupyter` allow (default `true` via CLI/config), `jupyter_file_content`
+   fetches non-binary notebooks and workspace text files listed under `/api/contents` into
+   `<prefix>.content.jsonl` (mode `0600`), bounded by `content.max_item_bytes`,
+   `content.max_items_per_resource`, and `content.max_service_bytes`. Binary extensions,
+   `base64` encodings, binary MIME types, and null-byte payloads are skipped, and content
+   bodies never enter graph payloads, sidecar records, or journals (`JupyterServer` records
+   only `content_bytes` and `content_truncated`). Disable with `--content=false` or
+   `--content-disable=jupyter`.
 4. **Authentication Boundaries**: The collector stops at authentication boundaries. HTTP 401/403
    responses and HTTP 200/302 HTML login pages are recognized as honest access denials (`denied`),
    not mistaken for successful API enumeration.
@@ -82,9 +91,9 @@ Access is recorded on the `JupyterServer` node from the **enumeration** checks o
   `mixed`, or `unknown`.
 - `anon_operations`: the check IDs that succeeded anonymously (omitted when none did).
 
-`jupyter_version` is deliberately excluded: Jupyter exposes version metadata even when
-authentication is enabled, so it must not make a protected server look anonymously
-accessible. An HTML login page is not a successful listing.
+`jupyter_version` and `jupyter_file_content` are deliberately excluded from `anon_operations`:
+Jupyter exposes version metadata even when authentication is enabled, and `anon_operations`
+records enumeration checks only (not content-tier reads). An HTML login page is not a successful listing.
 
 ## Evidence Sidecar Emission
 

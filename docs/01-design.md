@@ -148,22 +148,27 @@ LLMHound/
 │   ├── discovery/            # data-driven port probes + path fingerprints → service typing
 │   ├── transport/            # shared bounded, TLS-aware HTTP client
 │   ├── collectors/           # one package per surface: jupyter, mcp, ollama (more in M2b/M2c)
+│   ├── content/              # bounded content-tier records, redaction hook, 0600 lazy writer
+│   ├── secrets/              # parse/checksum-verified secret detectors over content bodies
 │   ├── correlate/            # asset mapping → existing native node, else NetworkEndpoint
 │   ├── graph/                # identity, kinds, observations, edges, access summary
 │   ├── evidence/             # per-check results, evidence sidecar records and writer
 │   ├── emitter/              # OpenGraph base + linking payloads, evidence sidecar
 │   ├── checkpoint/           # scan journal + deterministic replay
+│   ├── savedsearch/          # Cypher query validation and saved-search generator helpers
 │   └── scanner/              # orchestration: discovery → collectors → journal → emission
 ├── extension/
-│   └── schema.json           # OpenGraph extension definition (LLMHound_* kinds)
-├── lab/                      # pinned BloodHound CE lab + M0 compatibility checks
+│   ├── schema.json           # OpenGraph extension definition (LLMHound_* kinds)
+│   └── saved_searches/       # generated CE saved queries (P1, P2, P4, P6)
+├── tools/
+│   └── gensearches/          # generates extension/saved_searches/ from internal/graph kinds
+├── lab/                      # pinned BloodHound CE lab + M0/D2 compatibility checks
 ├── docs/                     # numbered core docs + guides/, collectors/, internals/
 └── legacy/                   # retired docs and code, kept for history (not built)
 ```
 
-Planned, not yet present: `internal/content` and `internal/secrets` (content tier and
-high-precision detectors), `internal/rules` and `extension/rules` (path-qualification),
-`internal/bloodhound` (CE API client, M3), and `extension/saved_searches`.
+Planned, not yet present: `internal/rules` and `extension/rules`
+(path-qualification, M2d), and `internal/bloodhound` (CE API client, M3).
 
 ## Graph model
 

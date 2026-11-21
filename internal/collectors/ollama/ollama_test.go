@@ -16,6 +16,7 @@ import (
 	"github.com/0x3df/LLMHound/internal/checkpoint"
 	"github.com/0x3df/LLMHound/internal/collectors/ollama"
 	"github.com/0x3df/LLMHound/internal/config"
+	"github.com/0x3df/LLMHound/internal/content"
 	"github.com/0x3df/LLMHound/internal/correlate"
 	"github.com/0x3df/LLMHound/internal/emitter"
 	"github.com/0x3df/LLMHound/internal/evidence"
@@ -82,6 +83,16 @@ func TestOllama_AnonymousHappyPath(t *testing.T) {
 					}
 				]
 			}`))
+		case "/api/show":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{
+				"license": "MIT",
+				"modelfile": "FROM llama3\nSYSTEM Be concise.",
+				"template": "{{ .Prompt }}",
+				"system": "Be concise.",
+				"details": {"parent_model": "llama3:8b", "family": "llama"}
+			}`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -92,7 +103,8 @@ func TestOllama_AnonymousHappyPath(t *testing.T) {
 	cfg.Scope = "corp-scope"
 	cfg.VantageKey = "vantage-01"
 
-	collector := ollama.New(cfg)
+	var sink content.MemorySink
+	collector := ollama.New(cfg, ollama.WithContentSink(&sink))
 	ctx := context.Background()
 	vantage := helperVantage(t, cfg.Scope, cfg.VantageKey)
 	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
@@ -193,6 +205,15 @@ func TestOllama_AnonymousHappyPath(t *testing.T) {
 	if srvItem.Properties["vantage_key"] != "vantage-01" {
 		t.Errorf("vantage_key = %v, want vantage-01", srvItem.Properties["vantage_key"])
 	}
+	if srvItem.Properties["content_truncated"] != false || srvItem.Properties["system_prompt_present"] != true || srvItem.Properties["config_collected"] != true {
+		t.Errorf("expected D3 content properties on OllamaInstance, got %v", srvItem.Properties)
+	}
+	if b, _ := srvItem.Properties["content_bytes"].(int64); b <= 0 {
+		t.Errorf("expected content_bytes > 0, got %v", srvItem.Properties["content_bytes"])
+	}
+	if len(sink.Records()) == 0 {
+		t.Errorf("expected content sink to capture /api/show content")
+	}
 	if providesModelCount != 2 {
 		t.Errorf("expected 2 ProvidesModel edges, got %d", providesModelCount)
 	}
@@ -200,10 +221,18 @@ func TestOllama_AnonymousHappyPath(t *testing.T) {
 		t.Errorf("expected ObservedAt edge")
 	}
 
-	// Verify evidence records
+	// Verify evidence records and unique EvidenceIDs
 	var hasFpRecord bool
 	var hasTagsCheckRecord bool
+	seenIDs := make(map[string]bool)
 	for _, ev := range res.Evidence {
+		if ev.EvidenceID == "" {
+			t.Errorf("evidence record missing EvidenceID: %+v", ev)
+		}
+		if seenIDs[ev.EvidenceID] {
+			t.Errorf("duplicate EvidenceID %q", ev.EvidenceID)
+		}
+		seenIDs[ev.EvidenceID] = true
 		if ev.RecordType == evidence.RecordFingerprint {
 			hasFpRecord = true
 			if ev.SoftwareVersion != "0.3.12" {
@@ -431,44 +460,19 @@ func TestOllama_OptInSensitiveMetadata(t *testing.T) {
 	vantage := helperVantage(t, "corp-scope", "vantage-01")
 	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
 
-	// 1. Default policy (opt-in = false): /api/show must NOT be called
+	// 1. Default policy (content enabled): /api/show IS called
 	cfgDefault := config.Defaults()
 	cfgDefault.Scope = "corp-scope"
 	cfgDefault.VantageKey = "vantage-01"
 
-	collectorDefault := ollama.New(cfgDefault)
+	var sink content.MemorySink
+	collectorDefault := ollama.New(cfgDefault, ollama.WithContentSink(&sink))
 	res, err := collectorDefault.Collect(ctx, ts.URL, vantage.scope, vantage.key, "scan-001", now, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if showCalled {
-		t.Errorf("show endpoint must NOT be called when opt-in is false")
-	}
-
-	// Check that check_id ollama_show was marked skipped
-	var hasSkippedShow bool
-	for _, cr := range res.Evidence {
-		if cr.CheckID == ollama.CheckShow && cr.Outcome == string(graph.OutcomeSkipped) {
-			hasSkippedShow = true
-		}
-	}
-	if !hasSkippedShow {
-		t.Errorf("expected ollama_show check to be recorded as skipped")
-	}
-
-	// 2. Opt-in enabled: /api/show IS called
-	cfgOptIn := config.Defaults()
-	cfgOptIn.Scope = "corp-scope"
-	cfgOptIn.VantageKey = "vantage-01"
-	cfgOptIn.OptIns.Prompts = true
-
-	collectorOptIn := ollama.New(cfgOptIn)
-	res, err = collectorOptIn.Collect(ctx, ts.URL, vantage.scope, vantage.key, "scan-002", now, nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
 	if !showCalled {
-		t.Errorf("show endpoint must be called when OptIns.Prompts is true")
+		t.Errorf("show endpoint must be called with default content policy")
 	}
 
 	var hasSuccessShow bool
@@ -478,7 +482,51 @@ func TestOllama_OptInSensitiveMetadata(t *testing.T) {
 		}
 	}
 	if !hasSuccessShow {
-		t.Errorf("expected ollama_show check to be recorded as success with opt-in")
+		t.Errorf("expected ollama_show check to be recorded as success under default policy")
+	}
+	if len(sink.Records()) < 3 {
+		t.Errorf("expected modelfile, template, and system records in sink, got %d", len(sink.Records()))
+	}
+
+	// 2. Global content opt-out: /api/show must NOT be called
+	showCalled = false
+	cfgDisabled := config.Defaults()
+	cfgDisabled.Scope = "corp-scope"
+	cfgDisabled.VantageKey = "vantage-01"
+	cfgDisabled.Content.Enabled = false
+
+	collectorDisabled := ollama.New(cfgDisabled)
+	res, err = collectorDisabled.Collect(ctx, ts.URL, vantage.scope, vantage.key, "scan-002", now, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if showCalled {
+		t.Errorf("show endpoint must NOT be called when Content.Enabled is false")
+	}
+
+	var hasSkippedShow bool
+	for _, cr := range res.Evidence {
+		if cr.CheckID == ollama.CheckShow && cr.Outcome == string(graph.OutcomeSkipped) {
+			hasSkippedShow = true
+		}
+	}
+	if !hasSkippedShow {
+		t.Errorf("expected ollama_show check to be recorded as skipped when disabled")
+	}
+
+	// 3. Per-surface opt-out: /api/show must NOT be called
+	showCalled = false
+	cfgSurfaceOff := config.Defaults()
+	cfgSurfaceOff.Scope = "corp-scope"
+	cfgSurfaceOff.VantageKey = "vantage-01"
+	cfgSurfaceOff.Content.Surfaces = map[string]bool{"ollama": false}
+
+	res, err = ollama.New(cfgSurfaceOff).Collect(ctx, ts.URL, vantage.scope, vantage.key, "scan-003", now, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if showCalled {
+		t.Errorf("show endpoint must NOT be called when ollama surface content is disabled")
 	}
 }
 
@@ -608,6 +656,8 @@ func TestOllama_CheckpointJournalAndEmissionRoundtrip(t *testing.T) {
 			}`))
 		case "/api/ps":
 			_, _ = w.Write([]byte(`{"models":[]}`))
+		case "/api/show":
+			_, _ = w.Write([]byte(`{"license":"MIT","system":"You are helpful"}`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -755,6 +805,8 @@ func TestOllama_TLSVerification(t *testing.T) {
 			_, _ = w.Write([]byte(`{"models":[{"name":"llama3:latest"}]}`))
 		case "/api/ps":
 			_, _ = w.Write([]byte(`{"models":[]}`))
+		case "/api/show":
+			_, _ = w.Write([]byte(`{"license":"MIT","system":"You are helpful"}`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -873,11 +925,11 @@ func TestOllama_ShowRecordsOnlyRedactedProvenance(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.Scope = "corp-scope"
 	cfg.VantageKey = "vantage-01"
-	cfg.OptIns.Prompts = true
 
+	var sink content.MemorySink
 	vantage := helperVantage(t, cfg.Scope, cfg.VantageKey)
 	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
-	res, err := ollama.New(cfg).Collect(context.Background(), ts.URL, vantage.scope, vantage.key, "scan-001", now, nil)
+	res, err := ollama.New(cfg, ollama.WithContentSink(&sink)).Collect(context.Background(), ts.URL, vantage.scope, vantage.key, "scan-001", now, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -910,6 +962,9 @@ func TestOllama_ShowRecordsOnlyRedactedProvenance(t *testing.T) {
 			t.Errorf("sensitive show content %q must not be persisted", secret)
 		}
 	}
+	if len(sink.Records()) == 0 {
+		t.Errorf("expected content sink to receive redacted/raw bounded show items")
+	}
 }
 
 func nodeProps(res checkpoint.Result) []map[string]any {
@@ -940,11 +995,11 @@ func TestOllama_PSAndShowFailuresDowngradeCoverage(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.Scope = "corp-scope"
 	cfg.VantageKey = "vantage-01"
-	cfg.OptIns.Prompts = true
 
+	var sink content.MemorySink
 	vantage := helperVantage(t, cfg.Scope, cfg.VantageKey)
 	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
-	res, err := ollama.New(cfg).Collect(context.Background(), ts.URL, vantage.scope, vantage.key, "scan-001", now, nil)
+	res, err := ollama.New(cfg, ollama.WithContentSink(&sink)).Collect(context.Background(), ts.URL, vantage.scope, vantage.key, "scan-001", now, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -953,6 +1008,9 @@ func TestOllama_PSAndShowFailuresDowngradeCoverage(t *testing.T) {
 	}
 	if !strings.Contains(res.Observation.CoverageReason, "running models") || !strings.Contains(res.Observation.CoverageReason, "provenance") {
 		t.Errorf("expected reason to name ps and show degradation, got %q", res.Observation.CoverageReason)
+	}
+	if len(sink.Records()) != 0 {
+		t.Errorf("expected no content records on 500 show failure, got %d", len(sink.Records()))
 	}
 }
 
@@ -1048,7 +1106,6 @@ func TestOllama_ShowTruncatedBodyReportedAsTruncation(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.Scope = "corp-scope"
 	cfg.VantageKey = "vantage-01"
-	cfg.OptIns.Prompts = true
 	cfg.Bounds.MaxResponseBytes = 256
 
 	vantage := helperVantage(t, cfg.Scope, cfg.VantageKey)
@@ -1104,5 +1161,131 @@ func TestOllama_PSRedirectEvidenceRecorded(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected redirect evidence for /api/ps hop")
+	}
+}
+
+func TestOllama_ContentBudgetTruncationAndNonLeak(t *testing.T) {
+	secretSys := "SYSTEM_PREFIX_" + strings.Repeat("A", 120)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/version":
+			_, _ = w.Write([]byte(`{"version":"0.3.12"}`))
+		case "/api/tags":
+			_, _ = w.Write([]byte(`{"models":[{"name":"llama3:latest"}]}`))
+		case "/api/ps":
+			_, _ = w.Write([]byte(`{"models":[]}`))
+		case "/api/show":
+			_, _ = w.Write([]byte(`{"system":"` + secretSys + `"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ts.Close()
+
+	cfg := config.Defaults()
+	cfg.Scope = "corp-scope"
+	cfg.VantageKey = "vantage-01"
+	cfg.Content.MaxItemBytes = 32
+	cfg.Content.MaxServiceBytes = 32
+
+	var sink content.MemorySink
+	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	res, err := ollama.New(cfg, ollama.WithContentSink(&sink)).Collect(context.Background(), ts.URL, "corp-scope", "vantage-01", "scan-001", now, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Observation.Coverage != graph.CoverageTruncated {
+		t.Errorf("coverage = %s, want truncated", res.Observation.Coverage)
+	}
+	recs := sink.Records()
+	if len(recs) != 1 || !recs[0].Truncated || len(recs[0].Body) != 32 {
+		t.Fatalf("expected 1 truncated 32-byte record, got %+v", recs)
+	}
+	var srvProps map[string]any
+	for _, n := range res.Nodes {
+		if n.Node.Identity().Kind() == graph.OllamaInstance {
+			srvProps = n.Properties
+		}
+	}
+	if srvProps["content_truncated"] != true || srvProps["system_prompt_present"] != true || srvProps["content_bytes"] != int64(32) {
+		t.Errorf("unexpected content summary properties: %v", srvProps)
+	}
+	persisted, _ := json.Marshal(struct {
+		Nodes    any
+		Evidence any
+	}{Nodes: nodeProps(res), Evidence: res.Evidence})
+	if strings.Contains(string(persisted), "SYSTEM_PREFIX_") {
+		t.Errorf("content body leaked into nodes or evidence")
+	}
+}
+
+func TestOllama_IPv6EndpointAndFailedEmitsNoNodes(t *testing.T) {
+	epBare, hostBare, err := ollama.ParseTargetEndpoint("::1")
+	if err != nil {
+		t.Fatalf("ParseTargetEndpoint bare IPv6: %v", err)
+	}
+	if hostBare != "::1" || epBare.Scheme() != "http" || epBare.Host() != "::1" || epBare.Port() != ollama.DefaultPort || epBare.String() != "http://[::1]:11434/" {
+		t.Errorf("unexpected bare IPv6 endpoint: ep=%v host=%q", epBare, hostBare)
+	}
+	epBracket, hostBracket, err := ollama.ParseTargetEndpoint("[::1]:11434")
+	if err != nil {
+		t.Fatalf("ParseTargetEndpoint bracketed IPv6: %v", err)
+	}
+	if hostBracket != "::1" || epBracket.String() != "http://[::1]:11434/" {
+		t.Errorf("unexpected bracketed IPv6 endpoint: ep=%v host=%q", epBracket, hostBracket)
+	}
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer ts.Close()
+
+	cfg := config.Defaults()
+	cfg.Scope = "corp-scope"
+	cfg.VantageKey = "vantage-01"
+	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	res, err := ollama.New(cfg).Collect(context.Background(), ts.URL, "corp-scope", "vantage-01", "scan-001", now, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Observation.Coverage != graph.CoverageFailed {
+		t.Fatalf("expected CoverageFailed, got %s", res.Observation.Coverage)
+	}
+	if len(res.Nodes) != 0 || len(res.Edges) != 0 {
+		t.Errorf("CoverageFailed must emit 0 nodes and 0 edges, got %d/%d", len(res.Nodes), len(res.Edges))
+	}
+}
+func TestOllama_ContentItemsPerModelBound(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/version":
+			_, _ = w.Write([]byte(`{"version":"0.3.12"}`))
+		case "/api/tags":
+			_, _ = w.Write([]byte(`{"models":[{"name":"llama3:latest"}]}`))
+		case "/api/ps":
+			_, _ = w.Write([]byte(`{"models":[]}`))
+		case "/api/show":
+			_, _ = w.Write([]byte(`{"system":"system","modelfile":"modelfile","template":"template","parameters":"parameters"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ts.Close()
+
+	cfg := config.Defaults()
+	cfg.Scope = "corp-scope"
+	cfg.VantageKey = "vantage-01"
+	cfg.Content.MaxItemsPerResource = 1
+	var sink content.MemorySink
+	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	res, err := ollama.New(cfg, ollama.WithContentSink(&sink)).Collect(context.Background(), ts.URL, "corp-scope", "vantage-01", "scan-001", now, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := len(sink.Records()); got != 1 {
+		t.Fatalf("stored items = %d, want 1 for one model", got)
+	}
+	if res.Observation.Coverage != graph.CoverageTruncated {
+		t.Fatalf("coverage = %s, want truncated", res.Observation.Coverage)
 	}
 }

@@ -20,13 +20,16 @@ func writeConfig(t *testing.T, data string) string {
 }
 
 func TestLoadDefaultsAndPaths(t *testing.T) {
-	path := writeConfig(t, "scope: tenant\nvantage_key: scanner\ntargets: [AI.Example.Test]\ncidrs: [192.0.2.0/30]\ntargets_files: [hosts.txt]\nexclude_files: [excluded.txt]\nbounds:\n  concurrency: 7\n  connect_timeout: 2s\ninsecure: true\ncorrelation:\n  mapping_file: computers.json\n")
+	path := writeConfig(t, "scope: tenant\nvantage_key: scanner\ntargets: [AI.Example.Test]\ncidrs: [192.0.2.0/30]\ntargets_files: [hosts.txt]\nexclude_files: [excluded.txt]\nbounds:\n  concurrency: 7\n  connect_timeout: 2s\ninsecure: true\ncontent:\n  surfaces:\n    ollama: false\ncorrelation:\n  mapping_file: computers.json\n")
 	got, err := Load(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got.Scope != "tenant" || got.Bounds.Concurrency != 7 || got.Bounds.ConnectTimeout != 2*time.Second || got.Bounds.ResponseTimeout != Defaults().Bounds.ResponseTimeout || !got.Insecure {
 		t.Fatalf("bad config: %+v", got)
+	}
+	if !got.Content.Enabled || got.Content.MaxItemBytes != DefaultContentMaxItemBytes || got.Content.EnabledFor("ollama") || !got.Content.EnabledFor("jupyter") {
+		t.Fatalf("bad default/surface content config: %+v", got.Content)
 	}
 	if got.TargetsFiles[0] != filepath.Join(filepath.Dir(path), "hosts.txt") || got.ExcludeFiles[0] != filepath.Join(filepath.Dir(path), "excluded.txt") || got.Correlation.MappingFile != filepath.Join(filepath.Dir(path), "computers.json") {
 		t.Fatalf("wrong paths: %+v", got)
@@ -38,7 +41,7 @@ func TestLoadDefaultsAndPaths(t *testing.T) {
 
 func TestLoadRejectsInvalidYAML(t *testing.T) {
 	for _, data := range []string{
-		"scope: x\nscope: y\n", "unknown: true\n", "correlation: {ad_domain_suffixes: [corp.example]}\n", "correlation: {reverse_dns: true}\n", "correlation: {ce_lookup: true}\n", "bounds: {max_itemz: 3}\n", "scope: null\n", "bounds: null\n", "insecure: null\n", "---\nscope: x\n---\nscope: y\n", "[]\n", "scope: [x]\n", "scope: 123\n", "insecure: yes\n", "bounds: {max_targets: 1.5}\n", "bounds: {concurrency: \"7\"}\n", "scope: &s x\nvantage_key: *s\n", "scope: x\nbounds: {connect_timeout: 7}\n", "scope: x\nbounds: {max_targets: nope}\n", "", strings.Repeat("#", MaxConfigBytes+1),
+		"scope: x\nscope: y\n", "unknown: true\n", "opt_ins: {prompts: true}\n", "correlation: {ad_domain_suffixes: [corp.example]}\n", "correlation: {reverse_dns: true}\n", "correlation: {ce_lookup: true}\n", "bounds: {max_itemz: 3}\n", "content: {surfaces: []}\n", "content: {surfaces: {ollama: nope}}\n", "scope: null\n", "bounds: null\n", "insecure: null\n", "---\nscope: x\n---\nscope: y\n", "[]\n", "scope: [x]\n", "scope: 123\n", "insecure: yes\n", "bounds: {max_targets: 1.5}\n", "bounds: {concurrency: \"7\"}\n", "scope: &s x\nvantage_key: *s\n", "scope: x\nbounds: {connect_timeout: 7}\n", "scope: x\nbounds: {max_targets: nope}\n", "", strings.Repeat("#", MaxConfigBytes+1),
 	} {
 		t.Run(data[:min(40, len(data))], func(t *testing.T) {
 			if _, err := Load(writeConfig(t, data)); err == nil {
@@ -57,16 +60,19 @@ func TestApplyOnlyExplicitFields(t *testing.T) {
 	file.Targets, file.CIDRs, file.TargetsFiles = []string{"file.example.test"}, []string{"192.0.2.0/30"}, []string{"file.txt"}
 	file.Bounds.Concurrency = 17
 	file.Bounds.MaxRedirects = 5
-	file.OptIns.Prompts = true
+	file.Content.Enabled = true
+	file.Content.Surfaces = map[string]bool{"jupyter": false}
 	flags := Defaults()
 	flags.Scope = "flag-scope"
 	flags.TargetsFiles = []string{"flag.txt"}
 	flags.Bounds.MaxRedirects = 0
-	got, err := Apply(file, flags, []string{"scope", "targets-file", "insecure", "prompts", "max-redirects"})
+	flags.Content.Enabled = false
+	flags.Content.Surfaces = map[string]bool{"ollama": false}
+	got, err := Apply(file, flags, []string{"scope", "targets-file", "insecure", "content", "content-disable", "max-redirects"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Scope != "flag-scope" || got.VantageKey != "file-vantage" || got.Insecure || got.OptIns.Prompts || got.Bounds.MaxRedirects != 0 || got.Bounds.Concurrency != 17 || !reflect.DeepEqual(got.Targets, file.Targets) || !reflect.DeepEqual(got.CIDRs, file.CIDRs) || !reflect.DeepEqual(got.TargetsFiles, []string{"flag.txt"}) {
+	if got.Scope != "flag-scope" || got.VantageKey != "file-vantage" || got.Insecure || got.Content.Enabled || !reflect.DeepEqual(got.Content.Surfaces, map[string]bool{"ollama": false}) || got.Bounds.MaxRedirects != 0 || got.Bounds.Concurrency != 17 || !reflect.DeepEqual(got.Targets, file.Targets) || !reflect.DeepEqual(got.CIDRs, file.CIDRs) || !reflect.DeepEqual(got.TargetsFiles, []string{"flag.txt"}) {
 		t.Fatalf("bad override: %+v", got)
 	}
 	flags.Scope = ""
@@ -99,6 +105,9 @@ func TestValidateBounds(t *testing.T) {
 		"pages": func(c *Config) { c.Bounds.MaxPages = 0 }, "items": func(c *Config) { c.Bounds.MaxItems = -1 }, "redirects": func(c *Config) { c.Bounds.MaxRedirects = -1 },
 		"target-limit": func(c *Config) { c.Bounds.MaxTargets = 65537 }, "user-agent": func(c *Config) { c.UserAgent = "x\r\ny" }, "user-agent-empty": func(c *Config) { c.UserAgent = "" },
 		"empty-file": func(c *Config) { c.TargetsFiles = []string{""} }, "empty-mapping": func(c *Config) { c.Correlation.MappingFile = " " },
+		"content-item-bytes": func(c *Config) { c.Content.MaxItemBytes = 0 }, "content-items": func(c *Config) { c.Content.MaxItemsPerResource = 0 },
+		"content-service-bytes": func(c *Config) { c.Content.MaxServiceBytes = HardMaxContentServiceBytes + 1 }, "content-samples": func(c *Config) { c.Content.MaxSamplePoints = 0 },
+		"content-unknown-surface": func(c *Config) { c.Content.Surfaces = map[string]bool{"olama": false} }, "content-case-surface": func(c *Config) { c.Content.Surfaces = map[string]bool{"Ollama": false} },
 	} {
 		t.Run(name, func(t *testing.T) {
 			c := validConfig()
@@ -140,10 +149,33 @@ func TestLoadPreservesInvalidBlankPathsForValidation(t *testing.T) {
 }
 
 func TestApplyAllFields(t *testing.T) {
-	flags := Config{Scope: "x", VantageKey: "v", Targets: []string{"a.example.test"}, CIDRs: []string{"192.0.2.0/30"}, TargetsFiles: []string{"a.txt"}, Exclude: []string{"b.example.test"}, ExcludeFiles: []string{"b.txt"}, Bounds: Bounds{Concurrency: 2, PerHostRate: 3, ConnectTimeout: time.Second, ResponseTimeout: 2 * time.Second, MaxResponseBytes: 10, MaxPages: 20, MaxItems: 30, MaxRedirects: 1, MaxTargets: 40}, Insecure: true, UserAgent: "test", OptIns: OptIns{ResourceContent: true, Prompts: true, ConfigurationContent: true, WorkspaceContent: true}, Correlation: Correlation{MappingFile: "m.json"}}
-	keys := []string{"scope", "vantage", "targets", "cidr", "targets-file", "exclude", "exclude-file", "concurrency", "per-host-rate", "connect-timeout", "response-timeout", "max-response-bytes", "max-pages", "max-items", "max-redirects", "max-targets", "insecure", "user-agent", "resource-content", "prompts", "configuration-content", "workspace-content", "mapping-file"}
+	flags := Config{Scope: "x", VantageKey: "v", Targets: []string{"a.example.test"}, CIDRs: []string{"192.0.2.0/30"}, TargetsFiles: []string{"a.txt"}, Exclude: []string{"b.example.test"}, ExcludeFiles: []string{"b.txt"}, Bounds: Bounds{Concurrency: 2, PerHostRate: 3, ConnectTimeout: time.Second, ResponseTimeout: 2 * time.Second, MaxResponseBytes: 10, MaxPages: 20, MaxItems: 30, MaxRedirects: 1, MaxTargets: 40}, Insecure: true, UserAgent: "test", Content: Content{Enabled: false, MaxItemBytes: 100, MaxItemsPerResource: 2, MaxServiceBytes: 300, MaxSamplePoints: 3, Surfaces: map[string]bool{"ollama": false}}, Correlation: Correlation{MappingFile: "m.json"}}
+	keys := []string{"scope", "vantage", "targets", "cidr", "targets-file", "exclude", "exclude-file", "concurrency", "per-host-rate", "connect-timeout", "response-timeout", "max-response-bytes", "max-pages", "max-items", "max-redirects", "max-targets", "insecure", "user-agent", "content", "content-max-item-bytes", "content-max-items-per-resource", "content-max-service-bytes", "content-max-sample-points", "content-disable", "mapping-file"}
 	got, err := Apply(Defaults(), flags, keys)
 	if err != nil || !reflect.DeepEqual(got, flags) {
 		t.Fatalf("incomplete overrides: %+v %v", got, err)
+	}
+}
+
+func TestSecretsDetectorConfig(t *testing.T) {
+	c, err := Load(writeConfig(t, "scope: tenant\nvantage_key: scanner\ntargets: [AI.Example.Test]\nsecrets:\n  detectors:\n    github_token: false\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Secrets.DetectorEnabled("github_token") {
+		t.Fatal("explicitly disabled detector must be disabled")
+	}
+	if !c.Secrets.DetectorEnabled("private_key") || !c.Secrets.DetectorEnabled("aws_access_key") {
+		t.Fatal("missing key must default to enabled")
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	unknown, err := Load(writeConfig(t, "scope: tenant\nvantage_key: scanner\ntargets: [AI.Example.Test]\nsecrets:\n  detectors:\n    openai_key: true\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := unknown.Validate(); err == nil || !strings.Contains(err.Error(), `secrets.detectors contains unknown detector "openai_key"`) {
+		t.Fatalf("unknown detector must fail validation, got: %v", err)
 	}
 }

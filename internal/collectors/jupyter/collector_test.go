@@ -18,6 +18,7 @@ import (
 	"github.com/0x3df/LLMHound/internal/checkpoint"
 	"github.com/0x3df/LLMHound/internal/collectors/jupyter"
 	"github.com/0x3df/LLMHound/internal/config"
+	"github.com/0x3df/LLMHound/internal/content"
 	"github.com/0x3df/LLMHound/internal/correlate"
 	"github.com/0x3df/LLMHound/internal/discovery"
 	"github.com/0x3df/LLMHound/internal/emitter"
@@ -89,6 +90,28 @@ func mockJupyterHandler(t *testing.T) http.HandlerFunc {
 					}
 				]
 			}`))
+		case "/api/contents/notebooks/EDA.ipynb":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{
+				"name": "EDA.ipynb",
+				"path": "notebooks/EDA.ipynb",
+				"type": "notebook",
+				"format": "json",
+				"mimetype": "application/x-ipynb+json",
+				"content": {"cells":[{"cell_type":"code","source":["print('eda')"]}]}
+			}`))
+		case "/api/contents/train.py":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{
+				"name": "train.py",
+				"path": "train.py",
+				"type": "file",
+				"format": "text",
+				"mimetype": "text/x-python",
+				"content": "import os\nprint('train')\n"
+			}`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -103,6 +126,7 @@ func TestAnonymousJupyterServer(t *testing.T) {
 	server := httptest.NewServer(mockJupyterHandler(t))
 	defer server.Close()
 
+	var sink content.MemorySink
 	col, err := jupyter.New(jupyter.Config{
 		Scope:            "test-scope",
 		VantageKey:       "vantage-dc01",
@@ -110,6 +134,8 @@ func TestAnonymousJupyterServer(t *testing.T) {
 		CollectorVersion: "0.1.0",
 		Now:              testFixedTime,
 		HTTPClient:       server.Client(),
+		Content:          config.DefaultContent(),
+		ContentSink:      &sink,
 	})
 	if err != nil {
 		t.Fatalf("jupyter.New: %v", err)
@@ -188,11 +214,20 @@ func TestAnonymousJupyterServer(t *testing.T) {
 	if !slices.Contains(ops, jupyter.CheckIDContents) || !slices.Contains(ops, jupyter.CheckIDSessions) {
 		t.Errorf("anon_operations %v must include the contents and sessions checks", ops)
 	}
-	if slices.Contains(ops, jupyter.CheckIDVersion) {
-		t.Errorf("anon_operations %v must not include version metadata", ops)
+	if slices.Contains(ops, jupyter.CheckIDVersion) || slices.Contains(ops, jupyter.CheckIDFileContent) {
+		t.Errorf("anon_operations %v must not include version metadata or file content", ops)
 	}
 	if props["vantage_key"] != "vantage-dc01" {
 		t.Errorf("got vantage_key %v, want vantage-dc01", props["vantage_key"])
+	}
+	if props["content_truncated"] != false {
+		t.Errorf("unexpected content_truncated property: %v", props["content_truncated"])
+	}
+	if b, _ := props["content_bytes"].(int64); b <= 0 {
+		t.Errorf("expected content_bytes > 0, got %v", props["content_bytes"])
+	}
+	if len(sink.Records()) != 2 {
+		t.Errorf("expected 2 content records in sink, got %d", len(sink.Records()))
 	}
 
 	// Verify WorkspaceFiles: exactly 2 files (directory skipped)
@@ -237,14 +272,25 @@ func TestAnonymousJupyterServer(t *testing.T) {
 		t.Errorf("got %d ObservedAt edges, want 1", observedAtCount)
 	}
 
-	// Verify Evidence records
+	// Verify Evidence records and unique EvidenceIDs
 	var fpRecCount, checkRecCount, corrRecCount int
+	seenIDs := make(map[string]bool)
 	for _, ev := range res.Evidence {
+		if ev.EvidenceID == "" {
+			t.Errorf("evidence record missing EvidenceID: %+v", ev)
+		}
+		if seenIDs[ev.EvidenceID] {
+			t.Errorf("duplicate EvidenceID %q", ev.EvidenceID)
+		}
+		seenIDs[ev.EvidenceID] = true
 		switch ev.RecordType {
 		case evidence.RecordFingerprint:
 			fpRecCount++
 			if ev.APIVersion != "2.14.0" {
 				t.Errorf("fingerprint APIVersion got %s, want 2.14.0", ev.APIVersion)
+			}
+			if ev.SoftwareVersionRaw != "2.14.0" {
+				t.Errorf("fingerprint SoftwareVersionRaw got %q, want 2.14.0", ev.SoftwareVersionRaw)
 			}
 		case evidence.RecordCheckResult:
 			checkRecCount++
@@ -259,8 +305,8 @@ func TestAnonymousJupyterServer(t *testing.T) {
 	if fpRecCount != 1 {
 		t.Errorf("got %d fingerprint records, want 1", fpRecCount)
 	}
-	if checkRecCount != 3 {
-		t.Errorf("got %d check result records, want 3", checkRecCount)
+	if checkRecCount != 4 {
+		t.Errorf("got %d check result records, want 4", checkRecCount)
 	}
 	if corrRecCount != 1 {
 		t.Errorf("got %d correlation records, want 1", corrRecCount)
@@ -329,9 +375,15 @@ func TestAuthenticatedJupyterServer(t *testing.T) {
 		}
 	}
 
-	// Verify all 3 checks have denied outcome
+	// Verify metadata checks have denied outcome and file content check is skipped when Content is disabled
 	for _, ev := range res.Evidence {
 		if ev.RecordType == evidence.RecordCheckResult {
+			if ev.CheckID == jupyter.CheckIDFileContent {
+				if ev.Outcome != "skipped" {
+					t.Errorf("check %s got outcome %s, want skipped", ev.CheckID, ev.Outcome)
+				}
+				continue
+			}
 			if ev.Outcome != "denied" {
 				t.Errorf("check %s got outcome %s, want denied", ev.CheckID, ev.Outcome)
 			}
@@ -434,6 +486,12 @@ func TestHtmlLoginPageDetection(t *testing.T) {
 	// HTML login page is recognized as auth boundary -> denied outcome
 	for _, ev := range res.Evidence {
 		if ev.RecordType == evidence.RecordCheckResult {
+			if ev.CheckID == jupyter.CheckIDFileContent {
+				if ev.Outcome != "skipped" {
+					t.Errorf("check %s got outcome %s, want skipped", ev.CheckID, ev.Outcome)
+				}
+				continue
+			}
 			if ev.Outcome != "denied" {
 				t.Errorf("check %s got outcome %s, want denied", ev.CheckID, ev.Outcome)
 			}
@@ -477,6 +535,12 @@ func TestRedirectToLogin(t *testing.T) {
 
 	for _, ev := range res.Evidence {
 		if ev.RecordType == evidence.RecordCheckResult {
+			if ev.CheckID == jupyter.CheckIDFileContent {
+				if ev.Outcome != "skipped" {
+					t.Errorf("check %s got outcome %s, want skipped", ev.CheckID, ev.Outcome)
+				}
+				continue
+			}
 			if ev.Outcome != "denied" {
 				t.Errorf("check %s got outcome %s, want denied on login redirect", ev.CheckID, ev.Outcome)
 			}
@@ -850,6 +914,12 @@ func TestRateLimiting429(t *testing.T) {
 
 	for _, ev := range res.Evidence {
 		if ev.RecordType == evidence.RecordCheckResult {
+			if ev.CheckID == jupyter.CheckIDFileContent {
+				if ev.Outcome != "skipped" {
+					t.Errorf("check %s got outcome %s, want skipped", ev.CheckID, ev.Outcome)
+				}
+				continue
+			}
 			if ev.Outcome != "failed" {
 				t.Errorf("check %s got outcome %s, want failed on 429", ev.CheckID, ev.Outcome)
 			}
@@ -883,6 +953,12 @@ func Test404Endpoint(t *testing.T) {
 
 	for _, ev := range res.Evidence {
 		if ev.RecordType == evidence.RecordCheckResult {
+			if ev.CheckID == jupyter.CheckIDFileContent {
+				if ev.Outcome != "skipped" {
+					t.Errorf("check %s got outcome %s, want skipped", ev.CheckID, ev.Outcome)
+				}
+				continue
+			}
 			if ev.Outcome != "failed" {
 				t.Errorf("check %s got outcome %s, want failed on 404", ev.CheckID, ev.Outcome)
 			}
@@ -1156,5 +1232,137 @@ func TestCollectIdentifiedSkipsFingerprintProbe(t *testing.T) {
 	}
 	if res.Observation.Coverage == graph.CoverageFailed {
 		t.Errorf("identified collection failed: %s", res.Observation.CoverageReason)
+	}
+}
+
+func TestJupyter_ContentBinarySkipBoundsAndOptOut(t *testing.T) {
+	var fileContentRequests []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"version": "2.14.0", "jupyter_server_version": "2.14.0"}`))
+		case "/api/sessions":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[]`))
+		case "/api/contents":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{
+				"type": "directory",
+				"content": [
+					{"name": "weights.bin", "path": "weights.bin", "type": "file", "size": 1024},
+					{"name": "blob.txt", "path": "blob.txt", "type": "file", "size": 32},
+					{"name": "secret_notes.py", "path": "secret_notes.py", "type": "file", "size": 256}
+				]
+			}`))
+		case "/api/contents/weights.bin":
+			fileContentRequests = append(fileContentRequests, r.URL.Path)
+			t.Fatal("binary filename weights.bin must not be fetched")
+		case "/api/contents/blob.txt":
+			fileContentRequests = append(fileContentRequests, r.URL.Path)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"name":"blob.txt","path":"blob.txt","type":"file","format":"base64","mimetype":"application/octet-stream","content":"AQID"}`))
+		case "/api/contents/secret_notes.py":
+			fileContentRequests = append(fileContentRequests, r.URL.Path)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"name":"secret_notes.py","path":"secret_notes.py","type":"file","format":"text","mimetype":"text/x-python","content":"CONTENT_SECRET_LINE_` + strings.Repeat("Z", 100) + `"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	contentCfg := config.DefaultContent()
+	contentCfg.MaxItemBytes = 28
+	contentCfg.MaxServiceBytes = 28
+	var sink content.MemorySink
+
+	col, err := jupyter.New(jupyter.Config{
+		Scope:       "test-scope",
+		VantageKey:  "vantage-dc01",
+		ScanID:      "scan-d3-001",
+		Now:         testFixedTime,
+		HTTPClient:  server.Client(),
+		Content:     contentCfg,
+		ContentSink: &sink,
+	})
+	if err != nil {
+		t.Fatalf("jupyter.New: %v", err)
+	}
+	res, err := col.Collect(context.Background(), server.URL)
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if res.Observation.Coverage != graph.CoverageTruncated {
+		t.Errorf("coverage = %s, want truncated", res.Observation.Coverage)
+	}
+	recs := sink.Records()
+	if len(recs) != 1 || !recs[0].Truncated || len(recs[0].Body) != 28 {
+		t.Fatalf("expected 1 truncated 28-byte record, got %+v", recs)
+	}
+	persisted, _ := json.Marshal(struct {
+		Nodes    any
+		Evidence any
+	}{Nodes: res.Nodes, Evidence: res.Evidence})
+	if strings.Contains(string(persisted), "CONTENT_SECRET_LINE_") {
+		t.Errorf("content body leaked into nodes or evidence")
+	}
+
+	// Per-surface opt-out must skip file content fetches entirely.
+	fileContentRequests = nil
+	optOutCfg := config.DefaultContent()
+	optOutCfg.Surfaces = map[string]bool{"jupyter": false}
+	colOff, err := jupyter.New(jupyter.Config{
+		Scope:      "test-scope",
+		VantageKey: "vantage-dc01",
+		ScanID:     "scan-d3-002",
+		Now:        testFixedTime,
+		HTTPClient: server.Client(),
+		Content:    optOutCfg,
+	})
+	if err != nil {
+		t.Fatalf("jupyter.New opt-out: %v", err)
+	}
+	if _, err := colOff.Collect(context.Background(), server.URL); err != nil {
+		t.Fatalf("Collect opt-out: %v", err)
+	}
+	if len(fileContentRequests) != 0 {
+		t.Errorf("per-surface opt-out still requested file content: %v", fileContentRequests)
+	}
+}
+
+func TestJupyter_MaxRedirectsBoundary(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api":
+			http.Redirect(w, r, "/hop1", http.StatusFound)
+		case "/hop1":
+			http.Redirect(w, r, "/hop2", http.StatusFound)
+		case "/hop2":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"version":"2.14.0","jupyter_server_version":"2.14.0"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	// MaxRedirects = 1 must allow 1 redirect and reject the 2nd hop (no off-by-one).
+	col, err := jupyter.New(jupyter.Config{
+		Scope:      "test-scope",
+		VantageKey: "vantage-dc01",
+		ScanID:     "scan-redir-bound",
+		Now:        testFixedTime,
+		Bounds:     config.Bounds{MaxRedirects: 1},
+	})
+	if err != nil {
+		t.Fatalf("jupyter.New: %v", err)
+	}
+	res, err := col.Collect(context.Background(), server.URL)
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if res.Observation.Coverage != graph.CoverageFailed {
+		t.Errorf("expected CoverageFailed when 2 hops exceed MaxRedirects=1, got %s", res.Observation.Coverage)
 	}
 }

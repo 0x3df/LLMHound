@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"sort"
 	"strings"
@@ -13,11 +15,13 @@ import (
 
 	"github.com/0x3df/LLMHound/internal/checkpoint"
 	"github.com/0x3df/LLMHound/internal/config"
+	"github.com/0x3df/LLMHound/internal/content"
 	"github.com/0x3df/LLMHound/internal/correlate"
 	"github.com/0x3df/LLMHound/internal/discovery"
 	"github.com/0x3df/LLMHound/internal/emitter"
 	"github.com/0x3df/LLMHound/internal/evidence"
 	"github.com/0x3df/LLMHound/internal/graph"
+	"github.com/0x3df/LLMHound/internal/secrets"
 )
 
 // Config configures the Jupyter collector.
@@ -27,6 +31,9 @@ type Config struct {
 	ScanID           string
 	CollectorVersion string
 	Bounds           config.Bounds
+	Content          config.Content
+	Secrets          config.Secrets
+	ContentSink      content.Sink
 	Insecure         bool
 	UserAgent        string
 	Resolver         *correlate.Resolver // nil attaches nothing: every target falls back
@@ -244,6 +251,54 @@ func (c *Collector) collect(ctx context.Context, rawTarget string, probeFirst bo
 	files = contCheck.files
 	skippedDirs = contCheck.skippedDirs
 
+	// 4. Content Tier: GET /api/contents/<path>?content=1 (default on, bounded)
+	var contentSummary *graph.ContentSummary
+	var contentTruncated bool
+	var contentTruncReason string
+	if !c.cfg.Content.EnabledFor("jupyter") {
+		checks = append(checks, checkExecution{
+			checkID:       CheckIDFileContent,
+			operation:     OpFileContent,
+			outcome:       graph.OutcomeSkipped,
+			reason:        "content collection disabled by policy",
+			operationKind: graph.ResourceReadOperation,
+			details:       map[string]any{"skipped": true, "policy": "content_disabled"},
+		})
+	} else if !anyReachable {
+		checks = append(checks, checkExecution{
+			checkID:       CheckIDFileContent,
+			operation:     OpFileContent,
+			outcome:       graph.OutcomeSkipped,
+			reason:        "prerequisite failed: target unreachable",
+			operationKind: graph.ResourceReadOperation,
+		})
+	} else if contCheck.exec.outcome != graph.OutcomeSuccess {
+		checks = append(checks, checkExecution{
+			checkID:       CheckIDFileContent,
+			operation:     OpFileContent,
+			outcome:       graph.OutcomeSkipped,
+			reason:        "prerequisite failed: workspace contents listing unavailable",
+			operationKind: graph.ResourceReadOperation,
+		})
+	} else if len(files) == 0 {
+		checks = append(checks, checkExecution{
+			checkID:       CheckIDFileContent,
+			operation:     OpFileContent,
+			outcome:       graph.OutcomeSkipped,
+			reason:        "no workspace files available to read",
+			operationKind: graph.ResourceReadOperation,
+		})
+	} else {
+		fcRes, fcErr := c.executeFileContentCheck(ctx, baseURL, srvID, files, obsTime)
+		if fcErr != nil {
+			return checkpoint.Result{}, fcErr
+		}
+		checks = append(checks, fcRes.exec)
+		contentSummary = fcRes.summary
+		contentTruncated = fcRes.truncated
+		contentTruncReason = fcRes.truncateReason
+	}
+
 	// Coverage determination
 	coverage := graph.CoverageComplete
 	coverageReason := ""
@@ -256,6 +311,13 @@ func (c *Collector) collect(ctx context.Context, rawTarget string, probeFirst bo
 	} else if truncatedWorkspace || truncatedSessions {
 		coverage = graph.CoverageTruncated
 		coverageReason = fmt.Sprintf("listing truncated at max_items limit (%d)", maxItems)
+		status = checkpoint.TargetStatusPartial
+	} else if contentTruncated {
+		coverage = graph.CoverageTruncated
+		coverageReason = contentTruncReason
+		if coverageReason == "" {
+			coverageReason = "workspace content reads truncated at configured bounds"
+		}
 		status = checkpoint.TargetStatusPartial
 	} else if len(failedChecks) > 0 {
 		coverage = graph.CoveragePartial
@@ -275,8 +337,10 @@ func (c *Collector) collect(ctx context.Context, rawTarget string, probeFirst bo
 	if !anyReachable {
 		var evRecs []evidence.Record
 		for _, ch := range checks {
+			chkObs := finalObs
+			chkObs.EvidenceID = evidenceID + "-" + ch.checkID
 			rec, err := evidence.NewCheckResultRecord(graph.CheckResult{
-				Observation: finalObs,
+				Observation: chkObs,
 				CheckID:     ch.checkID,
 				Operation:   ch.operation,
 				TargetID:    srvID.ID(),
@@ -349,6 +413,7 @@ func (c *Collector) collect(ctx context.Context, rawTarget string, probeFirst bo
 		Product: "Jupyter Server", Vendor: "Project Jupyter", VantageKey: c.cfg.VantageKey, Access: access,
 		// Kernel execution is the product's purpose; inferred from identity, not run.
 		ExecSurface: []string{graph.ExecCodeKernel}, ExecSurfaceBasis: graph.BasisInferred,
+		Content: contentSummary,
 	}
 	if observedTLS.Observed {
 		facts.TLS = &graph.TLSSummary{
@@ -415,7 +480,9 @@ func (c *Collector) collect(ctx context.Context, rawTarget string, probeFirst bo
 	}
 
 	// Target correlation: Computer or fallback NetworkEndpoint
-	corrObservedAt, fallbackItem, corrRec, err := c.correlateTarget(ep.Host(), srvID, finalObs)
+	corrObs := finalObs
+	corrObs.EvidenceID = evidenceID + "-correlation"
+	corrObservedAt, fallbackItem, corrRec, err := c.correlateTarget(ep.Host(), srvID, finalObs, corrObs)
 	if err != nil {
 		return checkpoint.Result{}, fmt.Errorf("correlate target: %w", err)
 	}
@@ -427,9 +494,11 @@ func (c *Collector) collect(ctx context.Context, rawTarget string, probeFirst bo
 
 	// Add check result evidence records
 	for _, ch := range checks {
+		chkObs := finalObs
+		chkObs.EvidenceID = evidenceID + "-" + ch.checkID
 		if ch.anonymous && ch.outcome == graph.OutcomeSuccess {
 			accessEv := graph.AccessEvidence{
-				Observation:   finalObs,
+				Observation:   chkObs,
 				CheckID:       ch.checkID,
 				Operation:     ch.operation,
 				TargetID:      srvID.ID(),
@@ -445,7 +514,7 @@ func (c *Collector) collect(ctx context.Context, rawTarget string, probeFirst bo
 			evRecords = append(evRecords, rec)
 		} else {
 			chkRes := graph.CheckResult{
-				Observation: finalObs,
+				Observation: chkObs,
 				CheckID:     ch.checkID,
 				Operation:   ch.operation,
 				TargetID:    srvID.ID(),
@@ -462,14 +531,16 @@ func (c *Collector) collect(ctx context.Context, rawTarget string, probeFirst bo
 
 	// Add Fingerprint evidence record if version discovered
 	if verInfo.APIVersion != "" || verInfo.SoftwareVersion != "" {
+		fpObs := finalObs
+		fpObs.EvidenceID = evidenceID + "-fingerprint"
 		fpRec, err := evidence.NewFingerprintRecord(evidence.FingerprintInput{
-			Observation:        finalObs,
+			Observation:        fpObs,
 			TargetID:           srvID.ID(),
 			Product:            "Jupyter Server",
 			Vendor:             "Project Jupyter",
 			APIVersion:         verInfo.APIVersion,
 			SoftwareVersion:    verInfo.SoftwareVersion,
-			SoftwareVersionRaw: verInfo.APIVersion,
+			SoftwareVersionRaw: verInfo.SoftwareVersion,
 			Method:             "api_version",
 			Confidence:         "exact",
 			Details:            verInfo.Details,
@@ -482,8 +553,10 @@ func (c *Collector) collect(ctx context.Context, rawTarget string, probeFirst bo
 
 	// Add TLS evidence record if TLS was observed
 	if observedTLS.Observed {
+		tlsObs := finalObs
+		tlsObs.EvidenceID = evidenceID + "-tls"
 		tlsRec, err := evidence.NewTLSRecord(evidence.TLSRecordInput{
-			Observation:        finalObs,
+			Observation:        tlsObs,
 			TargetID:           srvID.ID(),
 			CertFingerprint:    observedTLS.Fingerprint,
 			Issuer:             observedTLS.Issuer,
@@ -828,7 +901,209 @@ func (c *Collector) executeContentsCheck(ctx context.Context, baseURL, targetID 
 	return res
 }
 
-func (c *Collector) correlateTarget(host string, srvID graph.Identity, obs graph.Observation) (graph.Edge, *emitter.NodeItem, evidence.Record, error) {
+type fileContentCheckResult struct {
+	exec           checkExecution
+	summary        *graph.ContentSummary
+	truncated      bool
+	truncateReason string
+}
+
+func (c *Collector) executeFileContentCheck(ctx context.Context, baseURL string, srvID graph.Identity, files []CollectedFile, obsTime time.Time) (fileContentCheckResult, error) {
+	budget := content.NewBudget(c.cfg.Content, secrets.NewRedactor(c.cfg.Secrets))
+	var itemsRead, skippedBinary, deniedCount int
+	var readErrors []string
+	maxReadAttempts := c.cfg.Bounds.MaxItems
+	if maxReadAttempts <= 0 {
+		maxReadAttempts = 10000
+	}
+	readAttempts := 0
+
+	for _, f := range files {
+		if content.IsBinaryContent(f.Path, "") {
+			skippedBinary++
+			continue
+		}
+		escapedPath, ok := escapeJupyterContentPath(f.Path)
+		if !ok {
+			readErrors = append(readErrors, fmt.Sprintf("%s: invalid workspace path", f.Path))
+			continue
+		}
+		claimed, _ := budget.ClaimResourceItem(f.Path)
+		if !claimed {
+			continue
+		}
+
+		if readAttempts >= maxReadAttempts {
+			budget.MarkTruncated(fmt.Sprintf("workspace content reads reached max_items (%d)", maxReadAttempts))
+			break
+		}
+		readAttempts++
+		reqURL := baseURL + "/api/contents/" + escapedPath + "?content=1"
+		resp, err := c.httpClient.Get(ctx, reqURL)
+		if err != nil {
+			if errors.Is(err, ErrResponseTooLarge) {
+				budget.MarkTruncated(fmt.Sprintf("%s exceeded max_response_bytes", f.Path))
+				readErrors = append(readErrors, fmt.Sprintf("%s: response exceeded max_response_bytes", f.Path))
+			} else {
+				readErrors = append(readErrors, fmt.Sprintf("%s: %s", f.Path, cleanErrorString(err)))
+			}
+			continue
+		}
+		if isLoginPage(resp.StatusCode, resp.Body, resp.RedirectURL) || resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			deniedCount++
+			readErrors = append(readErrors, fmt.Sprintf("%s: HTTP %d", f.Path, resp.StatusCode))
+			continue
+		}
+		if resp.StatusCode != http.StatusOK {
+			readErrors = append(readErrors, fmt.Sprintf("%s: HTTP %d", f.Path, resp.StatusCode))
+			continue
+		}
+
+		var parsed fileContentResponse
+		if err := json.Unmarshal(resp.Body, &parsed); err != nil {
+			readErrors = append(readErrors, fmt.Sprintf("%s: malformed json", f.Path))
+			continue
+		}
+		if parsed.Format == "base64" || content.IsBinaryContent(f.Path, parsed.MIMEType) {
+			skippedBinary++
+			continue
+		}
+		body, ok := decodeJupyterContentBody(parsed)
+		if !ok || body == "" {
+			continue
+		}
+		if content.LooksBinary([]byte(body)) {
+			skippedBinary++
+			continue
+		}
+
+		resID := ""
+		if fileID, idErr := graph.NewResourceIdentity(c.cfg.Scope, graph.WorkspaceFile, srvID, f.Path); idErr == nil {
+			resID = fileID.ID()
+		}
+		kind := content.KindWorkspaceFile
+		if f.Type == "notebook" || parsed.Type == "notebook" || strings.HasSuffix(strings.ToLower(f.Path), ".ipynb") {
+			kind = content.KindNotebook
+		}
+		rec, added, addErr := budget.Add(content.RecordInput{
+			DeploymentScope: c.cfg.Scope,
+			ScanID:          c.cfg.ScanID,
+			VantageKey:      c.cfg.VantageKey,
+			ServiceID:       srvID.ID(),
+			ResourceID:      resID,
+			Surface:         "jupyter",
+			CheckID:         CheckIDFileContent,
+			Source:          baseURL + "/api/contents/" + escapedPath,
+			Kind:            kind,
+			Location:        f.Path,
+			MediaType:       parsed.MIMEType,
+			ObservedAt:      obsTime,
+			Body:            body,
+		})
+		if addErr != nil {
+			return fileContentCheckResult{}, fmt.Errorf("create jupyter content record: %w", addErr)
+		}
+		if added {
+			itemsRead++
+			if c.cfg.ContentSink != nil {
+				if err := c.cfg.ContentSink.Write(rec); err != nil {
+					return fileContentCheckResult{}, fmt.Errorf("write jupyter content record: %w", err)
+				}
+			}
+		}
+	}
+
+	details := map[string]any{
+		"items_read":     itemsRead,
+		"skipped_binary": skippedBinary,
+		"content_bytes":  budget.Bytes(),
+		"truncated":      budget.Truncated(),
+	}
+	if len(readErrors) > 0 {
+		details["errors"] = readErrors
+	}
+	if found := budget.Findings(); len(found) > 0 {
+		details["detected_exposures"] = content.ExposureDetails(found)
+	}
+
+	outcome := graph.OutcomeSuccess
+	reason := fmt.Sprintf("read %d workspace item(s) (%d bytes)", itemsRead, budget.Bytes())
+	if itemsRead == 0 {
+		switch {
+		case deniedCount > 0 && deniedCount == len(readErrors):
+			outcome = graph.OutcomeDenied
+			reason = "authentication required for workspace file contents"
+		case len(readErrors) > 0:
+			outcome = graph.OutcomeFailed
+			reason = strings.Join(readErrors, "; ")
+		case skippedBinary > 0:
+			reason = fmt.Sprintf("skipped %d binary workspace item(s)", skippedBinary)
+		default:
+			reason = "workspace items had no text content"
+		}
+	}
+
+	var summary *graph.ContentSummary
+	if itemsRead > 0 || budget.Truncated() {
+		summary = &graph.ContentSummary{
+			Collected:         true,
+			Bytes:             budget.Bytes(),
+			Truncated:         budget.Truncated(),
+			SecretTypes:       budget.SecretTypes(),
+			SecretConfirmedAt: obsTime,
+		}
+	}
+
+	return fileContentCheckResult{
+		exec: checkExecution{
+			checkID:       CheckIDFileContent,
+			operation:     OpFileContent,
+			outcome:       outcome,
+			reason:        reason,
+			anonymous:     outcome == graph.OutcomeSuccess && itemsRead > 0,
+			operationKind: graph.ResourceReadOperation,
+			details:       details,
+		},
+		summary:        summary,
+		truncated:      budget.Truncated(),
+		truncateReason: strings.Join(budget.Reasons(), "; "),
+	}, nil
+}
+
+func escapeJupyterContentPath(p string) (string, bool) {
+	if p == "" || strings.HasPrefix(p, "/") || strings.ContainsFunc(p, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
+		return "", false
+	}
+	segs := strings.Split(p, "/")
+	escaped := make([]string, 0, len(segs))
+	for _, s := range segs {
+		if s == "" || s == "." || s == ".." {
+			return "", false
+		}
+		escaped = append(escaped, url.PathEscape(s))
+	}
+	return strings.Join(escaped, "/"), true
+}
+
+func decodeJupyterContentBody(resp fileContentResponse) (string, bool) {
+	raw := strings.TrimSpace(string(resp.Content))
+	if raw == "" || raw == "null" {
+		return "", false
+	}
+	if strings.HasPrefix(raw, `"`) {
+		var s string
+		if err := json.Unmarshal([]byte(raw), &s); err == nil {
+			return s, true
+		}
+		return "", false
+	}
+	if !json.Valid([]byte(raw)) {
+		return "", false
+	}
+	return raw, true
+}
+
+func (c *Collector) correlateTarget(host string, srvID graph.Identity, obs, corrObs graph.Observation) (graph.Edge, *emitter.NodeItem, evidence.Record, error) {
 	corrRes, err := c.cfg.Resolver.Resolve(c.cfg.Scope, host)
 	if err != nil {
 		return graph.Edge{}, nil, evidence.Record{}, err
@@ -837,7 +1112,7 @@ func (c *Collector) correlateTarget(host string, srvID graph.Identity, obs graph
 	if err != nil {
 		return graph.Edge{}, nil, evidence.Record{}, err
 	}
-	corrRec, err := evidence.NewCorrelationRecord(corrRes.Evidence(), obs)
+	corrRec, err := evidence.NewCorrelationRecord(corrRes.Evidence(), corrObs)
 	if err != nil {
 		return graph.Edge{}, nil, evidence.Record{}, err
 	}
@@ -863,8 +1138,9 @@ func (c *Collector) correlateTarget(host string, srvID graph.Identity, obs graph
 func normalizeTargetURL(raw string) (string, error) {
 	raw = strings.TrimSpace(raw)
 	if !strings.Contains(raw, "://") {
-		// If no scheme, check if host has port
-		if strings.Contains(raw, ":") {
+		if ip, err := netip.ParseAddr(raw); err == nil {
+			raw = "http://" + net.JoinHostPort(ip.String(), "8888")
+		} else if _, _, err := net.SplitHostPort(raw); err == nil {
 			raw = "http://" + raw
 		} else {
 			raw = "http://" + raw + ":8888"
@@ -875,11 +1151,11 @@ func normalizeTargetURL(raw string) (string, error) {
 		return "", err
 	}
 	if u.Port() == "" {
+		port := "8888"
 		if u.Scheme == "https" {
-			u.Host = u.Host + ":443"
-		} else {
-			u.Host = u.Host + ":8888"
+			port = "443"
 		}
+		u.Host = net.JoinHostPort(u.Hostname(), port)
 	}
 	return u.String(), nil
 }

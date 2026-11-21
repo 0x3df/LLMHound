@@ -1,12 +1,15 @@
 # LLMHound graph model
 
-> **Status: implemented core, specified extensions.** Companion to the
+> **Status: implemented core + D3 content tier + D4 secret detection, specified
+> remaining extensions.** Companion to the
 > [design](01-design.md). The graph, identity, mapping-file attachment, flat
-> access properties, emitter, and the Jupyter, MCP, and Ollama collectors are
-> implemented and tested. The content tier, secret detection, the full property
-> contract, path-qualification rules, and the two-step upload are specified here
-> but not built; the [Implementation status](#implementation-status) table lists
-> exactly which. CE behavior is recorded in
+> access properties, shared property contract, default-on bounded content tier
+> (`internal/content`), high-precision secret detection (`internal/secrets`),
+> emitter, shipped saved queries, and the Jupyter, MCP, and
+> Ollama collectors are implemented and tested. Remaining metadata properties,
+> path-qualification rules, and two-step upload are
+> specified here but not built; the [Implementation status](#implementation-status)
+> table lists exactly which. CE behavior is recorded in
 > [05-ce-compatibility.md](05-ce-compatibility.md).
 
 This is the **canonical home** for node/edge kinds, identity, attachment to
@@ -251,7 +254,7 @@ work named in the [roadmap](06-roadmap.md):
 | Execution surface *(built)* | `exec_surface` (sorted array: `code_kernel`, `terminal`, `job_submit`, `code_eval`, `workflow_exec`, `tool_invocation`, `model_mutation`; only positively identified surfaces are listed, never `unknown`), `exec_surface_basis` (`observed`/`declared`/`inferred`). Emitted today: Jupyter `code_kernel` and Ollama `model_mutation` (both `inferred` from product identity, nothing executed), MCP `tool_invocation` (`declared`, when the server advertises a tools capability). It says a surface exists, not that anything was run |
 | Dependencies | `backend_refs` (sanitized array), `store_refs` (sanitized array), `backend_refs_basis` |
 | Inventory | `model_count`, `tool_count`, `resource_count`, `collection_count` (as applicable) |
-| Content | `system_prompt_present`, `config_collected`, `content_bytes`, `content_truncated`, `has_exposed_secret` (`true` or unset), `secret_last_confirmed`, `secret_types` (array); bodies and secret values never appear in the graph, see [Content and secrets](#content-and-secrets) |
+| Content *(built)* | `system_prompt_present`, `config_collected`, `content_bytes`, `content_truncated`, `has_exposed_secret` (`true` or unset), `secret_last_confirmed`, `secret_types` (sorted array of detector names); bodies and secret values never appear in the graph, see [Content and secrets](#content-and-secrets) |
 | TLS *(built)* | `tls_verification` (`ok`/`failed`/`insecure_override`/`n_a`; `n_a` for plain `http`, absent when no handshake was observed), `tls_failure_reason` (bounded; kept under `insecure_override` when the certificate would not have verified), `tls_leaf_sha256` (lower-case hex), `tls_issuer`, `tls_not_after`, `tls_negotiated_version` |
 | Provenance | `vantage_key`, `scan_id`, `coverage`, `observed_at` *(built)*; specified, not built: `schema_version`, `first_observed`, `coverage_reason`, `mapping_source` |
 
@@ -417,19 +420,20 @@ backlog, in the order the [roadmap](06-roadmap.md) schedules it.
 |---|---|
 | Scoped identity, canonical endpoints, kind mapping (`LLMHound_<Kind>`), all-non-traversable edges | `internal/graph` |
 | Mapping-file attachment to an existing native node of any kind; `NetworkEndpoint` fallback; nil resolver is an empty mapping | `internal/correlate` |
-| Shared service property contract (`graph.ServiceFacts`: endpoint, access, execution surface, TLS) | `internal/graph/serviceprops.go`, all three collectors |
+| Shared service property contract (`graph.ServiceFacts`: endpoint, access, execution surface, content summary, TLS) | `internal/graph/serviceprops.go`, all three collectors |
 | Anonymous access as flat properties (`auth_observed`, `anon_operations`, `vantage_key`) derived from operation evidence | `internal/graph/access.go`, collectors |
+| Default-on, bounded content tier (`content.*` config, binary exclusion, 0600 `.content.jsonl` isolation) across Ollama, Jupyter, and MCP | `internal/content`, `internal/config`, collectors, `internal/scanner` |
+| High-precision secret detection over content bodies (`private_key` parse-verified PEM, `github_token` CRC32-verified, `aws_access_key` id+secret pair), `[secret:<type>]` redaction, `detected_exposures` sidecar details | `internal/secrets`, `internal/content`, collectors, `internal/scanner` |
 | Base payload (`source_kind`) and sourceless linking payload; evidence sidecar | `internal/emitter`, `internal/evidence` |
 | Checkpoint journal and deterministic replay | `internal/checkpoint` |
 | Jupyter, MCP, and Ollama collectors; discovery; `plan` and `scan` | `internal/collectors`, `internal/discovery`, `internal/scanner` |
+| Shipped BloodHound CE saved queries (`P1`, `P2`, `P4`, `P6`) and generator | `internal/savedsearch`, `extension/saved_searches/`, `tools/gensearches` |
 
 **Specified, not yet built**
 
 | Area | Specified behavior |
 |---|---|
-| Content tier | Default-on, bounded reads of prompts, config, file and flow bodies into a restricted `.content.jsonl`; replaces today's `opt_ins` gate |
-| Secret detection | High-precision detectors and `has_exposed_secret` / `secret_types` / `secret_last_confirmed` |
-| Remaining property contract | The rows of the [property contract](#property-contract) not marked *(built)*: dependencies, inventory counts, content flags, `auth_advertised` evidence, version provenance labels |
+| Remaining property contract | The rows of the [property contract](#property-contract) not marked *(built)*: dependencies, inventory counts, `auth_advertised` evidence, version provenance labels |
 | Path qualification | Rule-gated, opt-in `CanExecuteOn` edges (M2d); `EdgeKind.IsTraversable()` is always false today |
 | Upload | Two-step upload with an existence pre-flight (M3); `upload` is a not-implemented stub, though the emitter already splits base and linking payloads |
 | Mapping provenance | `mapping_source` on attachment edges |

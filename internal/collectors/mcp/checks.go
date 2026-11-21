@@ -18,12 +18,14 @@ const (
 	CheckIDInitialize    = "mcp_initialize"
 	CheckIDToolsList     = "mcp_tools_list"
 	CheckIDResourcesList = "mcp_resources_list"
+	CheckIDResourcesRead = "mcp_resources_read"
 	CheckIDPromptsList   = "mcp_prompts_list"
 	CheckIDRFC9728       = "mcp_rfc9728_metadata"
 
 	OpInitialize    = "initialize"
 	OpToolsList     = "tools/list"
 	OpResourcesList = "resources/list"
+	OpResourcesRead = "resources/read"
 	OpPromptsList   = "prompts/list"
 	OpRFC9728       = "rfc9728_protected_resource"
 )
@@ -96,8 +98,8 @@ func executeToolsList(ctx context.Context, session *mcpsdk.ClientSession, maxPag
 	})
 }
 
-func executeResourcesList(ctx context.Context, session *mcpsdk.ClientSession, maxPages, maxItems int, timeout time.Duration) ([]*mcpsdk.Resource, []*mcpsdk.ResourceTemplate, bool, string, error) {
-	resources, truncated, reason, err := paginate(maxPages, maxItems, "resources", func(cursor string) ([]*mcpsdk.Resource, string, error) {
+func executeResourcesList(ctx context.Context, session *mcpsdk.ClientSession, maxPages, maxItems int, timeout time.Duration) ([]*mcpsdk.Resource, []*mcpsdk.ResourceTemplate, bool, string, error, error) {
+	resources, truncated, reason, resourceErr := paginate(maxPages, maxItems, "resources", func(cursor string) ([]*mcpsdk.Resource, string, error) {
 		callCtx, cancel := callTimeout(ctx, timeout)
 		defer cancel()
 		res, err := session.ListResources(callCtx, &mcpsdk.ListResourcesParams{Cursor: cursor})
@@ -106,11 +108,11 @@ func executeResourcesList(ctx context.Context, session *mcpsdk.ClientSession, ma
 		}
 		return res.Resources, res.NextCursor, nil
 	})
-	if err != nil {
-		return resources, nil, truncated, reason, err
+	if resourceErr != nil {
+		return resources, nil, truncated, reason, resourceErr, nil
 	}
 
-	templates, tmplTruncated, tmplReason, err := paginate(maxPages, maxItems, "resource templates", func(cursor string) ([]*mcpsdk.ResourceTemplate, string, error) {
+	templates, tmplTruncated, tmplReason, templateErr := paginate(maxPages, maxItems, "resource templates", func(cursor string) ([]*mcpsdk.ResourceTemplate, string, error) {
 		callCtx, cancel := callTimeout(ctx, timeout)
 		defer cancel()
 		res, err := session.ListResourceTemplates(callCtx, &mcpsdk.ListResourceTemplatesParams{Cursor: cursor})
@@ -119,11 +121,6 @@ func executeResourcesList(ctx context.Context, session *mcpsdk.ClientSession, ma
 		}
 		return res.ResourceTemplates, res.NextCursor, nil
 	})
-	if err != nil {
-		if outcome, _ := classifyRPCError(err, OpResourcesList); outcome != graph.OutcomeUnsupported {
-			return resources, templates, truncated, reason, fmt.Errorf("resources/templates/list: %w", err)
-		}
-	}
 	if tmplTruncated {
 		truncated = true
 		if reason != "" {
@@ -131,7 +128,7 @@ func executeResourcesList(ctx context.Context, session *mcpsdk.ClientSession, ma
 		}
 		reason += tmplReason
 	}
-	return resources, templates, truncated, reason, nil
+	return resources, templates, truncated, reason, nil, templateErr
 }
 
 func executePromptsList(ctx context.Context, session *mcpsdk.ClientSession, maxPages, maxItems int, timeout time.Duration) ([]*mcpsdk.Prompt, bool, string, error) {

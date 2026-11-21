@@ -169,7 +169,7 @@ func tlsVersionString(v uint16) string {
 
 func makeCheckRedirect(maxRedirects int) func(req *http.Request, via []*http.Request) error {
 	return func(req *http.Request, via []*http.Request) error {
-		if len(via) >= maxRedirects {
+		if len(via) > maxRedirects {
 			return http.ErrUseLastResponse
 		}
 		if len(via) > 0 && req.URL.Host != via[0].URL.Host {

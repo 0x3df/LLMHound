@@ -53,9 +53,21 @@ func TestQueriesUseEmittedKindsAndTypedPaths(t *testing.T) {
 }
 
 func TestParsePathKindsRejectsInjection(t *testing.T) {
-	for _, in := range []string{"A|B", "MemberOf]->()", "LLMHound_ObservedAt", ""} {
+	for _, in := range []string{"A|B", "MemberOf]->()", "123BadKind", "_LeadingUnderscore", "MemberOf\nMemberOf", "LLMHound_ObservedAt", ""} {
 		if _, err := ParsePathKinds(in); err == nil {
 			t.Errorf("%q should be rejected", in)
 		}
 	}
+}
+
+func TestP4ExcludesNetworkEndpoint(t *testing.T) {
+	for _, q := range Generate([]string{"MemberOf"}) {
+		if strings.HasPrefix(q.Name, "LLMHound P4:") {
+			if !strings.Contains(q.Query, "NOT h:LLMHound_NetworkEndpoint") {
+				t.Errorf("P4 must exclude NetworkEndpoint nodes: %s", q.Query)
+			}
+			return
+		}
+	}
+	t.Fatal("P4 query missing")
 }

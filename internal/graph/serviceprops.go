@@ -3,6 +3,8 @@ package graph
 import (
 	"sort"
 	"strings"
+	"time"
+	"unicode/utf8"
 )
 
 // Basis labels how a property value was established. Every classification
@@ -41,6 +43,23 @@ type TLSSummary struct {
 	InsecureSet bool
 }
 
+// ContentSummary summarizes default-on content-tier collection for one
+// service. Bodies themselves never enter graph properties; they stay in the
+// restricted .content.jsonl file.
+type ContentSummary struct {
+	Collected           bool
+	Bytes               int64
+	Truncated           bool
+	SystemPromptPresent *bool
+	ConfigCollected     *bool
+
+	// SecretTypes lists detector types that matched in collected content.
+	// Empty means "no high-precision match", never "clean".
+	SecretTypes []string
+	// SecretConfirmedAt is the scan observation time of the detection.
+	SecretConfirmedAt time.Time
+}
+
 // ServiceFacts is the shared input for the flat service property contract
 // (docs/02-graph-model.md#property-contract). Collectors fill what they have
 // evidence for; every unset field is omitted, never defaulted, so that unknown
@@ -65,6 +84,9 @@ type ServiceFacts struct {
 
 	// TLS is nil when no TLS observation exists.
 	TLS *TLSSummary
+
+	// Content is nil when content-tier reads were disabled or did not run.
+	Content *ContentSummary
 }
 
 // Properties returns the flat, CE-compatible service properties. Collectors
@@ -107,6 +129,21 @@ func (f ServiceFacts) Properties() map[string]any {
 		p["exec_surface"] = surfaces
 		p["exec_surface_basis"] = f.ExecSurfaceBasis
 	}
+	if f.Content != nil && f.Content.Collected {
+		p["content_bytes"] = f.Content.Bytes
+		p["content_truncated"] = f.Content.Truncated
+		if f.Content.SystemPromptPresent != nil {
+			p["system_prompt_present"] = *f.Content.SystemPromptPresent
+		}
+		if f.Content.ConfigCollected != nil {
+			p["config_collected"] = *f.Content.ConfigCollected
+		}
+		if types := uniqueSorted(f.Content.SecretTypes); len(types) > 0 && !f.Content.SecretConfirmedAt.IsZero() {
+			p["has_exposed_secret"] = true
+			p["secret_types"] = types
+			p["secret_last_confirmed"] = f.Content.SecretConfirmedAt.UTC().Format(time.RFC3339)
+		}
+	}
 	for k, v := range f.tlsProperties() {
 		p[k] = v
 	}
@@ -124,16 +161,17 @@ func (f ServiceFacts) tlsProperties() map[string]any {
 		return p
 	}
 	switch {
-	case t.InsecureSet || t.Result == "unverified_override":
+	case t.InsecureSet || t.Result == "unverified_override" || t.Result == "insecure_override":
 		// Verification was bypassed by the operator. A recorded failure reason
-		// keeps the fact that the certificate would not have verified.
+		// keeps the fact that the certificate would not have verified; a clean
+		// verification reason is not copied as a failure.
 		p["tls_verification"] = "insecure_override"
-		if t.Result == "failed" {
+		if t.Result == "failed" || t.Result == "unverified_override" {
 			if r := boundReason(t.Reason); r != "" {
 				p["tls_failure_reason"] = r
 			}
 		}
-	case t.Result == "verified":
+	case t.Result == "verified" || t.Result == "success":
 		p["tls_verification"] = "ok"
 	case t.Result == "failed":
 		p["tls_verification"] = "failed"
@@ -174,7 +212,7 @@ func uniqueSorted(in []string) []string {
 }
 
 // boundReason trims free text that originates in a certificate or TLS error
-// (untrusted) and strips control characters.
+// (untrusted) and strips control characters without splitting UTF-8 runes.
 func boundReason(s string) string {
 	s = strings.Map(func(r rune) rune {
 		if r < 0x20 || r == 0x7f {
@@ -183,7 +221,11 @@ func boundReason(s string) string {
 		return r
 	}, s)
 	if len(s) > maxReasonLen {
-		s = s[:maxReasonLen]
+		cut := maxReasonLen
+		for cut > 0 && !utf8.RuneStart(s[cut]) {
+			cut--
+		}
+		s = s[:cut]
 	}
 	return strings.TrimSpace(s)
 }

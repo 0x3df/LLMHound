@@ -1,5 +1,7 @@
 package jupyter
 
+import "encoding/json"
+
 // apiVersionResponse parses the response from GET /api.
 type apiVersionResponse struct {
 	Version              string `json:"version"`
@@ -98,11 +100,22 @@ type TLSInfo struct {
 
 // CheckIDs defines stable identifiers for Jupyter collector allowlisted checks.
 const (
-	CheckIDVersion  = "jupyter_version"
-	CheckIDSessions = "jupyter_sessions"
-	CheckIDContents = "jupyter_contents"
+	CheckIDVersion     = "jupyter_version"
+	CheckIDSessions    = "jupyter_sessions"
+	CheckIDContents    = "jupyter_contents"
+	CheckIDFileContent = "jupyter_file_content"
 
-	OpVersion  = "jupyter_api_version"
-	OpSessions = "jupyter_sessions"
-	OpContents = "jupyter_contents_list"
+	OpVersion     = "jupyter_api_version"
+	OpSessions    = "jupyter_sessions"
+	OpContents    = "jupyter_contents_list"
+	OpFileContent = "jupyter_contents_read"
 )
+
+type fileContentResponse struct {
+	Name     string          `json:"name"`
+	Path     string          `json:"path"`
+	Type     string          `json:"type"`
+	Format   string          `json:"format"`
+	MIMEType string          `json:"mimetype,omitempty"`
+	Content  json.RawMessage `json:"content,omitempty"`
+}

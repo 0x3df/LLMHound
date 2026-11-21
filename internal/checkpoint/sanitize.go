@@ -4,9 +4,12 @@ import (
 	"encoding/json"
 	"net/url"
 	"regexp"
+	"sort"
 	"strings"
+	"time"
 	"unicode/utf8"
 
+	"github.com/0x3df/LLMHound/internal/config"
 	"github.com/0x3df/LLMHound/internal/evidence"
 )
 
@@ -29,6 +32,12 @@ var sensitiveKeyFragments = []string{
 	"credential",
 	"private_key",
 	"client_secret",
+}
+
+var classificationKeys = map[string]bool{
+	"has_exposed_secret":    true,
+	"secret_types":          true,
+	"secret_last_confirmed": true,
 }
 
 // isSensitiveKey checks if a property or detail key is sensitive and must be redacted.
@@ -113,6 +122,12 @@ func SanitizeMap(m map[string]any, maxStringLen int) map[string]any {
 	}
 	out := make(map[string]any, len(m))
 	for k, v := range m {
+		if classificationKeys[k] {
+			if safe, ok := sanitizeClassificationValue(k, v); ok {
+				out[k] = safe
+			}
+			continue
+		}
 		if isSensitiveKey(k) {
 			out[k] = RedactedPlaceholder
 			continue
@@ -120,6 +135,67 @@ func SanitizeMap(m map[string]any, maxStringLen int) map[string]any {
 		out[k] = sanitizeValue(v, maxStringLen)
 	}
 	return out
+}
+
+// sanitizeClassificationValue accepts only the canonical value shape of a
+// graph-model classification property. Invalid values are omitted so arbitrary
+// collector detail text cannot cross the sensitive-key sanitizer by using a
+// reserved property name.
+func sanitizeClassificationValue(key string, value any) (any, bool) {
+	switch key {
+	case "has_exposed_secret":
+		v, ok := value.(bool)
+		return true, ok && v
+	case "secret_types":
+		var raw []string
+		switch values := value.(type) {
+		case []string:
+			raw = values
+		case []any:
+			raw = make([]string, 0, len(values))
+			for _, value := range values {
+				s, ok := value.(string)
+				if !ok {
+					return nil, false
+				}
+				raw = append(raw, s)
+			}
+		default:
+			return nil, false
+		}
+		if len(raw) == 0 {
+			return nil, false
+		}
+		seen := make(map[string]bool, len(raw))
+		out := make([]string, 0, len(raw))
+		for _, typ := range raw {
+			if !config.IsKnownSecretDetector(typ) {
+				return nil, false
+			}
+			if !seen[typ] {
+				seen[typ] = true
+				out = append(out, typ)
+			}
+		}
+		sort.Strings(out)
+		return out, true
+	case "secret_last_confirmed":
+		s, ok := value.(string)
+		if !ok {
+			return nil, false
+		}
+		t, err := time.Parse(time.RFC3339, s)
+		if err != nil {
+			return nil, false
+		}
+		_, offset := t.Zone()
+		if offset != 0 {
+			return nil, false
+		}
+		return t.UTC().Format(time.RFC3339), true
+	default:
+		return nil, false
+	}
 }
 
 func sanitizeValue(v any, maxStringLen int) any {

@@ -12,9 +12,11 @@ tests. Library-only collector tests do **not** prove CLI integration.
 | Data-driven discovery fingerprints (Jupyter / MCP / Ollama) | `internal/discovery` |
 | Checkpoint journal writers + deterministic replay | `internal/checkpoint` |
 | Offline `llmhound plan` (targets × allowlisted checks) | `cmd/llmhound`, `internal/scanner` |
-| `llmhound scan` orchestration → journal → OpenGraph + evidence | `cmd/llmhound`, `internal/scanner` |
-| Jupyter / MCP / Ollama collectors (anonymous, read-only defaults) | `internal/collectors/{jupyter,mcp,ollama}` |
+| `llmhound scan` orchestration → journal → OpenGraph + evidence + content | `cmd/llmhound`, `internal/scanner` |
+| Bounded D3 content tier + `0600` `.content.jsonl` isolation | `internal/content`, collectors |
+| Jupyter / MCP / Ollama collectors (anonymous, read-only, bounded D3) | `internal/collectors/{jupyter,mcp,ollama}` |
 | Mapping-file attachment to an existing native node (any kind) + source_kind-free linking payload | `internal/correlate`, `internal/emitter`, scanner tests |
+| Shipped BloodHound CE saved queries (`P1`, `P2`, `P4`, `P6`) and generator | `internal/savedsearch`, `extension/saved_searches/`, `tools/gensearches` |
 
 ## Driven live (product CLI + loopback fixtures)
 
@@ -26,9 +28,10 @@ Exercised by `cmd/llmhound` tests (`TestScanCLIEndToEndLoopbackFixtures`,
 - Mixed Jupyter + MCP + Ollama on loopback with `--discovery-file` port remap
 - Emitted base payload `source_kind: LLMHound`, expected node/edge kinds
 - Evidence sidecar check / fingerprint / correlation record types
+- Restricted `.content.jsonl` (mode `0600`) across Ollama, Jupyter, and MCP with zero body leakage into base payload or evidence sidecar
 - Checkpoint journal file written beside payload artifacts
 - Offline `plan` prints surfaces/checks and creates no artifacts / no DNS / no connections
-- Denied Ollama (HTTP 401) path via CLI discovery remap (honest auth-boundary coverage detailed in scanner package tests)
+- Denied Ollama (HTTP 401) path via CLI discovery remap (emits denied evidence sidecar and fails closed)
 - `upload` remains an honest not-implemented stub
 
 ## Unit / package coverage only (not CLI-live in this note)
@@ -37,8 +40,8 @@ Exercised by `cmd/llmhound` tests (`TestScanCLIEndToEndLoopbackFixtures`,
   (`internal/collectors/*` tests)
 - Journal concurrency, sanitize, resume-semantics helpers (`internal/checkpoint`)
 - Fingerprint matcher edge cases (`internal/discovery`)
-- Mapping-file Computer correlation + linking payload without `source_kind`
-  (`TestScanner_ComputerCorrelationAndLinkingPayload` — library scan path, not
+- Mapping-file native-node correlation + linking payload without `source_kind`
+  (`TestScanner_MappedTargetAttachesToNativeNodeViaLinkingPayload` — library scan path, not
   `cmd/llmhound execute`)
 - Unreachable-port failed coverage and denied `partial` coverage reasons
   (`TestScanner_MixedTargetsAndHonestCoverage`)

@@ -10,8 +10,15 @@ transports. Package: `internal/collectors/mcp`. Contract: the MCP row of the
   `Transport: streamable | sse`; an endpoint ending in `/sse` is tried as SSE first). stdio
   servers are out of scope.
 - **Anonymous only:** no credentials are sent. The protocol session is initialized, then only
-  list operations are issued. No tool is called, no prompt is rendered, and **no resource
-  content is read**; resource listing is inventory, not permission to read.
+  metadata list operations and (when enabled by `content.*`) bounded text resource reads are
+  issued. No tool is ever called and no prompt is rendered.
+- **Default-on bounded content tier (`mcp_resources_read`):** when `content.enabled` and
+  `content.surfaces.mcp` allow (default `true`), non-binary listed resources are read via
+  `resources/read` within `content.*` byte/item limits into `<prefix>.content.jsonl` (mode
+  `0600`). Binary MIME types/extensions and binary/null-byte payloads are skipped, bodies never
+  enter graph nodes or `.evidence.jsonl`, and `MCPServer` carries only `content_bytes` and
+  `content_truncated`. `mcp_resources_read` is omitted from `anon_operations`. Disable with
+  `--content=false` or `--content-disable=mcp`.
 - **On HTTP 401:** the collector records the denial and, where available, fetches the anonymous
   RFC 9728 protected-resource metadata (`/.well-known/oauth-protected-resource`) to record the
   advertised authorization server(s). Those URLs are recorded, never followed. On 403 the
@@ -29,6 +36,7 @@ transports. Package: `internal/collectors/mcp`. Contract: the MCP row of the
 | `mcp_tools_list` | `tools/list` | `success`, `skipped` (capability not advertised), `unsupported` (-32601), `denied`, `failed` |
 | `mcp_resources_list` | `resources/list` (+ templates) | same as above |
 | `mcp_prompts_list` | `prompts/list` | same as above |
+| `mcp_resources_read` | `resources/read` | `success`, `skipped` (disabled by `content.*` policy, no text resources, or all binary), `denied`, `failed` |
 | `mcp_rfc9728_metadata` | `rfc9728_protected_resource` | `success`, `failed`, `skipped` |
 
 ## Graph output
@@ -49,6 +57,6 @@ transports. Package: `internal/collectors/mcp`. Contract: the MCP row of the
 
 ## Not yet implemented
 
-`capability_hint` on tools and content-tier reads of resource
-bodies are specified in the [graph model](../02-graph-model.md#property-contract) and scheduled
-in the [roadmap](../06-roadmap.md) (D1, D3).
+`capability_hint` on tools is specified in the
+[graph model](../02-graph-model.md#property-contract) and scheduled as a remaining
+property-contract item in the [roadmap](../06-roadmap.md).

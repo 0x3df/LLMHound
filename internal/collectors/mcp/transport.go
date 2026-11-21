@@ -119,6 +119,7 @@ func (t *trackingTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	}
 
 	if t.userAgent != "" && req.Header.Get("User-Agent") == "" {
+		req = req.Clone(req.Context())
 		req.Header.Set("User-Agent", t.userAgent)
 	}
 
@@ -213,19 +214,23 @@ func buildHTTPClient(maxRedirects int, tracker *trackingTransport) *http.Client 
 	}
 
 	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		statusCode := 0
+		if req.Response != nil {
+			statusCode = req.Response.StatusCode
+		}
 		if len(via) > maxRedirects {
-			tracker.RecordRedirect(via[len(via)-1].URL.String(), req.URL.String(), req.Response.StatusCode, false, "max redirects exceeded")
+			tracker.RecordRedirect(via[len(via)-1].URL.String(), req.URL.String(), statusCode, false, "max redirects exceeded")
 			return fmt.Errorf("stopped after %d redirects", maxRedirects)
 		}
 
 		// Recheck destination host: cross-host redirects outside target scope are prohibited
 		origHost := via[0].URL.Host
 		if req.URL.Host != origHost {
-			tracker.RecordRedirect(via[len(via)-1].URL.String(), req.URL.String(), req.Response.StatusCode, false, "cross-host redirect not authorized")
+			tracker.RecordRedirect(via[len(via)-1].URL.String(), req.URL.String(), statusCode, false, "cross-host redirect not authorized")
 			return http.ErrUseLastResponse
 		}
 
-		tracker.RecordRedirect(via[len(via)-1].URL.String(), req.URL.String(), req.Response.StatusCode, true, "authorized redirect")
+		tracker.RecordRedirect(via[len(via)-1].URL.String(), req.URL.String(), statusCode, true, "authorized redirect")
 		return nil
 	}
 
@@ -273,10 +278,21 @@ func extractTLSObservation(state *tls.ConnectionState, tlsErr error, insecure bo
 		}
 
 		if insecure {
-			obs.VerificationResult = "failed"
-			obs.VerificationReason = "TLS verification bypassed by operator policy"
+			obs.VerificationResult = "unverified_override"
+			if len(state.PeerCertificates) > 0 {
+				opts := x509.VerifyOptions{
+					DNSName:       state.ServerName,
+					Intermediates: x509.NewCertPool(),
+				}
+				for _, cert := range state.PeerCertificates[1:] {
+					opts.Intermediates.AddCert(cert)
+				}
+				if _, err := state.PeerCertificates[0].Verify(opts); err != nil {
+					obs.VerificationReason = err.Error()
+				}
+			}
 		} else {
-			obs.VerificationResult = "success"
+			obs.VerificationResult = "verified"
 		}
 
 		if len(state.PeerCertificates) > 0 {

@@ -3,9 +3,13 @@ package scanner
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -15,6 +19,7 @@ import (
 	collectormcp "github.com/0x3df/LLMHound/internal/collectors/mcp"
 	"github.com/0x3df/LLMHound/internal/collectors/ollama"
 	"github.com/0x3df/LLMHound/internal/config"
+	"github.com/0x3df/LLMHound/internal/content"
 	"github.com/0x3df/LLMHound/internal/correlate"
 	"github.com/0x3df/LLMHound/internal/discovery"
 	"github.com/0x3df/LLMHound/internal/emitter"
@@ -51,6 +56,7 @@ type ScanResult struct {
 	Prefix       string
 	OutputDir    string
 	JournalPath  string
+	ContentPath  string
 	Artifacts    emitter.ScanArtifacts
 	TargetsCount int
 	State        *checkpoint.State
@@ -141,8 +147,6 @@ func (s *Scanner) Plan(targets []string) []TargetPlan {
 func (s *Scanner) planSurfaces(_ string) []SurfacePlan {
 	var surfacePlans []SurfacePlan
 
-	hasOptIn := s.cfg.OptIns.Prompts || s.cfg.OptIns.ConfigurationContent || s.cfg.OptIns.ResourceContent
-
 	for _, def := range s.definitions {
 		sp := SurfacePlan{
 			Surface: def.Surface,
@@ -151,6 +155,18 @@ func (s *Scanner) planSurfaces(_ string) []SurfacePlan {
 
 		switch def.Surface {
 		case discovery.SurfaceJupyter:
+			contentActive := s.cfg.Content.EnabledFor("jupyter")
+			fileContentCheck := PlannedCheck{
+				CheckID:   jupyter.CheckIDFileContent,
+				Operation: jupyter.OpFileContent,
+				Method:    http.MethodGet,
+				Endpoint:  "/api/contents/<path>?content=1",
+				Purpose:   "Read bounded text/notebook bodies into restricted .content.jsonl",
+				Active:    contentActive,
+			}
+			if !contentActive {
+				fileContentCheck.SkipReason = "policy: content collection disabled"
+			}
 			sp.Checks = []PlannedCheck{
 				{
 					CheckID:   jupyter.CheckIDVersion,
@@ -176,9 +192,22 @@ func (s *Scanner) planSurfaces(_ string) []SurfacePlan {
 					Purpose:   "Enumerate top-level workspace notebook and file metadata without bodies",
 					Active:    true,
 				},
+				fileContentCheck,
 			}
 
 		case discovery.SurfaceMCP:
+			contentActive := s.cfg.Content.EnabledFor("mcp")
+			resReadCheck := PlannedCheck{
+				CheckID:   collectormcp.CheckIDResourcesRead,
+				Operation: collectormcp.OpResourcesRead,
+				Method:    http.MethodPost,
+				Endpoint:  "/mcp",
+				Purpose:   "Read bounded text resource bodies into restricted .content.jsonl",
+				Active:    contentActive,
+			}
+			if !contentActive {
+				resReadCheck.SkipReason = "policy: content collection disabled"
+			}
 			sp.Checks = []PlannedCheck{
 				{
 					CheckID:   collectormcp.CheckIDInitialize,
@@ -204,6 +233,7 @@ func (s *Scanner) planSurfaces(_ string) []SurfacePlan {
 					Purpose:   "Enumerate resource descriptors and URI templates without content",
 					Active:    true,
 				},
+				resReadCheck,
 				{
 					CheckID:   collectormcp.CheckIDPromptsList,
 					Operation: collectormcp.OpPromptsList,
@@ -223,16 +253,17 @@ func (s *Scanner) planSurfaces(_ string) []SurfacePlan {
 			}
 
 		case discovery.SurfaceOllama:
+			contentActive := s.cfg.Content.EnabledFor("ollama")
 			showCheck := PlannedCheck{
 				CheckID:   ollama.CheckShow,
 				Operation: "ollama_show",
 				Method:    http.MethodPost,
 				Endpoint:  "/api/show",
-				Purpose:   "Retrieve redacted model provenance (parent_model, license, family)",
-				Active:    hasOptIn,
+				Purpose:   "Retrieve redacted model provenance and bounded prompts/modelfiles into .content.jsonl",
+				Active:    contentActive,
 			}
-			if !hasOptIn {
-				showCheck.SkipReason = "policy: sensitive modelfile/prompt read requires explicit opt-in"
+			if !contentActive {
+				showCheck.SkipReason = "policy: content collection disabled"
 			}
 
 			sp.Checks = []PlannedCheck{
@@ -298,7 +329,18 @@ func (s *Scanner) Scan(ctx context.Context, targets []string, outputDir, prefix 
 		}
 	}
 
-	// 2. Initialize checkpoint journal file
+	// 2. Initialize checkpoint journal and lazy restricted content writer.
+	// Never delete or truncate an existing content artifact: the journal is the
+	// prefix owner, and a surviving content file is a collision.
+	contentPath := filepath.Join(outputDir, prefix+".content.jsonl")
+	if _, err := os.Lstat(contentPath); err == nil {
+		return nil, fmt.Errorf("content artifact already exists: %w", os.ErrExist)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("inspect content artifact: %w", err)
+	}
+	contentWriter := content.NewLazyFileWriter(contentPath)
+	closeContent := func() error { return contentWriter.Close() }
+
 	journalPath := filepath.Join(outputDir, prefix+".journal.jsonl")
 	header := checkpoint.Header{
 		SchemaVersion:    "1",
@@ -311,6 +353,7 @@ func (s *Scanner) Scan(ctx context.Context, targets []string, outputDir, prefix 
 
 	journal, err := checkpoint.CreateFile(journalPath, header)
 	if err != nil {
+		_ = closeContent()
 		return nil, fmt.Errorf("create checkpoint journal: %w", err)
 	}
 
@@ -321,6 +364,9 @@ func (s *Scanner) Scan(ctx context.Context, targets []string, outputDir, prefix 
 		ScanID:           scanID,
 		CollectorVersion: s.collectorVersion,
 		Bounds:           s.cfg.Bounds,
+		Content:          s.cfg.Content,
+		Secrets:          s.cfg.Secrets,
+		ContentSink:      contentWriter,
 		Insecure:         s.cfg.Insecure,
 		UserAgent:        s.cfg.UserAgent,
 		Resolver:         resolver,
@@ -330,15 +376,19 @@ func (s *Scanner) Scan(ctx context.Context, targets []string, outputDir, prefix 
 	jupCol, err := jupyter.New(jupCfg)
 	if err != nil {
 		_ = journal.Close()
+		_ = closeContent()
 		return nil, fmt.Errorf("initialize jupyter collector: %w", err)
 	}
 
-	ollamaCol := ollama.New(s.cfg)
+	ollamaCfg := s.cfg
+	ollamaCfg.Targets = append([]string(nil), targets...)
+	ollamaCol := ollama.New(ollamaCfg, ollama.WithContentSink(contentWriter))
 
 	mcpOpts := []collectormcp.Option{
 		collectormcp.WithScanID(scanID),
 		collectormcp.WithCollectorVersion(s.collectorVersion),
 		collectormcp.WithClock(s.now),
+		collectormcp.WithContentSink(contentWriter),
 	}
 	mcpOpts = append(mcpOpts, collectormcp.WithCorrelator(resolver))
 	if s.httpClient != nil {
@@ -347,8 +397,11 @@ func (s *Scanner) Scan(ctx context.Context, targets []string, outputDir, prefix 
 	mcpCol, err := collectormcp.New(s.cfg, mcpOpts...)
 	if err != nil {
 		_ = journal.Close()
+		_ = closeContent()
 		return nil, fmt.Errorf("initialize mcp collector: %w", err)
 	}
+
+	probeClient := s.probeHTTPClient()
 
 	// 5. Worker pool for bounded concurrency
 	concurrency := s.cfg.Bounds.Concurrency
@@ -374,12 +427,16 @@ func (s *Scanner) Scan(ctx context.Context, targets []string, outputDir, prefix 
 	}
 
 	for _, tgt := range targets {
+		select {
+		case <-ctx.Done():
+			break
+		case sem <- struct{}{}:
+		}
 		if ctx.Err() != nil {
 			break
 		}
 		targetHost := tgt
 		wg.Add(1)
-		sem <- struct{}{}
 
 		go func(host string) {
 			defer wg.Done()
@@ -393,7 +450,7 @@ func (s *Scanner) Scan(ctx context.Context, targets []string, outputDir, prefix 
 				}
 				baseURL := discovery.BaseURLForHost(host, def.DefaultPort, false)
 
-				probe, err := discovery.Probe(ctx, s.httpClient, baseURL, def)
+				probe, err := discovery.Probe(ctx, probeClient, baseURL, def)
 				if err != nil {
 					recordFailure(fmt.Errorf("probe %s %s: %w", def.Surface, host, err))
 					continue
@@ -449,12 +506,18 @@ func (s *Scanner) Scan(ctx context.Context, targets []string, outputDir, prefix 
 	}
 	if firstRecordErr != nil {
 		_ = journal.Close()
+		_ = closeContent()
 		return nil, firstRecordErr
 	}
 
-	// 6. Close journal to ensure all writes are flushed to disk
+	// 6. Close journal and content writer to flush writes to disk
 	if closeErr := journal.Close(); closeErr != nil {
+		_ = closeContent()
 		return nil, fmt.Errorf("close checkpoint journal: %w", closeErr)
+	}
+	writtenContentCount := contentWriter.Count()
+	if closeErr := closeContent(); closeErr != nil {
+		return nil, fmt.Errorf("close content file: %w", closeErr)
 	}
 
 	// 7. Replay journal file to reconstruct accumulated state
@@ -469,15 +532,60 @@ func (s *Scanner) Scan(ctx context.Context, targets []string, outputDir, prefix 
 		return nil, fmt.Errorf("emit scan artifacts: %w", err)
 	}
 
+	recordedContentPath := ""
+	if writtenContentCount > 0 {
+		recordedContentPath = contentPath
+	}
+
 	return &ScanResult{
 		ScanID:       scanID,
 		Prefix:       prefix,
 		OutputDir:    outputDir,
 		JournalPath:  journalPath,
+		ContentPath:  recordedContentPath,
 		Artifacts:    artifacts,
 		TargetsCount: len(targets),
 		State:        state,
 	}, nil
+}
+
+type uaTransport struct {
+	base      http.RoundTripper
+	userAgent string
+}
+
+func (u uaTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if u.userAgent != "" && req.Header.Get("User-Agent") == "" {
+		req = req.Clone(req.Context())
+		req.Header.Set("User-Agent", u.userAgent)
+	}
+	return u.base.RoundTrip(req)
+}
+
+func (s *Scanner) probeHTTPClient() *http.Client {
+	if s.httpClient != nil {
+		return s.httpClient
+	}
+	connectTimeout := s.cfg.Bounds.ConnectTimeout
+	if connectTimeout <= 0 {
+		connectTimeout = 3 * time.Second
+	}
+	responseTimeout := s.cfg.Bounds.ResponseTimeout
+	if responseTimeout <= 0 {
+		responseTimeout = 10 * time.Second
+	}
+	tr := &http.Transport{
+		DialContext:           (&net.Dialer{Timeout: connectTimeout}).DialContext,
+		TLSHandshakeTimeout:   connectTimeout,
+		ResponseHeaderTimeout: responseTimeout,
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: s.cfg.Insecure,
+		},
+	}
+	return &http.Client{
+		Transport: uaTransport{base: tr, userAgent: s.cfg.UserAgent},
+		Timeout:   responseTimeout,
+	}
 }
 
 func unmatchedResult(host, baseURL string, surface discovery.Surface, probe discovery.ProbeResult, scope, vantageKey, scanID, collectorVersion string, now time.Time) checkpoint.Result {

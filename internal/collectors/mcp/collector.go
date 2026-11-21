@@ -11,10 +11,12 @@ import (
 
 	"github.com/0x3df/LLMHound/internal/checkpoint"
 	"github.com/0x3df/LLMHound/internal/config"
+	"github.com/0x3df/LLMHound/internal/content"
 	"github.com/0x3df/LLMHound/internal/correlate"
 	"github.com/0x3df/LLMHound/internal/emitter"
 	"github.com/0x3df/LLMHound/internal/evidence"
 	"github.com/0x3df/LLMHound/internal/graph"
+	"github.com/0x3df/LLMHound/internal/secrets"
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -62,6 +64,7 @@ func WithScanID(scanID string) Option {
 func WithEvidenceID(evidenceID string) Option {
 	return func(c *Collector) {
 		c.evidenceID = evidenceID
+		c.explicitEvidenceID = true
 	}
 }
 
@@ -72,15 +75,24 @@ func WithCollectorVersion(version string) Option {
 	}
 }
 
+// WithContentSink configures where bounded content-tier records are written.
+func WithContentSink(sink content.Sink) Option {
+	return func(c *Collector) {
+		c.contentSink = sink
+	}
+}
+
 // Collector performs anonymous, read-only collection of MCP metadata.
 type Collector struct {
-	config           config.Config
-	customHTTPClient *http.Client
-	correlator       *correlate.Resolver
-	clock            func() time.Time
-	scanID           string
-	evidenceID       string
-	collectorVersion string
+	config             config.Config
+	customHTTPClient   *http.Client
+	correlator         *correlate.Resolver
+	contentSink        content.Sink
+	clock              func() time.Time
+	scanID             string
+	evidenceID         string
+	explicitEvidenceID bool
+	collectorVersion   string
 }
 
 // New creates a new MCP Collector.
@@ -257,6 +269,10 @@ func (c *Collector) collectInternal(
 		return nil, fmt.Errorf("create MCPServer identity: %w", err)
 	}
 
+	if !c.explicitEvidenceID {
+		evidenceID = fmt.Sprintf("ev-%s-%s", scanID, srvID.ID()[:8])
+	}
+
 	clientImpl := &mcpsdk.Implementation{
 		Name:    "LLMHound",
 		Version: collectorVersion,
@@ -318,10 +334,11 @@ func (c *Collector) collectInternal(
 		addCheck(CheckIDInitialize, OpInitialize, failReason, graph.OutcomeFailed, map[string]any{"tls_error": tlsObs.VerificationReason}, obs)
 		addCheck(CheckIDToolsList, OpToolsList, "prerequisite failed: TLS verification failed", graph.OutcomeSkipped, nil, obs)
 		addCheck(CheckIDResourcesList, OpResourcesList, "prerequisite failed: TLS verification failed", graph.OutcomeSkipped, nil, obs)
+		addCheck(CheckIDResourcesRead, OpResourcesRead, "prerequisite failed: TLS verification failed", graph.OutcomeSkipped, nil, obs)
 		addCheck(CheckIDPromptsList, OpPromptsList, "prerequisite failed: TLS verification failed", graph.OutcomeSkipped, nil, obs)
 		addCheck(CheckIDRFC9728, OpRFC9728, "prerequisite failed: TLS verification failed", graph.OutcomeSkipped, nil, obs)
 
-		recs, err := c.buildEvidenceRecords(checks, checkDetails, nil, tlsObs, tracker.Redirects(), nil, obs)
+		recs, err := c.buildEvidenceRecords(srvID.ID(), checks, checkDetails, nil, tlsObs, tracker.Redirects(), nil, obs)
 		if err != nil {
 			return nil, err
 		}
@@ -366,9 +383,10 @@ func (c *Collector) collectInternal(
 
 		addCheck(CheckIDToolsList, OpToolsList, "prerequisite failed: server requires authentication", graph.OutcomeSkipped, nil, obs)
 		addCheck(CheckIDResourcesList, OpResourcesList, "prerequisite failed: server requires authentication", graph.OutcomeSkipped, nil, obs)
+		addCheck(CheckIDResourcesRead, OpResourcesRead, "prerequisite failed: server requires authentication", graph.OutcomeSkipped, nil, obs)
 		addCheck(CheckIDPromptsList, OpPromptsList, "prerequisite failed: server requires authentication", graph.OutcomeSkipped, nil, obs)
 
-		recs, err := c.buildEvidenceRecords(checks, checkDetails, nil, tlsObs, tracker.Redirects(), nil, obs)
+		recs, err := c.buildEvidenceRecords(srvID.ID(), checks, checkDetails, nil, tlsObs, tracker.Redirects(), nil, obs)
 		if err != nil {
 			return nil, err
 		}
@@ -392,10 +410,11 @@ func (c *Collector) collectInternal(
 		addCheck(CheckIDInitialize, OpInitialize, denyReason, graph.OutcomeDenied, map[string]any{"http_status": 403}, obs)
 		addCheck(CheckIDToolsList, OpToolsList, "prerequisite failed: access forbidden", graph.OutcomeSkipped, nil, obs)
 		addCheck(CheckIDResourcesList, OpResourcesList, "prerequisite failed: access forbidden", graph.OutcomeSkipped, nil, obs)
+		addCheck(CheckIDResourcesRead, OpResourcesRead, "prerequisite failed: access forbidden", graph.OutcomeSkipped, nil, obs)
 		addCheck(CheckIDPromptsList, OpPromptsList, "prerequisite failed: access forbidden", graph.OutcomeSkipped, nil, obs)
 		addCheck(CheckIDRFC9728, OpRFC9728, "not applicable; endpoint returned 403 not 401", graph.OutcomeSkipped, nil, obs)
 
-		recs, err := c.buildEvidenceRecords(checks, checkDetails, nil, tlsObs, tracker.Redirects(), nil, obs)
+		recs, err := c.buildEvidenceRecords(srvID.ID(), checks, checkDetails, nil, tlsObs, tracker.Redirects(), nil, obs)
 		if err != nil {
 			return nil, err
 		}
@@ -419,10 +438,11 @@ func (c *Collector) collectInternal(
 		addCheck(CheckIDInitialize, OpInitialize, failReason, graph.OutcomeFailed, map[string]any{"error": connectErr.Error()}, obs)
 		addCheck(CheckIDToolsList, OpToolsList, "prerequisite failed: endpoint unreachable", graph.OutcomeSkipped, nil, obs)
 		addCheck(CheckIDResourcesList, OpResourcesList, "prerequisite failed: endpoint unreachable", graph.OutcomeSkipped, nil, obs)
+		addCheck(CheckIDResourcesRead, OpResourcesRead, "prerequisite failed: endpoint unreachable", graph.OutcomeSkipped, nil, obs)
 		addCheck(CheckIDPromptsList, OpPromptsList, "prerequisite failed: endpoint unreachable", graph.OutcomeSkipped, nil, obs)
 		addCheck(CheckIDRFC9728, OpRFC9728, "not applicable; endpoint connection failed", graph.OutcomeSkipped, nil, obs)
 
-		recs, err := c.buildEvidenceRecords(checks, checkDetails, nil, tlsObs, tracker.Redirects(), nil, obs)
+		recs, err := c.buildEvidenceRecords(srvID.ID(), checks, checkDetails, nil, tlsObs, tracker.Redirects(), nil, obs)
 		if err != nil {
 			return nil, err
 		}
@@ -464,11 +484,12 @@ func (c *Collector) collectInternal(
 	var resTruncated bool
 	var resTruncReason string
 	var resErr error
+	var templatesErr error
 
 	if initResult.Capabilities == nil || initResult.Capabilities.Resources == nil {
 		// Capability not advertised
 	} else {
-		resources, templates, resTruncated, resTruncReason, resErr = executeResourcesList(ctx, session, c.config.Bounds.MaxPages, c.config.Bounds.MaxItems, c.config.Bounds.ResponseTimeout)
+		resources, templates, resTruncated, resTruncReason, resErr, templatesErr = executeResourcesList(ctx, session, c.config.Bounds.MaxPages, c.config.Bounds.MaxItems, c.config.Bounds.ResponseTimeout)
 	}
 
 	// Enumerate prompts
@@ -483,11 +504,49 @@ func (c *Collector) collectInternal(
 		prompts, promptsTruncated, promptsTruncReason, promptsErr = executePromptsList(ctx, session, c.config.Bounds.MaxPages, c.config.Bounds.MaxItems, c.config.Bounds.ResponseTimeout)
 	}
 
+	// Content tier: read listed concrete resources (never templates, never binary blobs)
+	var contentSummary *graph.ContentSummary
+	var contentTruncated bool
+	var contentTruncReason string
+	var contentDegraded bool
+	var contentDegradeReason string
+	var resReadOutcome graph.Outcome
+	var resReadReason string
+	var resReadDetails map[string]any
+	switch {
+	case !c.config.Content.EnabledFor("mcp"):
+		resReadOutcome = graph.OutcomeSkipped
+		resReadReason = "content collection disabled by policy"
+		resReadDetails = map[string]any{"skipped": true, "policy": "content_disabled"}
+	case initResult.Capabilities == nil || initResult.Capabilities.Resources == nil:
+		resReadOutcome = graph.OutcomeSkipped
+		resReadReason = "server does not advertise resources capability"
+	case resErr != nil:
+		resReadOutcome = graph.OutcomeSkipped
+		resReadReason = "prerequisite failed: resources/list did not succeed"
+	case len(resources) == 0:
+		resReadOutcome = graph.OutcomeSkipped
+		resReadReason = "no concrete resources available to read"
+	default:
+		rr, err := c.readMCPResources(ctx, session, srvID, scope, scanID, vantageKey, canonicalURL, obsTime, resources)
+		if err != nil {
+			return nil, err
+		}
+		resReadOutcome = rr.outcome
+		resReadReason = rr.reason
+		resReadDetails = rr.details
+		contentSummary = rr.summary
+		contentTruncated = rr.truncated
+		contentTruncReason = rr.truncateReason
+		contentDegraded = rr.degraded
+		contentDegradeReason = rr.degradeReason
+	}
+
 	// Determine surface coverage
 	var finalCoverage graph.Coverage
 	var finalCoverageReason string
 
-	if toolsTruncated || resTruncated || promptsTruncated {
+	if toolsTruncated || resTruncated || promptsTruncated || contentTruncated {
 		finalCoverage = graph.CoverageTruncated
 		var reasons []string
 		if toolsTruncReason != "" {
@@ -499,8 +558,11 @@ func (c *Collector) collectInternal(
 		if promptsTruncReason != "" {
 			reasons = append(reasons, promptsTruncReason)
 		}
+		if contentTruncReason != "" {
+			reasons = append(reasons, contentTruncReason)
+		}
 		finalCoverageReason = strings.Join(reasons, "; ")
-	} else if toolsErr != nil || resErr != nil || promptsErr != nil {
+	} else if toolsErr != nil || resErr != nil || templatesErr != nil || promptsErr != nil || contentDegraded {
 		finalCoverage = graph.CoveragePartial
 		var reasons []string
 		if toolsErr != nil {
@@ -509,8 +571,14 @@ func (c *Collector) collectInternal(
 		if resErr != nil {
 			reasons = append(reasons, "resources/list: "+resErr.Error())
 		}
+		if templatesErr != nil {
+			reasons = append(reasons, "resources/templates/list: "+templatesErr.Error())
+		}
 		if promptsErr != nil {
 			reasons = append(reasons, "prompts/list: "+promptsErr.Error())
+		}
+		if contentDegradeReason != "" {
+			reasons = append(reasons, "resources/read: "+contentDegradeReason)
 		}
 		finalCoverageReason = strings.Join(reasons, "; ")
 	} else {
@@ -548,8 +616,16 @@ func (c *Collector) collectInternal(
 			details["truncated"] = true
 			details["truncation_reason"] = resTruncReason
 		}
-		addCheck(CheckIDResourcesList, OpResourcesList, "resources enumerated successfully", graph.OutcomeSuccess, details, finalObs)
+		reason := "resources enumerated successfully"
+		if templatesErr != nil {
+			details["partial"] = true
+			details["templates_error"] = templatesErr.Error()
+			reason = "concrete resources enumerated; resource template enumeration failed"
+		}
+		addCheck(CheckIDResourcesList, OpResourcesList, reason, graph.OutcomeSuccess, details, finalObs)
 	}
+
+	addCheck(CheckIDResourcesRead, OpResourcesRead, resReadReason, resReadOutcome, resReadDetails, finalObs)
 
 	if initResult.Capabilities == nil || initResult.Capabilities.Prompts == nil {
 		addCheck(CheckIDPromptsList, OpPromptsList, "server does not advertise prompts capability", graph.OutcomeSkipped, nil, finalObs)
@@ -570,9 +646,12 @@ func (c *Collector) collectInternal(
 	var edges []graph.Edge
 
 	// Anonymous access is recorded as flat server properties, never as edges.
-	// No credentials are ever sent, so every successful check is anonymous.
+	// No credentials are ever sent, so every successful enumeration check is anonymous.
 	var accessEvidence []graph.AccessEvidence
 	for _, ch := range checks {
+		if ch.CheckID == CheckIDResourcesRead {
+			continue
+		}
 		if ch.Outcome != graph.OutcomeSuccess && ch.Outcome != graph.OutcomeDenied {
 			continue
 		}
@@ -590,7 +669,7 @@ func (c *Collector) collectInternal(
 	access := graph.SummarizeAccess(accessEvidence)
 
 	// 1. Server node
-	srvNode, err := buildServerNode(srvID, ep, finalObs, initResult, tlsObs, access)
+	srvNode, err := buildServerNode(srvID, ep, finalObs, initResult, tlsObs, access, contentSummary)
 	if err != nil {
 		return nil, fmt.Errorf("build MCPServer node: %w", err)
 	}
@@ -654,7 +733,7 @@ func (c *Collector) collectInternal(
 		fpInput = &fp
 	}
 
-	recs, err := c.buildEvidenceRecords(checks, checkDetails, fpInput, tlsObs, tracker.Redirects(), &corrEv, finalObs)
+	recs, err := c.buildEvidenceRecords(srvID.ID(), checks, checkDetails, fpInput, tlsObs, tracker.Redirects(), &corrEv, finalObs)
 	if err != nil {
 		return nil, err
 	}
@@ -749,6 +828,7 @@ func (c *Collector) connectTransport(
 }
 
 func (c *Collector) buildEvidenceRecords(
+	targetID string,
 	checks []graph.CheckResult,
 	checkDetails map[string]map[string]any,
 	fpInput *evidence.FingerprintInput,
@@ -806,7 +886,7 @@ func (c *Collector) buildEvidenceRecords(
 		tlsObsRecord.EvidenceID = fmt.Sprintf("%s-tls", obs.EvidenceID)
 		tlsInput := evidence.TLSRecordInput{
 			Observation:        tlsObsRecord,
-			TargetID:           obs.Source,
+			TargetID:           targetID,
 			CertFingerprint:    tlsObs.CertFingerprint,
 			Issuer:             tlsObs.Issuer,
 			Subject:            tlsObs.Subject,
@@ -854,4 +934,175 @@ func (c *Collector) buildEvidenceRecords(
 	}
 
 	return records, nil
+}
+
+type mcpResourceReadResult struct {
+	outcome        graph.Outcome
+	reason         string
+	details        map[string]any
+	summary        *graph.ContentSummary
+	truncated      bool
+	truncateReason string
+	degraded       bool
+	degradeReason  string
+}
+
+func (c *Collector) readMCPResources(
+	ctx context.Context,
+	session *mcpsdk.ClientSession,
+	srvID graph.Identity,
+	scope, scanID, vantageKey, canonicalURL string,
+	obsTime time.Time,
+	resources []*mcpsdk.Resource,
+) (mcpResourceReadResult, error) {
+	budget := content.NewBudget(c.config.Content, secrets.NewRedactor(c.config.Secrets))
+	var attempted, itemsRead, skippedBinary int
+	var firstReadErr error
+	var readErrors []string
+	maxReadAttempts := c.config.Bounds.MaxItems
+	if maxReadAttempts <= 0 {
+		maxReadAttempts = 10000
+	}
+
+	for _, res := range resources {
+		if res == nil || !isValidResourceKey(res.URI) {
+			continue
+		}
+		if content.IsBinaryContent(res.URI, res.MIMEType) {
+			skippedBinary++
+			continue
+		}
+		if attempted >= maxReadAttempts {
+			budget.MarkTruncated(fmt.Sprintf("MCP resource reads reached max_items (%d)", maxReadAttempts))
+			break
+		}
+		attempted++
+		callCtx, cancel := callTimeout(ctx, c.config.Bounds.ResponseTimeout)
+		readRes, err := session.ReadResource(callCtx, &mcpsdk.ReadResourceParams{URI: res.URI})
+		cancel()
+		if err != nil {
+			outcome, reason := classifyRPCError(err, OpResourcesRead)
+			if firstReadErr == nil {
+				firstReadErr = err
+			}
+			readErrors = append(readErrors, fmt.Sprintf("%s: %s", res.URI, reason))
+			if outcome == graph.OutcomeUnsupported {
+				break
+			}
+			continue
+		}
+		if readRes == nil {
+			continue
+		}
+
+		resID := ""
+		if rID, idErr := graph.NewResourceIdentity(scope, graph.MCPResource, srvID, res.URI); idErr == nil {
+			resID = rID.ID()
+		}
+		for _, item := range readRes.Contents {
+			if item == nil || len(item.Blob) > 0 || item.Text == "" {
+				if item != nil && len(item.Blob) > 0 {
+					skippedBinary++
+				}
+				continue
+			}
+			mimeType := item.MIMEType
+			if mimeType == "" {
+				mimeType = res.MIMEType
+			}
+			loc := item.URI
+			if loc == "" {
+				loc = res.URI
+			}
+			if content.IsBinaryContent(loc, mimeType) || content.LooksBinary([]byte(item.Text)) {
+				skippedBinary++
+				continue
+			}
+			if ok, _ := budget.ClaimResourceItem(res.URI); !ok {
+				break
+			}
+			rec, added, addErr := budget.Add(content.RecordInput{
+				DeploymentScope: scope,
+				ScanID:          scanID,
+				VantageKey:      vantageKey,
+				ServiceID:       srvID.ID(),
+				ResourceID:      resID,
+				Surface:         "mcp",
+				CheckID:         CheckIDResourcesRead,
+				Source:          canonicalURL,
+				Kind:            content.KindMCPResource,
+				Location:        loc,
+				MediaType:       mimeType,
+				ObservedAt:      obsTime,
+				Body:            item.Text,
+			})
+			if addErr != nil {
+				return mcpResourceReadResult{}, fmt.Errorf("create mcp content record: %w", addErr)
+			}
+			if added {
+				itemsRead++
+				if c.contentSink != nil {
+					if err := c.contentSink.Write(rec); err != nil {
+						return mcpResourceReadResult{}, fmt.Errorf("write mcp content record: %w", err)
+					}
+				}
+			}
+		}
+	}
+
+	details := map[string]any{
+		"items_read":     itemsRead,
+		"skipped_binary": skippedBinary,
+		"content_bytes":  budget.Bytes(),
+		"truncated":      budget.Truncated(),
+	}
+	if len(readErrors) > 0 {
+		details["errors"] = readErrors
+	}
+	if found := budget.Findings(); len(found) > 0 {
+		details["detected_exposures"] = content.ExposureDetails(found)
+	}
+
+	outcome := graph.OutcomeSuccess
+	reason := fmt.Sprintf("read %d resource content item(s) (%d bytes)", itemsRead, budget.Bytes())
+	if itemsRead == 0 {
+		switch {
+		case firstReadErr != nil:
+			outcome, reason = classifyRPCError(firstReadErr, OpResourcesRead)
+		case skippedBinary > 0:
+			reason = fmt.Sprintf("skipped %d binary resource item(s)", skippedBinary)
+		default:
+			reason = "resources returned no text content"
+		}
+	}
+
+	var summary *graph.ContentSummary
+	if attempted > 0 || len(budget.Records()) > 0 || budget.Truncated() {
+		summary = &graph.ContentSummary{
+			Collected:         true,
+			Bytes:             budget.Bytes(),
+			Truncated:         budget.Truncated(),
+			SecretTypes:       budget.SecretTypes(),
+			SecretConfirmedAt: obsTime,
+		}
+	}
+
+	degraded := itemsRead > 0 && len(readErrors) > 0
+	degradeReason := ""
+	if degraded {
+		degradeReason = strings.Join(readErrors, "; ")
+		outcome = graph.OutcomeFailed
+		reason = fmt.Sprintf("read %d resource content item(s) but %d read(s) failed", itemsRead, len(readErrors))
+	}
+	return mcpResourceReadResult{
+		outcome:        outcome,
+		reason:         reason,
+		details:        details,
+		summary:        summary,
+		truncated:      budget.Truncated(),
+		truncateReason: strings.Join(budget.Reasons(), "; "),
+		degraded:       degraded,
+		degradeReason:  degradeReason,
+	}, nil
+
 }

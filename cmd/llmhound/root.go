@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/0x3df/LLMHound/internal/config"
 	"github.com/0x3df/LLMHound/internal/discovery"
@@ -23,6 +24,7 @@ func newRootCommand() *cobra.Command {
 	}
 	root.CompletionOptions.DisableDefaultCmd = true
 	var configPath string
+	var disabledContentSurfaces []string
 	overrides := config.Defaults()
 	flags := root.PersistentFlags()
 	flags.StringVar(&configPath, "config", "llmhound.yaml", "Configuration file (default is optional; explicit path must exist)")
@@ -34,20 +36,22 @@ func newRootCommand() *cobra.Command {
 	flags.StringSliceVar(&overrides.Exclude, "exclude", nil, "Exact IP/FQDN or CIDR exclusions; repeat or comma-separate")
 	flags.StringArrayVar(&overrides.ExcludeFiles, "exclude-file", nil, "Line-oriented exclusions file; repeat (replaces exclude_files)")
 	flags.IntVar(&overrides.Bounds.MaxTargets, "max-targets", overrides.Bounds.MaxTargets, "Maximum raw expansion before dedup/exclusions (1–65536)")
-	flags.IntVar(&overrides.Bounds.Concurrency, "concurrency", overrides.Bounds.Concurrency, "Reserved collector concurrency (1–256)")
-	flags.Float64Var(&overrides.Bounds.PerHostRate, "per-host-rate", overrides.Bounds.PerHostRate, "Reserved per-host requests/second (0.1–1000)")
-	flags.DurationVar(&overrides.Bounds.ConnectTimeout, "connect-timeout", overrides.Bounds.ConnectTimeout, "Reserved connect timeout (1ms–5m)")
-	flags.DurationVar(&overrides.Bounds.ResponseTimeout, "response-timeout", overrides.Bounds.ResponseTimeout, "Reserved response timeout (1ms–5m)")
-	flags.Int64Var(&overrides.Bounds.MaxResponseBytes, "max-response-bytes", overrides.Bounds.MaxResponseBytes, "Reserved per-response byte limit (1–67108864)")
-	flags.IntVar(&overrides.Bounds.MaxPages, "max-pages", overrides.Bounds.MaxPages, "Reserved per-check page limit (1–10000)")
-	flags.IntVar(&overrides.Bounds.MaxItems, "max-items", overrides.Bounds.MaxItems, "Reserved per-check item limit (1–100000)")
-	flags.IntVar(&overrides.Bounds.MaxRedirects, "max-redirects", overrides.Bounds.MaxRedirects, "Reserved authorized redirect limit (0–10)")
-	flags.BoolVar(&overrides.Insecure, "insecure", false, "Reserved explicit TLS verification bypass (off by default)")
-	flags.StringVar(&overrides.UserAgent, "user-agent", overrides.UserAgent, "Reserved identifiable request User-Agent")
-	flags.BoolVar(&overrides.OptIns.ResourceContent, "resource-content", false, "Reserved sensitive resource-content opt-in")
-	flags.BoolVar(&overrides.OptIns.Prompts, "prompts", false, "Reserved sensitive prompt-content opt-in")
-	flags.BoolVar(&overrides.OptIns.ConfigurationContent, "configuration-content", false, "Reserved sensitive configuration-content opt-in")
-	flags.BoolVar(&overrides.OptIns.WorkspaceContent, "workspace-content", false, "Reserved sensitive workspace-content opt-in")
+	flags.IntVar(&overrides.Bounds.Concurrency, "concurrency", overrides.Bounds.Concurrency, "Worker concurrency (1–256)")
+	flags.Float64Var(&overrides.Bounds.PerHostRate, "per-host-rate", overrides.Bounds.PerHostRate, "Per-host requests/second (0.1–1000)")
+	flags.DurationVar(&overrides.Bounds.ConnectTimeout, "connect-timeout", overrides.Bounds.ConnectTimeout, "Connect timeout (1ms–5m)")
+	flags.DurationVar(&overrides.Bounds.ResponseTimeout, "response-timeout", overrides.Bounds.ResponseTimeout, "Response timeout (1ms–5m)")
+	flags.Int64Var(&overrides.Bounds.MaxResponseBytes, "max-response-bytes", overrides.Bounds.MaxResponseBytes, "Per-response byte limit (1–67108864)")
+	flags.IntVar(&overrides.Bounds.MaxPages, "max-pages", overrides.Bounds.MaxPages, "Per-check page limit (1–10000)")
+	flags.IntVar(&overrides.Bounds.MaxItems, "max-items", overrides.Bounds.MaxItems, "Per-check item limit (1–100000)")
+	flags.IntVar(&overrides.Bounds.MaxRedirects, "max-redirects", overrides.Bounds.MaxRedirects, "Authorized redirect limit (0–10)")
+	flags.BoolVar(&overrides.Insecure, "insecure", false, "Explicit TLS verification bypass (off by default)")
+	flags.StringVar(&overrides.UserAgent, "user-agent", overrides.UserAgent, "Identifiable request User-Agent")
+	flags.BoolVar(&overrides.Content.Enabled, "content", overrides.Content.Enabled, "Collect allowlisted anonymous content bodies into .content.jsonl")
+	flags.Int64Var(&overrides.Content.MaxItemBytes, "content-max-item-bytes", overrides.Content.MaxItemBytes, "Maximum bytes retained per content item (1–16777216)")
+	flags.IntVar(&overrides.Content.MaxItemsPerResource, "content-max-items-per-resource", overrides.Content.MaxItemsPerResource, "Maximum content items per resource (1–1000)")
+	flags.Int64Var(&overrides.Content.MaxServiceBytes, "content-max-service-bytes", overrides.Content.MaxServiceBytes, "Maximum content bytes per service (1–268435456)")
+	flags.IntVar(&overrides.Content.MaxSamplePoints, "content-max-sample-points", overrides.Content.MaxSamplePoints, "Maximum sample points per vector collection (1–1000)")
+	flags.StringSliceVar(&disabledContentSurfaces, "content-disable", nil, "Disable content-tier reads for named surfaces (comma-separated or repeated)")
 	flags.StringVar(&overrides.Correlation.MappingFile, "mapping-file", "", "Asset mapping file from the normalizer: target to existing BloodHound objectid and kind")
 
 	var prepared []string
@@ -60,6 +64,12 @@ func newRootCommand() *cobra.Command {
 			c, err = config.Load(configPath)
 			if err != nil {
 				return err
+			}
+		}
+		if flags.Changed("content-disable") {
+			overrides.Content.Surfaces = make(map[string]bool, len(disabledContentSurfaces))
+			for _, s := range disabledContentSurfaces {
+				overrides.Content.Surfaces[strings.TrimSpace(s)] = false
 			}
 		}
 		var changed []string
@@ -162,6 +172,9 @@ func newRootCommand() *cobra.Command {
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "  Evidence sidecar: %s\n", res.Artifacts.EvidenceSidecarPath)
 			fmt.Fprintf(cmd.OutOrStdout(), "  Checkpoint journal: %s\n", res.JournalPath)
+			if res.ContentPath != "" {
+				fmt.Fprintf(cmd.OutOrStdout(), "  Content file: %s\n", res.ContentPath)
+			}
 			return nil
 		},
 	}

@@ -1,13 +1,14 @@
 # Configuration, plan, and scan
 
-**Implemented M2a slice:** Cobra help/version, strict YAML loading, explicit flag
-replacements, policy validation, offline `targets` preparation, offline
-`plan` (targets × allowlisted checks, no traffic), and `scan` for Jupyter / MCP /
-Ollama through `internal/scanner` (checkpoint journal, OpenGraph payload, evidence
-sidecar). `upload` and resume remain honest not-implemented stubs (M3). Sensitive
-content opt-ins default false (metadata-only / read-only today; the target
-default-on, bounded content tier is specified in the
-[graph model](../02-graph-model.md#content-and-secrets) and not yet built). Live
+**Implemented M2a + D3 content tier + D4 secret detection:** Cobra help/version,
+strict YAML loading, explicit flag replacements, policy validation, offline
+`targets` preparation, offline `plan` (targets × allowlisted checks, no traffic),
+and `scan` for Jupyter / MCP / Ollama through `internal/scanner` (checkpoint
+journal, OpenGraph payload, evidence sidecar, and default-on, bounded
+`.content.jsonl` content tier with high-precision secret detection).
+`upload` and `resume` remain honest not-implemented stubs (M3). Detector
+semantics are specified in the
+[graph model](../02-graph-model.md#content-and-secrets). Live
 CLI vs package coverage is recorded in [scan coverage](../internals/scan-coverage.md).
 
 ## Build and use
@@ -58,7 +59,8 @@ Required keys may be supplied through flags even if omitted from the file.
 File-relative YAML paths (`targets_files`, `exclude_files`, `mapping_file`) are
 resolved relative to the configuration directory. Paths supplied by flags are
 relative to the current working directory. Empty/invalid input paths fail.
-The reserved mapping path is not read or checked for existence by this slice.
+`targets` and `plan` do not open `mapping_file`; `scan` loads and validates it
+when provided.
 
 ## Fields and flags
 
@@ -106,11 +108,14 @@ sidecar is emitted.
 
 - `llmhound plan`: prints prepared targets × embedded allowlisted checks for
   Jupyter, MCP, and Ollama. No DNS, no target connections, no artifacts.
-  Inactive checks (for example default-skipped `ollama_show`) include a policy
-  skip reason.
+  Content checks (`ollama_show`, `jupyter_file_content`, `mcp_resources_read`)
+  are active by default and show a policy skip reason when disabled via
+  `--content=false` or `--content-disable`.
 - `llmhound scan`: discovers and enumerates those surfaces, writes
-  `<prefix>.journal.jsonl`, `<prefix>.json` (and a linking payload when native
-  Computer correlation applies), and `<prefix>.evidence.jsonl`.
+  `<prefix>.journal.jsonl`, `<prefix>.json` (or `<prefix>-base.json` and
+  `<prefix>-linking.json` when native mapping correlation applies),
+  `<prefix>.evidence.jsonl`, and `<prefix>.content.jsonl` (mode `0600`, written
+  lazily only when bounded content records are collected).
   Flags: `--output-dir`, `--prefix`, `--discovery-file` (optional JSON fingerprint
   port/path overrides that inherit builtin matchers). Only surfaces present in
   the active definitions are scanned, so `plan` and `scan` agree. See
@@ -151,16 +156,39 @@ DNS connections or redirects.
 ### Collection and correlation policy
 
 These values are parsed/validated. Scan collectors apply TLS, User-Agent, the
-opt-ins, and mapping-file attachment where implemented:
+`content.*` content-tier policy, and mapping-file attachment:
 
 - `insecure` (`--insecure`): default false; explicit TLS verification bypass.
   Verification failure must never silently retry unverified.
 - `user_agent` (`--user-agent`): default `LLMHound/dev`; nonblank printable ASCII
   up to 256 bytes. Add non-secret operator contact information if desired.
-- `opt_ins.resource_content`, `.prompts`, `.configuration_content`, and
-  `.workspace_content`: all default false; flags `--resource-content`,
-  `--prompts`, `--configuration-content`, `--workspace-content`. Content reads
-  still require allowlisted semantics, authorization, bounds, and redaction.
+- `content.enabled` (`--content`): default `true`; collect bounded existing
+  content (Ollama prompts/modelfiles/templates, Jupyter text/notebook bodies,
+  MCP text resources) into `<prefix>.content.jsonl` (mode `0600`) without
+  leaking bodies into payloads, sidecars, checkpoints, or logs.
+- `content.max_item_bytes` (`--content-max-item-bytes`): default `262144`
+  (256 KiB; range `1`–`16777216`).
+- `content.max_items_per_resource` (`--content-max-items-per-resource`):
+  default `10` (range `1`–`1000`).
+- `content.max_service_bytes` (`--content-max-service-bytes`): default
+  `5242880` (5 MiB; range `1`–`268435456`).
+- `content.max_sample_points` (`--content-max-sample-points`): default `5`
+  (range `1`–`1000`).
+- `content.surfaces` (`--content-disable`): per-surface enable map in YAML
+  (valid keys: capability-matrix surface names such as `ollama`, `jupyter`,
+  `mcp`); `--content-disable` accepts comma-separated or repeated surface names
+  to disable content reads for those surfaces.
+- `secrets.detectors`: per-detector enable map over content bodies; every
+  detector is enabled unless explicitly set to `false`. Valid keys:
+  `private_key` (parse-verified PEM, unencrypted), `github_token`
+  (classic `ghp_/gho_/ghu_/ghs_/ghr_` tokens with a valid CRC32 checksum),
+  `aws_access_key` (key id and paired secret in the same item). There is no
+  CLI flag and no global off switch: disabling the content tier disables
+  detection with it. A match is replaced by `[secret:<type>]` in
+  `.content.jsonl`, recorded by type and location in the sidecar
+  (`detected_exposures`), and flagged on the graph
+  (`has_exposed_secret`, `secret_types`, `secret_last_confirmed`); the value
+  is never stored.
 - `correlation.mapping_file` (`--mapping-file`): the asset mapping supplied by the
   normalization program, which maps a target to an **existing BloodHound node
   (objectid and kind)**. Without it, every service attaches to a

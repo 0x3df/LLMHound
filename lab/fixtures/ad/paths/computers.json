@@ -1,0 +1,158 @@
+{
+  "meta": {
+    "methods": 0,
+    "type": "computers",
+    "count": 2,
+    "version": 6
+  },
+  "data": [
+    {
+      "ObjectIdentifier": "S-1-5-21-3623811015-3361044348-30300870-1103",
+      "PrimaryGroupSID": "S-1-5-21-3623811015-3361044348-30300870-513",
+      "AllowedToDelegate": [],
+      "AllowedToAct": [],
+      "HasSIDHistory": [],
+      "DumpSMSAPassword": [],
+      "Sessions": {
+        "Results": [
+          {
+            "UserSID": "S-1-5-21-3623811015-3361044348-30300870-1601",
+            "ComputerSID": "S-1-5-21-3623811015-3361044348-30300870-1103"
+          }
+        ],
+        "Collected": true,
+        "FailureReason": null
+      },
+      "PrivilegedSessions": {
+        "Results": [],
+        "Collected": true,
+        "FailureReason": null
+      },
+      "RegistrySessions": {
+        "Results": [],
+        "Collected": true,
+        "FailureReason": null
+      },
+      "LocalGroups": [],
+      "UserRights": [],
+      "DCRegistryData": {
+        "CertificateMappingMethods": {
+          "Value": -1,
+          "Collected": false,
+          "FailureReason": null
+        },
+        "StrongCertificateBindingEnforcement": {
+          "Value": -1,
+          "Collected": false,
+          "FailureReason": null
+        }
+      },
+      "Status": null,
+      "Aces": [
+        {
+          "PrincipalSID": "S-1-5-21-3623811015-3361044348-30300870-513",
+          "PrincipalType": "Group",
+          "RightName": "GenericAll",
+          "IsInherited": false
+        }
+      ],
+      "IsDeleted": false,
+      "IsACLProtected": false,
+      "ContainedBy": null,
+      "Properties": {
+        "domain": "LAB.LOCAL",
+        "name": "LAB-WIN-01.LAB.LOCAL",
+        "distinguishedname": "CN=LAB-WIN-01,OU=COMPUTERS,DC=LAB,DC=LOCAL",
+        "domainsid": "S-1-5-21-3623811015-3361044348-30300870",
+        "highvalue": false,
+        "samaccountname": "LAB-WIN-01$",
+        "haslaps": false,
+        "description": null,
+        "whencreated": 1759100000,
+        "enabled": true,
+        "unconstraineddelegation": false,
+        "trustedtoauth": false,
+        "lastlogon": 1759200000,
+        "lastlogontimestamp": 1759200000,
+        "pwdlastset": 1759100000,
+        "serviceprincipalnames": [
+          "HOST/LAB-WIN-01",
+          "HOST/LAB-WIN-01.LAB.LOCAL"
+        ],
+        "operatingsystem": "Windows Server 2022 Standard",
+        "operatingsystemversion": "10.0 (20348)",
+        "sidhistory": [],
+        "distinguishedname_tag": "LAB-WIN-01",
+        "domaintag": "LAB.LOCAL"
+      }
+    },
+    {
+      "ObjectIdentifier": "S-1-5-21-3623811015-3361044348-30300870-1104",
+      "PrimaryGroupSID": "S-1-5-21-3623811015-3361044348-30300870-513",
+      "AllowedToDelegate": [],
+      "AllowedToAct": [],
+      "HasSIDHistory": [],
+      "DumpSMSAPassword": [],
+      "Sessions": {
+        "Results": [],
+        "Collected": true,
+        "FailureReason": null
+      },
+      "PrivilegedSessions": {
+        "Results": [],
+        "Collected": true,
+        "FailureReason": null
+      },
+      "RegistrySessions": {
+        "Results": [],
+        "Collected": true,
+        "FailureReason": null
+      },
+      "LocalGroups": [],
+      "UserRights": [],
+      "DCRegistryData": {
+        "CertificateMappingMethods": {
+          "Value": -1,
+          "Collected": false,
+          "FailureReason": null
+        },
+        "StrongCertificateBindingEnforcement": {
+          "Value": -1,
+          "Collected": false,
+          "FailureReason": null
+        }
+      },
+      "Status": null,
+      "Aces": [],
+      "IsDeleted": false,
+      "IsACLProtected": false,
+      "ContainedBy": null,
+      "Properties": {
+        "domain": "LAB.LOCAL",
+        "name": "LAB-WIN-02.LAB.LOCAL",
+        "distinguishedname": "CN=LAB-WIN-02,OU=COMPUTERS,DC=LAB,DC=LOCAL",
+        "domainsid": "S-1-5-21-3623811015-3361044348-30300870",
+        "highvalue": false,
+        "samaccountname": "LAB-WIN-02$",
+        "haslaps": false,
+        "description": null,
+        "whencreated": 1759100000,
+        "enabled": true,
+        "unconstraineddelegation": false,
+        "trustedtoauth": false,
+        "lastlogon": 1759200000,
+        "lastlogontimestamp": 1759200000,
+        "pwdlastset": 1759100000,
+        "serviceprincipalnames": [
+          "HOST/LAB-WIN-02",
+          "HOST/LAB-WIN-02.LAB.LOCAL"
+        ],
+        "operatingsystem": "Windows Server 2022 Standard",
+        "operatingsystemversion": "10.0 (20348)",
+        "sidhistory": [],
+        "distinguishedname_tag": "LAB-WIN-02",
+        "domaintag": "LAB.LOCAL"
+      }
+    }
+  ]
+}

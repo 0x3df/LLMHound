@@ -179,7 +179,7 @@ LLMHound's own kinds, the `LLMHound_` namespace, and malformed names are rejecte
 
 ```json
 [{"target": "ai1.corp.example", "object_id": "S-1-5-21-...-1103", "kind": "Computer"},
- {"target": "10.1.2.3",         "object_id": "azure-vm-object-id",  "kind": "AZVM"}]
+ {"target": "10.1.2.3",         "object_id": "/SUBSCRIPTIONS/…/VIRTUALMACHINES/AI-VM1", "kind": "AZVM"}]
 ```
 
 Also accepted: `{"ai1.corp.example": "S-1-5-21-..."}` (kind defaults to `Computer`) and

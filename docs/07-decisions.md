@@ -24,6 +24,7 @@ traceable. Superseded designs are kept under [`legacy/`](../legacy/README.md).
 | 16 | **Support is declared per exact CE version/schema**, re-validated by a repeatable suite | Version numbers alone are not compatibility | Pinned CE 9.7.1 + PostgreSQL 18.6; adapter gate in M3 | 2026-09-30 |
 | 17 | **Docs have one canonical home per rule**; other docs link rather than restate | Duplication caused drift | Model and contracts in [02](02-graph-model.md); checks and outcomes in [03](03-collector-capabilities.md) | 2026-11-20 |
 | 18 | **Retire, don't delete.** Superseded docs and code move to `legacy/`; the full earlier tree is tagged `legacy/earlier-model-m2a` | The reasoning behind a design is worth keeping | Archived Go files carry `//go:build ignore` and are never compiled | 2026-11-20 |
+| 19 | **Saved-query path kinds are generated from CE's `extensions-edges`; tier 0 is the `Tag_Tier_Zero` label; Azure mappings use the ARM resource ID** | R1–R9 measured that raw Cypher follows every edge kind, that `system_tags` is a string, and that an `AZVM` is keyed by its upper-cased ARM id ([R1–R9](05-ce-compatibility.md#follow-up-answers-for-the-tier-0-redesign-r1r9)) | No hand-maintained kind list; `shortestPath` queries use the inline-endpoint shapes CE accepts | 2026-11-21 |
 
 ## Deferred
 

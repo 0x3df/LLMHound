@@ -4,7 +4,8 @@
 > were observed on a running pinned lab, not derived from docs. Docs
 > (fetched 2026-09-29/30 from bloodhound.specterops.io) informed what to test;
 > every answer records the request/response or Cypher evidence that produced
-> it. M1's `extension/schema.json` and the adapter mapping are written from
+> it. The tier-0 follow-ups R1–R9 were answered the same way on 2026-11-21 (see the last
+> section). M1's `extension/schema.json` and the adapter mapping are written from
 > these answers, and M3's adapter validation gate re-checks them.
 
 ## Test environment
@@ -376,34 +377,51 @@ the older single-step form; on 9.7.1 the flow above is what actually works.
 
 - Payload rejection thresholds ≥ ~100 MB and ZIP size limits (spike tested
   up to ~10 MB).
-- `relationship_kinds` pathfinding filter with extension kinds (probe ran
-  against already-cleaned nodes; format documented by the API error is
-  `in|nin:Kind1,Kind2`).
-- Edge property merge semantics on repeated uploads (node merge verified;
-  edges observed to dedup by kind/start/end).
+- UI rendering of a traversable extension edge (R5 verified the API only).
+- Behavior of the unscoped sourceless sweep (`deleteSourceKinds: [0]`) on stub nodes (R8).
 - Entity-panel `info` markdown rendering and custom icons (schema accepted;
   not UI-verified — cosmetic, not needed for M1 emission).
 - Neo4j-driver behavior is out of scope (LLMHound targets PostgreSQL-backed
   CE only).
 
-## Open questions raised by the tier-0 redesign
+## Follow-up answers for the tier-0 redesign (R1–R9)
 
-The 2026-11-20 redesign (see [graph model](02-graph-model.md)) depends on a few
-behaviors M0 did not test. Each needs a lab check (extend
-`lab/scripts/run-m0-checks.sh`) before the feature that relies on it ships.
-M0's answers above already confirmed: arrays of primitives are accepted (Q3),
-`is_traversable: false` is honored by pathfinding while raw search still finds
-the edges (Q4), and property matching silently drops zero or ambiguous matches
-(Q6), which is why the redesign removes suffix matching from LLMHound.
+The 2026-11-20 redesign (see [graph model](02-graph-model.md)) depended on behaviors M0
+did not test. All nine were answered on the pinned lab on 2026-11-21 by
+`lab/scripts/run-r-checks.sh`, which registers the **real** `extension/schema.json` (plus
+one traversable `LLMHound_CanExecuteOn` kind, to test rule edges), ingests a synthetic
+SharpHound attack-path scenario (`lab/fixtures/ad/paths`: Domain Users has `GenericAll`
+over a Computer where a tier-0 account has a session) and an AzureHound-format VM
+(`lab/fixtures/azure`), then uploads realistic LLMHound payloads. Evidence is one JSON
+line per check in `lab/.runtime/results/r-checks.jsonl`. M0's answers above still hold:
+arrays of primitives are accepted (Q3), `is_traversable: false` is honored by pathfinding
+while raw search still finds the edges (Q4), and property matching silently drops zero or
+ambiguous matches (Q6).
 
-| # | Question | Why it matters | Status |
+| # | Question | Answer | Consequence |
 |---|---|---|---|
-| R1 | How are tier-0 nodes tagged on 9.7.1 (`system_tags` / `admin_tier_0`)? Can Cypher filter on the tag, and does the lab AD fixture contain tier-0 nodes? | Saved queries P1–P3 | Open |
-| R2 | Do `shortestPath` queries with an explicit edge-kind list (`[:A\|B*1..]`) run acceptably on a realistic graph? Is there a depth/result limit? | Headline queries P1, P2, P8 | Open |
-| R3 | Does `match_by: id` resolve nodes ingested by AzureHound (`AZVM`, Entra devices), not just SharpHound `Computer`s? | Attachment to any native kind | Open |
-| R4 | On re-upload, is an array property replaced or merged? Do edge properties merge like node properties? | `anon_operations`, `exec_surface`, `secret_types` freshness (Q8 verified node merge only) | Open |
-| R5 | Is an edge declared `is_traversable: true` honored by pathfinding (`only_traversable=true`) and surfaced in the UI? | M2d path-qualification rules | Open |
-| R6 | CE never removes stale properties (Q8). Confirm a property set to `true` persists after a later payload omits it, and what the cleanest refresh pattern is (re-emit with a freshness timestamp). | `has_exposed_secret` is `true`-or-unset, so a stale `true` outlives remediation unless consumers check `secret_last_confirmed` | Open |
-| R7 | What is the cheapest read-only CE API call to confirm a batch of objectids exists before emitting linking edges (Q5: missing endpoints create stub nodes)? | `upload` pre-flight in M3 | Open |
-| R8 | Lifecycle of sourceless linking edges (`ObservedAt` to native nodes): does "Sourceless" cleanup remove exactly those edges and nothing native? | The normalizer's cleanup of LLMHound attachments | Open |
-| R9 | Retest the `relationship_kinds` pathfinding filter with extension kinds against live data (Q4 left it unverified). | Optional UI/API path filters | Open |
+| R1 | How are tier-0 nodes tagged? | **Closed.** A node is tier 0 when it carries the label `Tag_Tier_Zero`. It also has the **string** property `system_tags = 'admin_tier_0'`. The documented array form `'admin_tier_0' IN n.system_tags` fails with HTTP 500 (`cannot extract elements from a scalar`). `n:Tag_Tier_Zero`, `n.system_tags = 'admin_tier_0'` and `CONTAINS` all work. CE's own list: `GET /api/v2/asset-group-tags` (Tier Zero id 1, Owned id 2) and `/asset-group-tags/1/members`. The fixture's tier-0 set was the Domain, Domain Admins and one admin user. Membership is computed by analysis after ingest, so wait for `datapipe/status` to be `idle`. | Saved queries use `Tag_Tier_Zero`. |
+| R2 | Do typed-kind `shortestPath` queries work and scale? | **Closed, with shape rules.** Typed (`[:A\|B*1..]`) and untyped (`[*1..]`) shortest paths both run; the typed ones took under 100 ms on a graph with 3,000 services attached to one Computer, including a pattern with all 107 traversable kinds from `extensions-edges`. Raw Cypher follows every edge kind, so typed lists are still required (below). Shape limits on 9.7.1/PostgreSQL: (a) `shortestPath` endpoints must be declared inline in the pattern with the filter in a trailing `WHERE`; endpoints bound by an earlier `MATCH` fail with HTTP 500 (`relation "s0" does not exist`). (b) A path to hosts that have a service is expressed with a pattern predicate in that `WHERE`: `AND (h)<-[:LLMHound_ObservedAt]-(:LLMHound_AIService)`. `EXISTS((...))` does not parse. (c) `length(p)` is unknown, and `ORDER BY size(relationships(p))` fails, so results cannot be ranked by path length. (d) A join followed by a **bounded** variable-length pattern (`*1..4`, not `shortestPath`) works and carries the service in the result. (e) An unbounded result is capped near 1,000 nodes (1,002 returned for 3,003 services), so queries must `LIMIT`. (f) A shared `AIService` label, array predicates (`any(x IN ...)`, `'x' IN s.anon_operations`) and `OPTIONAL MATCH` all work. | [04](04-saved-queries.md) is rewritten to these shapes; the path-ranking questions use the shortest-path API. |
+| R3 | Does `match_by: id` resolve AzureHound nodes? | **Closed.** An `AZVM` is stored with `objectid` = the full **upper-cased ARM resource ID** (`/SUBSCRIPTIONS/.../VIRTUALMACHINES/NAME`). An edge to that id resolves to the existing `AZVM`. A lower-cased ARM id also resolves (CE upper-cases match values). The VM's GUID (`vmId`) does **not** resolve: CE created a kindless stub. | An Azure mapping entry's `object_id` must be the ARM resource ID, never the VM GUID. Documented in [02](02-graph-model.md#attachment-to-existing-nodes). |
+| R4 | Are arrays replaced or merged on re-upload? Do edge properties update? | **Closed.** Arrays are **replaced wholesale** (a shorter array replaces a longer one; nothing stale remains) and stored **verbatim** (duplicates and order are kept). A re-uploaded edge stays one edge and its changed property updates; CE adds `lastseen`. | `anon_operations`, `exec_surface`, `secret_types` are safe to re-emit each scan. Emit them sorted and de-duplicated. |
+| R5 | Is a traversable extension edge honored by pathfinding? | **Closed (API).** With `only_traversable=true`, no path existed from a service to Domain Admins until a sourceless `LLMHound_CanExecuteOn` edge (service → Computer) was added; then the API returned service → Computer → tier-0 user → Domain Admins using `CanExecuteOn`, `HasSession`, `MemberOf`. The non-traversable `ObservedAt` is only followed when the filter is off. Edge direction matters (a path Computer → service does not exist). UI rendering was not checked. | Path-qualification rules (D7) are viable as designed. |
+| R6 | Does a stale `true` persist, and what is the refresh pattern? | **Closed.** A later payload that omits `has_exposed_secret` and `secret_types` leaves both set (`true` persists). An explicit `false` overwrites, but asserting absence violates the precision rule. A `null` value is rejected by CE at upload. A string comparison on an ISO-8601 timestamp works in Cypher. | `has_exposed_secret` stays true-or-unset; every query reads it with `secret_last_confirmed >= <cutoff>` (see [02](02-graph-model.md#property-contract)). |
+| R7 | What is the cheapest read-only pre-flight call? | **Closed.** One `POST /api/v2/graphs/cypher` call with `MATCH (n) WHERE n.objectid IN [...] RETURN n` (ids upper-cased) returns every id that exists with its `kinds`; a 501-id list took 66 ms. A stub from a bad edge has `kinds: []` and only `objectid` and `lastseen`, so **an id exists only if the returned node has at least one kind**. A query matching nothing returns HTTP 404, which is "zero rows". Lists are capped by the ~1,000-node result limit, so check in chunks of 500. | `upload` (D8) uses this call; stubs already in a graph are found with `MATCH (n) WHERE size(labels(n)) = 0 RETURN n`. |
+| R8 | What does cleanup remove? | **Closed.** `clear-database` with `deleteRelationships: ["LLMHound_ObservedAt"]` returns 204 and removes every edge of that kind (sourced and sourceless) **asynchronously**, leaving all nodes. `deleteSourceKinds: [<LLMHound id>]` after the two-step load removes the LLMHound nodes and the attachment edges and leaves native nodes intact; native count was unchanged. `deleteSourceKinds: [0]` (sourceless nodes) left native AD nodes and LLMHound nodes untouched in this lab, but its scope is not documented: do not use it. A kindless stub created by an edge to a missing endpoint is not owned by any source and survives source cleanup (seen in an earlier pass), which is why the pre-flight (R7) matters. | The normalizer cleans up with the source-kind delete or per-kind `deleteRelationships`; both must be polled to completion. |
+| R9 | Does `relationship_kinds` work with extension kinds? | **Closed.** `relationship_kinds=in:MemberOf,GenericAll,HasSession` and `nin:GenericAll` filter native-kind paths as expected (the `nin` case correctly found no path). `in:LLMHound_CanExecuteOn,HasSession,MemberOf` works with an extension kind. An unknown kind returns HTTP 400 (`invalid query parameter`). | Optional UI/API path filters are supported. |
+
+### Other behavior found while running R1–R9
+
+- **`GET /api/v2/extensions-edges` ignores its query parameters.** `is_traversable` and
+  `schemas` have no effect: it always returns all 148 kinds (107 traversable on the lab:
+  built-in AD/Azure plus extensions), each as `{name, is_traversable, schema_name,
+  is_builtin}`. Filter client-side. This is the authoritative source for generated
+  `PATH_KINDS`. `LLMHound_CanExecuteOn` is the only extension kind reported traversable.
+- **Ingest is slow and not always reliable right after a reset.** An upload started
+  while the pipeline is still settling after `clear-database` can end in job status `3`
+  (canceled) and a job can sit in status `6` (ingesting) with an idle pipeline. 3,000
+  sourceless edges onto one Computer took 60 s in one run and 320 s in another. The M3
+  client must poll with a timeout, verify the result, and retry.
+- **Aggregates return no nodes.** `RETURN count(s)` yields a successful response with zero
+  nodes, so counts must be read from the response data, not the node map.
+

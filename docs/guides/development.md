@@ -39,11 +39,13 @@ CI runs exactly these (plus `go build ./...`). A change is not done until all pa
 
 [`lab/`](../../lab/README.md) is a pinned BloodHound CE 9.7.1 + PostgreSQL 18 lab that binds to
 loopback only and reproduces the [M0 findings](../05-ce-compatibility.md). Use it to verify any
-claim about CE behavior and to close the open follow-ups R1–R9. The adapter gate (M3) re-runs it
+claim about CE behavior. `run-m0-checks.sh` covers Q1–Q10 and `run-r-checks.sh` covers the
+tier-0 follow-ups R1–R9 against the real extension schema. The adapter gate (M3) re-runs both
 against a candidate CE release.
 
 ```bash
 cd lab && ./scripts/lab-up.sh && ./scripts/run-m0-checks.sh   # see lab/README.md
+./scripts/run-r-checks.sh                                    # R1–R9, ~40 min (ingest is slow)
 ```
 
 ## Continuous integration

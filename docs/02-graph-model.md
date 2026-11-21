@@ -162,7 +162,9 @@ LLMHound does not attribute targets itself. Attribution is an input:
 - **Asset mapping file** (supplied by the normalization program): target (IP,
   FQDN, or `host:port`) → BloodHound `objectid` **and node kind**. The kind may
   be anything already in the graph: AD `Computer`, `AZVM`, an Entra device, and
-  so on. Each entry must point at a node that exists: the mapping is the
+  so on. For an Azure VM the `object_id` is the full ARM resource ID (CE stores
+  an `AZVM` under its upper-cased ARM id; the VM GUID does not resolve and would
+  create a stub, [R3](05-ce-compatibility.md#follow-up-answers-for-the-tier-0-redesign-r1r9)). Each entry must point at a node that exists: the mapping is the
   normalizer's assertion, and `upload` re-verifies it (below).
 - A mapped target gets `ObservedAt` (service → existing node) carrying
   `match_method = mapping`, `match_value`, and `confidence = asserted` (the
@@ -268,9 +270,10 @@ downstream LLM tooling.
 **CE constraints that shape this contract (M0 Q3, Q8):** properties must be
 strings, numbers, booleans, or homogeneous arrays of those (nested objects and
 mixed arrays are rejected at upload); node properties **merge** on re-upload and
-CE **never removes a stale property**. So every scan re-emits the full current
+CE **never removes a stale property**, but replaces arrays wholesale and updates
+changed edge properties ([R4](05-ce-compatibility.md#follow-up-answers-for-the-tier-0-redesign-r1r9)), so every scan re-emits the full current
 value of each status property (`auth_observed`, `anon_operations`,
-`exec_surface`, `coverage`, and so on). The one exception is a flag that is
+`exec_surface`, `coverage`, and so on), arrays sorted and de-duplicated (CE stores them verbatim). The one exception is a flag that is
 only ever `true` or unset, such as `has_exposed_secret`: a later scan cannot
 unset it, so it is always accompanied by `secret_last_confirmed` (UTC time of
 the most recent scan that re-detected it), and consumers must read the flag
@@ -386,9 +389,9 @@ depends on FQDN matching or `RunsOn`.
 Rules live in `extension/rules/` as data with their own tests. A rule that
 cannot be validated against the pinned CE does not ship. M0 Q4 confirmed that
 pathfinding honors `is_traversable: false` and that raw search still returns
-non-traversable edges; that an `is_traversable: true` rule edge is honored by
-`only_traversable` pathfinding is still open (R5 in
-[05-ce-compatibility.md](05-ce-compatibility.md)).
+non-traversable edges; R5 confirmed that an `is_traversable: true` extension edge is honored by
+`only_traversable` pathfinding through the API ([R5](05-ce-compatibility.md#follow-up-answers-for-the-tier-0-redesign-r1r9)); UI rendering is
+not yet checked.
 
 ## Source ownership and lifecycle
 

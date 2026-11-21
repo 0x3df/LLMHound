@@ -209,7 +209,7 @@ record() {
     line=$(jq -cn --arg id "$1" --arg verdict "$2" --argjson obs "$3" \
         --arg ts "$(date -u +%FT%TZ)" \
         '{id: $id, verdict: $verdict, observed: $obs, at: $ts}')
-    echo "$line" >> "$RESULTS_DIR/m0-checks.jsonl"
+    echo "$line" >> "${RESULTS_FILE:-$RESULTS_DIR/m0-checks.jsonl}"
     printf '%-8s %s\n' "$2" "$1"
 }
 
@@ -217,4 +217,107 @@ brief_http() {
     # Brief evidence string from an HTTP status + body.
     jq -cn --arg s "$(last_status)" --arg b "$(printf '%s' "$1" | tr -d '\n' | cut -c1-400)" \
         '{http_status: $s, body: $b}'
+}
+
+# ---------------------------------------------------------------------------
+# Shared check helpers (used by run-m0-checks.sh and run-r-checks.sh)
+# ---------------------------------------------------------------------------
+
+upload_out() {
+    # upload_out FILE CONTENT_TYPE NAME — full job flow with captured evidence.
+    # Prints JSON: {verdict, job_id, phase, http_status, body, tasks}
+    local file="$1" ctype="$2" name="$3" resp st jid tasks verdict
+    mkdir -p "$RUNTIME_DIR"
+    resp=$(call POST /api/v2/file-upload/start)
+    st=$(last_status)
+    if [ "$st" != "201" ]; then
+        jq -cn --arg v "rejected-http" --arg phase "start" --arg st "$st" \
+            --arg b "$(printf '%s' "$resp" | tr -d '\n' | cut -c1-400)" \
+            '{verdict:$v, phase:$phase, http_status:$st, body:$b}'
+        return
+    fi
+    jid=$(printf '%s' "$resp" | jq -r '.data.id')
+
+    resp=$(call_raw "$file" "$ctype" "/api/v2/file-upload/$jid" \
+        -H "X-File-Upload-Name: $name")
+    st=$(last_status)
+    if [ "$st" != "202" ]; then
+        jq -cn --arg v "rejected-http" --arg phase "file" --arg st "$st" \
+            --arg b "$(printf '%s' "$resp" | tr -d '\n' | cut -c1-400)" \
+            '{verdict:$v, phase:$phase, http_status:$st, body:$b}'
+        return
+    fi
+
+    resp=$(call POST "/api/v2/file-upload/$jid/end")
+    st=$(last_status)
+    case "$st" in
+        200|202) : ;;
+        *) jq -cn --arg v "rejected-http" --arg phase "end" --arg st "$st" \
+               --arg b "$(printf '%s' "$resp" | tr -d '\n' | cut -c1-400)" \
+               '{verdict:$v, phase:$phase, http_status:$st, body:$b}'; return ;;
+    esac
+
+    # Ingest is asynchronous; poll to a terminal job status.
+    local waited=0 jst
+    while [ "$waited" -lt 300 ]; do
+        jst=$(call GET /api/v2/file-upload | jq -r --arg id "$jid" '
+            first(.data[] | select(.id == ($id | tonumber))).status // "gone"')
+        case "$jst" in 2|3|8|gone) break ;; esac
+        sleep 2
+        waited=$((waited + 2))
+    done
+    verdict="accepted"
+    tasks=$(call GET "/api/v2/file-upload/$jid/completed-tasks" \
+        | jq -c '[.data[] | {file: .file_name, errors: [.errors[]? | (if type == "string" then .[0:300] else . end)]}]' 2>/dev/null)
+    jq -cn --arg v "$verdict" --arg j "$jid" --arg st "${jst:-?}" \
+        --argjson tasks "${tasks:-null}" \
+        '{verdict:$v, job_id:$j, job_status:$st, tasks:$tasks}'
+}
+
+cypher_or_fail() {
+    local q="$1"
+    local out
+    out=$(cypher "$q")
+    if [ "$(last_status)" != "200" ]; then
+        echo "CYPHER-ERROR $out"
+        return
+    fi
+    printf '%s' "$out"
+}
+
+# CE stores node ids UPPER-CASED at ingest (observed on v9.7.1), so all
+# lookups by objectid use the upper-cased form.
+up_id() { printf '%s' "$1" | tr '[:lower:]' '[:upper:]'; }
+
+node_exists() {
+    # node_exists ID → prints true/false
+    local id out
+    id=$(up_id "$1")
+    out=$(cypher_or_fail "MATCH (n {objectid: \"$id\"}) RETURN n")
+    if [ "$(printf '%s' "$out" | jq -r '.data.nodes | length // 0')" -gt 0 ] 2>/dev/null; then echo true; else echo false; fi
+}
+
+kinds_of() {
+    # kinds_of OBJECTID — kinds array of the node with that objectid
+    local id
+    id=$(up_id "$1")
+    cypher_or_fail "MATCH (n {objectid: \"$id\"}) RETURN n" \
+        | jq -c '[.data.nodes[] | .kinds]' 2>/dev/null
+}
+
+prop_of() {
+    # prop_of OBJECTID PROP — property value(s)
+    local id
+    id=$(up_id "$1")
+    cypher_or_fail "MATCH (n {objectid: \"$id\"}) RETURN n" \
+        | jq -c "[.data.nodes[] | .properties.$2]" 2>/dev/null
+}
+
+put_extension() {
+    # put_extension SCHEMA_FILE — prints HTTP status + body excerpt
+    local file="$1" body
+    body=$(call PUT /api/v2/extensions "$(cat "$file")")
+    jq -cn --arg st "$(last_status)" \
+        --arg b "$(printf '%s' "$body" | jq -c '.errors // {name: .data.name, version: .data.version, namespace: .data.namespace} // .' 2>/dev/null | cut -c1-500)" \
+        '{http_status:$st, body:$b}'
 }

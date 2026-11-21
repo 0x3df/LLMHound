@@ -40,6 +40,7 @@ cd lab
 ./scripts/lab-up.sh            # start lab (generates untracked .env with a random password)
 ./scripts/validate-fixtures.sh # offline fixture validation (no lab needed)
 ./scripts/run-m0-checks.sh     # run all M0 question checks (~25 min; ingest is asynchronous)
+./scripts/run-r-checks.sh      # tier-0 follow-ups R1–R9 with the real schema (~40 min)
 ./scripts/lab-down.sh          # stop and remove ONLY this lab's resources
 ```
 
@@ -87,12 +88,15 @@ lab/
 │   │   └── negative/                    # schemas expected to be REJECTED
 │   ├── payloads/                        # toy payloads per question (Q2..Q10)
 │   │   └── negative/                    # payloads expected to be rejected
-│   └── ad/ingest/                       # synthetic SharpHound v6 AD data (LAB.LOCAL)
+│   ├── ad/ingest/                       # synthetic SharpHound v6 AD data (LAB.LOCAL)
+│   ├── ad/paths/                        # attack-path scenario for R1–R9
+│   └── azure/                           # AzureHound-format VM
 └── scripts/
     ├── lib.sh                  # API helpers (login, cypher, upload jobs, evidence)
     ├── lab-up.sh / lab-down.sh # lifecycle; teardown is project-scoped
     ├── validate-fixtures.sh    # offline structural validation of all fixtures
-    └── run-m0-checks.sh        # the repeatable M0 check suite
+    ├── run-m0-checks.sh        # the repeatable M0 check suite (Q1–Q10)
+    └── run-r-checks.sh         # tier-0 follow-ups R1–R9 (real schema, attack-path fixtures)
 ```
 
 ## Notes

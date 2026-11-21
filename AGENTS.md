@@ -121,7 +121,7 @@ Add a row to [docs/07-decisions.md](docs/07-decisions.md); supersede, don't eras
 
 Do not duplicate it here: current status is the [implementation
 status](docs/02-graph-model.md#implementation-status) and the ordered backlog is the
-[roadmap](docs/06-roadmap.md). Known BloodHound unknowns (R1–R9) are listed in
+[roadmap](docs/06-roadmap.md). Measured BloodHound behavior, including the R1–R9 follow-ups, is in
 [docs/05-ce-compatibility.md](docs/05-ce-compatibility.md).
 
 ## Maintaining this file

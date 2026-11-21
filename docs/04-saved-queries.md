@@ -1,7 +1,9 @@
 # Starter saved queries
 
 > **Status: planned.** These queries ship in `extension/saved_searches/` in
-> SpecterOps Query Library format. Kind and property names follow the
+> SpecterOps Query Library format. Their shapes were validated on CE 9.7.1
+> ([R2](05-ce-compatibility.md#follow-up-answers-for-the-tier-0-redesign-r1r9));
+> running them against sample data is [D2](06-roadmap.md). Kind and property names follow the
 > [graph model](02-graph-model.md) and may be adjusted by the
 > [M0 findings](05-ce-compatibility.md). Every property a query filters on is a
 > flat graph property, not sidecar-only data.
@@ -20,14 +22,24 @@
   this project exists for. They are the acceptance spine for the property
   contract.
 - **`<PATH_KINDS>`.** Raw Cypher traverses every edge kind, regardless of any
-  non-traversable flag, so path patterns must name the AD/Azure kinds
-  explicitly and never use an untyped `[*1..]`. The shipped files are
-  generated from one maintained list. Representative AD kinds:
-  `MemberOf|HasSession|AdminTo|CanRDP|CanPSRemote|ExecuteDCOM|SQLAdmin|AllowedToDelegate|AllowedToAct|GenericAll|GenericWrite|WriteDacl|WriteOwner|Owns|AddMember|ForceChangePassword|AllExtendedRights`;
-  Azure kinds are appended. M0 validates the list, tier-0 tag semantics, and
-  performance on the pinned CE. If a rule from
-  [path qualification](02-graph-model.md#path-qualification-traversable-edges) is
-  enabled, `CanExecuteOn` is added to the list.
+  non-traversable flag, so path patterns must name kinds explicitly and never use
+  an untyped `[*1..]` (it would walk `ObservedAt` and other context edges).
+  The list is **generated, not hand-maintained**: `GET /api/v2/extensions-edges`
+  returns every kind with `is_traversable` and `schema_name`; filter it
+  client-side (its query parameters are ignored) to the traversable kinds
+  (107 on the pinned lab, AD and Azure included). A pattern with all 107 ran in
+  about 60 ms ([R2](05-ce-compatibility.md#follow-up-answers-for-the-tier-0-redesign-r1r9)).
+  `LLMHound_CanExecuteOn` appears in that list only when it is registered
+  traversable, i.e. when a [path-qualification](02-graph-model.md#path-qualification-traversable-edges)
+  rule is enabled. The lab fixture has no `AdminTo`, so do not hard-code any
+  specific AD edge.
+- **Query shapes that work on CE 9.7.1.** (R2) `shortestPath` endpoints must be
+  inline in the pattern with the filter in a trailing `WHERE`; endpoints bound by
+  an earlier `MATCH` fail with HTTP 500. To require a service on the target host,
+  use a pattern predicate in that `WHERE`. `length(p)` and
+  `size(relationships(p))` are unavailable, so ranking by path length is done with
+  the shortest-path API, one start and one end node at a time. Results are capped
+  near 1,000 nodes, so every query that can return many rows has a `LIMIT`.
 - **`AIService` label.** Carried by every concrete service kind, including
   `MCPServer` and `A2AAgent`. If M0 shows multi-label is unsupported, queries
   are generated with explicit kind checks.
@@ -35,8 +47,9 @@
   (`Computer`, `AZVM`, …); the `WHERE NOT h:NetworkEndpoint` filter excludes
   unmapped targets.
 - **Start sets.** `$start` is a node, owned principals, or Domain Users
-  (`objectid ENDS WITH '-513'`). Tier 0 is the CE tag
-  (`'admin_tier_0' IN n.system_tags`; verify in M0).
+  (`objectid ENDS WITH '-513'`). Tier 0 is the label
+  `Tag_Tier_Zero` ([R1](05-ce-compatibility.md#follow-up-answers-for-the-tier-0-redesign-r1r9);
+  `system_tags` is a string, so `IN n.system_tags` fails).
 - Access facts are properties: `anon_operations` is an array of check IDs that
   succeeded anonymously, using the collectors' real IDs (`mcp_initialize`,
   `mcp_tools_list`, `jupyter_contents`, `jupyter_sessions`, `ollama_tags`, ...).
@@ -47,33 +60,35 @@
 ### P1. Hosts running AI or MCP services that sit on an attack path
 
 ```cypher
-MATCH (s:AIService)-[:ObservedAt]->(h)
-WHERE NOT h:NetworkEndpoint
-MATCH (g:Group) WHERE g.objectid ENDS WITH '-513'
-MATCH p = shortestPath((g)-[:<PATH_KINDS>*1..]->(h))
-RETURN s, h, p
+MATCH p = shortestPath((g:Group)-[:<PATH_KINDS>*1..]->(h:Computer))
+WHERE g.objectid ENDS WITH '-513'
+  AND (h)<-[:ObservedAt]-(:AIService)
+RETURN p
 LIMIT 100
 ```
+
+`h:Computer` is the host kind; the generator emits one query per native host kind
+that mappings use (`AZVM`, ...). The path shows the route; the services on each
+host come from P4 or the entity panel (a `shortestPath` endpoint cannot also bind
+the service, see the shape rules above).
 
 ### P2. Shortest path from an asset to any AI host
 
 ```cypher
-MATCH (a {objectid: $start})
-MATCH (s:AIService)-[:ObservedAt]->(h)
-WHERE NOT h:NetworkEndpoint AND h <> a
-MATCH p = shortestPath((a)-[:<PATH_KINDS>*1..]->(h))
-RETURN s, h, p
-ORDER BY length(p)
+MATCH p = shortestPath((a {objectid: $start})-[:<PATH_KINDS>*1..]->(h:Computer))
+WHERE (h)<-[:ObservedAt]-(:AIService)
+RETURN p
 LIMIT 25
 ```
+
+To rank hosts by distance, run the Cypher above and then the shortest-path API
+(`/api/v2/graphs/shortest-path`) per host, or read the path lengths client-side.
 
 ### P3. AI hosts one or two hops from tier 0
 
 ```cypher
-MATCH (s:AIService)-[:ObservedAt]->(h)
-WHERE NOT h:NetworkEndpoint
-MATCH p = (h)-[:<PATH_KINDS>*1..2]->(t)
-WHERE 'admin_tier_0' IN t.system_tags
+MATCH (s:AIService)-[:ObservedAt]->(h:Computer)
+MATCH p = (h)-[:<PATH_KINDS>*1..2]->(t:Tag_Tier_Zero)
 RETURN s, h, p
 LIMIT 100
 ```
@@ -124,16 +139,20 @@ prioritizes review, it is not evidence of behavior.
 ### P8. AI hosts with an exposed secret, on a path
 
 ```cypher
-MATCH (s:AIService)-[:ObservedAt]->(h)
-WHERE NOT h:NetworkEndpoint AND s.has_exposed_secret = true
-MATCH (g:Group) WHERE g.objectid ENDS WITH '-513'
-MATCH p = shortestPath((g)-[:<PATH_KINDS>*1..]->(h))
+MATCH (s:AIService)-[:ObservedAt]->(h:Computer)
+WHERE s.has_exposed_secret = true AND s.secret_last_confirmed >= $cutoff
+MATCH p = (g:Group)-[:<PATH_KINDS>*1..4]->(h)
+WHERE g.objectid ENDS WITH '-513'
 RETURN s, h, p
 LIMIT 100
 ```
 
-`has_exposed_secret` is only ever `true` or unset (high-precision match). A
-result is a confirmed presence; a miss is not evidence of absence.
+`has_exposed_secret` is only ever `true` or unset (high-precision match), and CE
+never clears it ([R6](05-ce-compatibility.md#follow-up-answers-for-the-tier-0-redesign-r1r9)),
+so the query also requires a recent `secret_last_confirmed` (`$cutoff` is an
+ISO-8601 UTC string; string comparison works). A result is a confirmed presence;
+a miss is not evidence of absence. The path is bounded variable-length, not
+`shortestPath`, because the service is joined first.
 
 ## Inventory and posture
 

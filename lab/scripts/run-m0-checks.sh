@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # LLMHound M0 — repeatable live checks against the local pinned CE lab.
 #
-# Runs the question checks from docs/reference/ce-compatibility.md in order and
+# Runs the question checks from docs/05-ce-compatibility.md in order and
 # writes one JSON line per check to .runtime/results/m0-checks.jsonl plus a
 # human-readable log to .runtime/results/m0-log.txt.
 #

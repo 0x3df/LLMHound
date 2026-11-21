@@ -1,8 +1,8 @@
 # Checkpoint Journal Reference
 
 > **Status: M2a checkpoint journal implemented.** Companion to
-> [`docs/plans/2026-09-29-llmhound-design.md`](../plans/2026-09-29-llmhound-design.md)
-> and [`docs/reference/graph-model.md`](graph-model.md).
+> [design](../01-design.md)
+> and [graph model](../02-graph-model.md).
 > Implemented in `internal/checkpoint`.
 
 The checkpoint journal is an append-only JSON Lines stream (`.journal.jsonl`)
@@ -35,7 +35,7 @@ type Journal interface {
   Automatically records target progress according to the observation's coverage.
 - **`RecordTarget(TargetRecord)`**: records target lifecycle events (`started`, `completed`, `partial`, `failed`, `skipped`).
 - **`RecordNode(emitter.NodeItem)`**: records an individual OpenGraph node with flat validated properties.
-- **`RecordEdge(graph.Edge)`**: records an individual topology or access edge.
+- **`RecordEdge(graph.Edge)`**: records an individual topology or `ObservedAt` edge.
 - **`RecordEvidence(evidence.Record)`**: records an individual `.evidence.jsonl` sidecar entry.
 
 ## Wire Schema
@@ -76,7 +76,7 @@ rather than refreshing stale evidence as newly observed:
 - `ObservedAt`: preserved verbatim in UTC RFC3339 format.
 - `ScanID` and `EvidenceID`: preserved verbatim.
 - `Coverage` (`complete`, `partial`, `failed`, `truncated`) and `CoverageReason`: preserved verbatim.
-- `Vantage`: vantage identity is restored using the journal's configured scope and vantage key.
+- `DeploymentScope` and `VantageKey`: restored from the journal header; every observation and evidence record must match them.
 
 ## Deterministic Replay and Crash Recovery
 
@@ -85,9 +85,9 @@ rather than refreshing stale evidence as newly observed:
 - **Deterministic Ordering**: Nodes, edges, and evidence records are replayed in deterministic order
   with duplicate deduplication (by Node ID, Edge signature `kind:start:end`, and Evidence ID).
 - **Domain Validation**: Replayed nodes, edges, and references are reconstituted through domain constructors
-  (`graph.NewNode`, `graph.NewObservedAtEdge`, `graph.NewAccessEdge`, `graph.NewTopologyEdge`),
+  (`graph.NewNode`, `graph.NewObservedAtEdge`, `graph.NewTopologyEdge`),
   validating kind transitions and non-traversability rules.
-- **Native Computer Separation**: Replayed edges touching native AD `Computer` nodes preserve
+- **Native Node Separation**: Replayed edges touching existing native nodes (any kind) preserve
   `TouchesNative() == true` and empty `SourceKind()`, ensuring safe segregation between owned and linking payloads.
 - **Completion Semantics**: A surface counts as completed only when its record has status `completed`
   and a valid observation with `complete` coverage whose surface matches the record. `partial`/`truncated`

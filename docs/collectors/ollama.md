@@ -1,9 +1,9 @@
 # Ollama Collector Reference
 
 > **Status: M2a Ollama collector implemented.** Companion to
-> [`docs/plans/2026-09-29-llmhound-design.md`](../plans/2026-09-29-llmhound-design.md),
-> [`docs/reference/collector-capabilities.md`](collector-capabilities.md), and
-> [`docs/reference/graph-model.md`](graph-model.md).
+> [design](../01-design.md),
+> [capability matrix](../03-collector-capabilities.md), and
+> [graph model](../02-graph-model.md).
 > Implemented in `internal/collectors/ollama` and `internal/transport`.
 
 The Ollama collector remotely enumerates Ollama LLM inference server instances
@@ -45,17 +45,19 @@ graph/evidence output, and checkpoint journal contracts.
 - **Nodes:**
   - `OllamaInstance` carrying `AIService` umbrella label, with properties `endpoint_host`,
     `endpoint_port`, `product`, `vendor`, `software_version`, `software_version_raw`,
-    `tls_verification`, `tls_fingerprint`.
+    `tls_verification`, `tls_fingerprint`, `vantage_key`, and the flat access properties
+    `auth_observed` and `anon_operations`.
   - `AIModel` nodes for each enumerated model, scoped to the owning service ID,
     with properties `name`, `digest`, `size`, `format`, `family`, `parameter_size`,
     `quantization_level`, `parent_model`, `modified_at`, plus `running`/`size_vram`
     from `ollama_ps` and `license`/`provenance_source` from opt-in `ollama_show`.
-  - Fallback `NetworkEndpoint` when target does not correlate to an existing AD `Computer`.
+  - Fallback `NetworkEndpoint` when the asset mapping does not name an existing BloodHound node for the target.
 - **Edges:**
-  - `UnauthenticatedAccess` (`CollectionVantage` → `OllamaInstance`) upon validated anonymous
-    `ollama_tags` enumeration success.
   - `ProvidesModel` (`OllamaInstance` → `AIModel`) for each model in catalog.
-  - `ObservedAt` (`OllamaInstance` → `Computer` or `NetworkEndpoint`).
+  - `ObservedAt` (`OllamaInstance` → the existing native node the mapping names, or `NetworkEndpoint`).
+- **Anonymous access** is properties on the `OllamaInstance`, not an edge: `anon_operations`
+  lists `ollama_tags` when the catalog listing succeeds anonymously, and `auth_observed` is
+  `anonymous`, `denied` (any 401/403), `mixed`, or `unknown`.
 - **Sidecar Evidence:**
   - Check result records for each operation (`RecordCheckResult`).
   - Runtime fingerprint record (`RecordFingerprint`).

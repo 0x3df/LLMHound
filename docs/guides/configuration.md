@@ -5,8 +5,10 @@ replacements, policy validation, offline `targets` preparation, offline
 `plan` (targets × allowlisted checks, no traffic), and `scan` for Jupyter / MCP /
 Ollama through `internal/scanner` (checkpoint journal, OpenGraph payload, evidence
 sidecar). `upload` and resume remain honest not-implemented stubs (M3). Sensitive
-content opt-ins default false (metadata-only / read-only). Live CLI vs package
-coverage is recorded in [m2a-integration.md](m2a-integration.md).
+content opt-ins default false (metadata-only / read-only today; the target
+default-on, bounded content tier is specified in the
+[graph model](../02-graph-model.md#content-and-secrets) and not yet built). Live
+CLI vs package coverage is recorded in [scan coverage](../internals/scan-coverage.md).
 
 ## Build and use
 
@@ -112,7 +114,7 @@ sidecar is emitted.
   Flags: `--output-dir`, `--prefix`, `--discovery-file` (optional JSON fingerprint
   port/path overrides that inherit builtin matchers). Only surfaces present in
   the active definitions are scanned, so `plan` and `scan` agree. See
-  [m2a-integration.md](m2a-integration.md) for probe and coverage behavior.
+  [scan coverage](../internals/scan-coverage.md) for probe and coverage behavior.
   Known limitation: only the Jupyter, MCP, and Ollama surfaces have collectors
   in M2a; a custom `--discovery-file` entry for any other surface is honored
   by `plan` (listed with no checks) and probed by `scan`, but no collector can
@@ -148,8 +150,8 @@ DNS connections or redirects.
 
 ### Collection and correlation policy
 
-These values are parsed/validated. Scan collectors apply TLS, User-Agent, opt-in,
-and mapping-file / AD-suffix correlation where implemented:
+These values are parsed/validated. Scan collectors apply TLS, User-Agent, the
+opt-ins, and mapping-file attachment where implemented:
 
 - `insecure` (`--insecure`): default false; explicit TLS verification bypass.
   Verification failure must never silently retry unverified.
@@ -159,12 +161,31 @@ and mapping-file / AD-suffix correlation where implemented:
   `.workspace_content`: all default false; flags `--resource-content`,
   `--prompts`, `--configuration-content`, `--workspace-content`. Content reads
   still require allowlisted semantics, authorization, bounds, and redaction.
-- `correlation.mapping_file` (`--mapping-file`), `.ad_domain_suffixes`
-  (`--ad-domain-suffix`), `.reverse_dns` (`--reverse-dns`, default false), and
-  `.ce_lookup` (`--ce-lookup`, default false). Suffixes must be exact ASCII FQDNs,
-  not IPs/wildcards. Scan loads mapping files and applies AD-suffix matching via
-  `internal/correlate`. Reverse DNS and CE lookup remain reserved (no PTR or CE
-  queries in M2a). See [graph-model.md](graph-model.md).
+- `correlation.mapping_file` (`--mapping-file`): the asset mapping supplied by the
+  normalization program, which maps a target to an **existing BloodHound node
+  (objectid and kind)**. Without it, every service attaches to a
+  `NetworkEndpoint` for the normalizer to attribute later. LLMHound performs no
+  DNS, suffix matching, or CE lookups; attribution is not its job. See
+  [Mapping file](#mapping-file) and
+  [attachment](../02-graph-model.md#attachment-to-existing-nodes).
+
+#### Mapping file
+
+JSON or line-delimited, at most 1 MiB, strictly validated; conflicting entries for
+one target are rejected. Targets are canonicalized like scan targets (DNS names
+lower-cased, one trailing dot removed). `kind` is any native BloodHound kind
+already in the graph (`Computer`, `AZVM`, ...) and defaults to `Computer`.
+LLMHound's own kinds, the `LLMHound_` namespace, and malformed names are rejected.
+
+```json
+[{"target": "ai1.corp.example", "object_id": "S-1-5-21-...-1103", "kind": "Computer"},
+ {"target": "10.1.2.3",         "object_id": "azure-vm-object-id",  "kind": "AZVM"}]
+```
+
+Also accepted: `{"ai1.corp.example": "S-1-5-21-..."}` (kind defaults to `Computer`) and
+lines of `target,object_id[,kind]` with `#` comments. An entry is the normalizer's
+assertion; the destination's existence is re-verified at upload (M3), because an
+edge to a missing objectid makes CE create an empty stub node.
 
 ## Verification
 
@@ -179,4 +200,4 @@ YAML types, required keys and policy ranges, normalization, bounded expansion,
 file limits, deterministic exclusions, help/errors, offline plan (no DNS /
 loopback connections), and CLI scan against disposable loopback fixtures for
 Jupyter/MCP/Ollama. No production network or service credentials are needed.
-See [m2a-integration.md](m2a-integration.md) for live vs unit coverage.
+See [scan coverage](../internals/scan-coverage.md) for live vs unit coverage.

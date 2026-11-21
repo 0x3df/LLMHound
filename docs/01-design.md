@@ -1,11 +1,13 @@
 # LLMHound — Design
 
-**Date:** 2026-09-29 (revised 2026-11-20)
-**Status:** Target design, reframed around tier-0 pathing, exact-objectid
-attachment, a flat property contract, and path-qualification rules. M0, M1 and
-M2a are implemented on `QA` against the earlier model; where the code differs
-from this document, see the
-[implementation delta](../reference/graph-model.md#implementation-delta).
+**Revised:** 2026-11-20 · **Reading order:** 2 of 8 (see [docs index](README.md))
+
+Architecture, scope, and behavior. This is the *what and how*; the *why* is in the
+[executive summary](00-executive-summary.md), the graph contract is in the
+[graph model](02-graph-model.md), per-surface checks are in the
+[capability matrix](03-collector-capabilities.md), and milestones and status are in
+the [roadmap](06-roadmap.md). Where this document describes something not yet
+built, the [implementation status](02-graph-model.md#implementation-status) says so.
 
 ## Purpose
 
@@ -29,7 +31,7 @@ answer. Its acceptance questions:
 6. Which gateways or UIs depend on backends on other hosts?
 7. Which AI services are not yet attributed to a known asset?
 
-The [saved queries](../reference/saved-queries.md) implement these, and they
+The [saved queries](04-saved-queries.md) implement these, and they
 decide which properties must be flat and queryable.
 
 ## Scope
@@ -41,14 +43,14 @@ decide which properties must be flat and queryable.
   supplied asset mapping; a `NetworkEndpoint` fallback for unmapped targets
 - Maximum useful metadata within that policy: identity and version, auth
   posture, execution surface, dependencies, inventory, TLS (the
-  [min-max principle](../reference/graph-model.md#property-contract))
+  [min-max principle](02-graph-model.md#property-contract))
 - Content tier collected by default when one anonymous allowlisted read returns
   it (system prompts, configuration, file and flow bodies, bounded samples),
   plus precision-only detection of exposed secrets, recorded as a boolean with
-  no value stored ([Content and secrets](../reference/graph-model.md#content-and-secrets))
+  no value stored ([Content and secrets](02-graph-model.md#content-and-secrets))
 - OpenGraph payload and an evidence sidecar per scan
 - Opt-in, rule-gated traversable edges for cases that clear the
-  [path-qualification bar](../reference/graph-model.md#path-qualification-traversable-edges)
+  [path-qualification bar](02-graph-model.md#path-qualification-traversable-edges)
 - Checkpoint/resume, CE API upload, saved-query import
 
 ### Out of scope (v1)
@@ -59,7 +61,7 @@ decide which properties must be flat and queryable.
 - Target attribution, reverse DNS or FQDN guessing, CE-side lookups, stale-data
   reconciliation and cleanup — owned by the separate normalization program
 - Active exploit validation, tool invocation, inference requests
-  (see [`.future`](.future/future-potential.md))
+  (see [`.future`](future-ideas.md))
 - BloodHound Enterprise-only features
 - Change comparisons / `llmhound diff` (deferred)
 
@@ -115,14 +117,14 @@ targets (CIDR ranges / targets-file, minus exclude)
    HTTP path fingerprinting. Ports, paths, and matchers are data-driven
    definitions embedded in the binary and overridable by file.
 3. **Enumeration** — per-surface allowlisted checks from the
-   [capability matrix](../reference/collector-capabilities.md); each check
+   [capability matrix](03-collector-capabilities.md); each check
    records outcome and reason, separately from surface coverage.
 4. **Content and secrets** — where one allowlisted anonymous read returns
    existing content, read it within byte/item bounds into the restricted
    content file; run the high-precision secret detectors and keep only a
-   presence flag and type ([rules](../reference/graph-model.md#content-and-secrets)).
+   presence flag and type ([rules](02-graph-model.md#content-and-secrets)).
 5. **Attachment** — mapping-file lookup, per the
-   [attachment contract](../reference/graph-model.md#attachment-to-existing-nodes).
+   [attachment contract](02-graph-model.md#attachment-to-existing-nodes).
 6. **Graph assembly** — observations become nodes/edges with deterministic
    identity and the flat property contract, including auth posture and
    execution-surface classification.
@@ -135,39 +137,41 @@ targets (CIDR ranges / targets-file, minus exclude)
 
 ```
 LLMHound/
-├── cmd/llmhound/            # CLI entrypoint (cobra)
+├── README.md                 # human overview
+├── AGENTS.md                 # agent operating manual (CLAUDE.md imports it)
+├── LICENSE                   # Apache-2.0
+├── llmhound.example.yaml     # annotated example configuration
+├── cmd/llmhound/             # CLI entrypoint (cobra): targets, plan, scan, upload (stub)
 ├── internal/
-│   ├── config/              # llmhound.yaml loading, flag overrides, validation
-│   ├── targets/             # CIDR/file parsing, dedup, exclude
-│   ├── discovery/           # port probes + path fingerprints → service typing
-│   │   └── fingerprints/    # embedded, overridable fingerprint definitions
-│   ├── collectors/          # one package per AI surface (original clients)
-│   ├── attach/              # mapping file → existing node / NetworkEndpoint
-│   ├── classify/            # auth posture, execution surface, dependencies
-│   ├── content/             # bounded content-tier reads, content file writer
-│   ├── secrets/             # high-precision detectors + TP/negative corpora
-│   ├── rules/               # path-qualification rule engine (disabled by default)
-│   ├── evidence/            # per-check results, evidence sidecar writer
-│   ├── graph/               # node/edge model, identity, opengraph emitter
-│   ├── checkpoint/          # scan journal + resume
-│   ├── bloodhound/          # CE API client (login/schema/upload/queries)
-│   └── worker/              # bounded concurrency, rate limiting
+│   ├── config/               # llmhound.yaml loading, flag overrides, validation
+│   ├── targets/              # CIDR/file parsing, dedup, exclude
+│   ├── discovery/            # data-driven port probes + path fingerprints → service typing
+│   ├── transport/            # shared bounded, TLS-aware HTTP client
+│   ├── collectors/           # one package per surface: jupyter, mcp, ollama (more in M2b/M2c)
+│   ├── correlate/            # asset mapping → existing native node, else NetworkEndpoint
+│   ├── graph/                # identity, kinds, observations, edges, access summary
+│   ├── evidence/             # per-check results, evidence sidecar records and writer
+│   ├── emitter/              # OpenGraph base + linking payloads, evidence sidecar
+│   ├── checkpoint/           # scan journal + deterministic replay
+│   └── scanner/              # orchestration: discovery → collectors → journal → emission
 ├── extension/
-│   ├── schema.json          # OpenGraph extension definition schema
-│   ├── rules/               # path-qualification rule definitions + tests
-│   └── saved_searches/      # starter Cypher queries (Query Library format)
-├── docs/
-├── LICENSE                  # Apache-2.0
-└── README.md
+│   └── schema.json           # OpenGraph extension definition (LLMHound_* kinds)
+├── lab/                      # pinned BloodHound CE lab + M0 compatibility checks
+├── docs/                     # numbered core docs + guides/, collectors/, internals/
+└── legacy/                   # retired docs and code, kept for history (not built)
 ```
+
+Planned, not yet present: `internal/content` and `internal/secrets` (content tier and
+high-precision detectors), `internal/rules` and `extension/rules` (path-qualification),
+`internal/bloodhound` (CE API client, M3), and `extension/saved_searches`.
 
 ## Graph model
 
 The graph model is specified in
-[`graph-model.md`](../reference/graph-model.md): node and edge kinds, identity,
+[`graph-model.md`](02-graph-model.md): node and edge kinds, identity,
 attachment, the flat property contract, coverage, content and secrets, path
 qualification, and acceptance checks. Per-surface checks and outcomes are in
-[`collector-capabilities.md`](../reference/collector-capabilities.md). Key
+[`collector-capabilities.md`](03-collector-capabilities.md). Key
 design points:
 
 - Source identifier and `source_kind` are `LLMHound`; kinds use clean names,
@@ -258,7 +262,7 @@ remains available.
   service IDs unchanged by mapping, no native nodes emitted.
 - **Identity, semantics, property contract, versions, content and secrets,
   and path qualification:** the checks in
-  [graph model → acceptance](../reference/graph-model.md#implementation-acceptance-checks).
+  [graph model → acceptance](02-graph-model.md#implementation-acceptance-checks).
 - **Matrix contract:** fixtures for every allowlisted check across every
   surface (available, denied, demonstrably unsupported, ambiguous 404,
   malformed, transport-failed, skipped), asserting outcome and reason apart
@@ -281,46 +285,4 @@ remains available.
 
 ## Milestones
 
-0. **M0 — CE compatibility spike (done):** pinned CE 9.7.1 + PostgreSQL 18.6
-   lab (`lab/`) with toy extension and payloads; answers recorded in
-   [`ce-compatibility.md`](../reference/ce-compatibility.md). Key results: kinds
-   need the `LLMHound_` prefix; arrays of primitives are accepted; pathfinding
-   honors non-traversable edges; a `source_kind` payload tags referenced
-   native nodes (hence the two-step upload); missing endpoints create stub
-   nodes; CE merges properties and never removes stale ones. Follow-ups
-   R1–R9 from the redesign (tier-0 tags, typed-kind path performance,
-   AzureHound node resolution, array overwrite, traversable rule edges) are
-   open.
-1. **M1 — Skeleton + graph + emitter (implemented, earlier model):** CLI,
-   `llmhound.yaml` loader, targets, graph identity, emitter + sidecar, schema,
-   golden tests. Remaining for the redesign: mapping-file-only attachment to any
-   native kind, flat property contract, content-tier bounds and content-file
-   writer, secret-detector framework.
-2. **M2a — Vertical slice (implemented):** discovery with data-driven
-   fingerprints, checkpoint journal, `llmhound plan`/`scan`, and MCP, Ollama,
-   Jupyter collectors to payload. Remaining for the redesign: the first secret
-   detectors (each with a zero-false-positive corpus) and headline queries P1,
-   P2, and P6 working on sample data.
-3. **M2b — Remaining core surfaces:** A2A, vLLM, LiteLLM, Qdrant, MLflow, Open
-   WebUI, LangServe.
-4. **M2c — Long tail:** `OpenAICompatibleEndpoint` (used whenever a specific
-   product cannot be proven), Ray dashboard, Langflow, Flowise, ChromaDB.
-
-   Every M2 surface is accepted under the
-   [capability matrix](../reference/collector-capabilities.md): per-check
-   fixtures, honest version unknowns, separate coverage, auth and
-   execution-surface classification, TLS enforcement, authorized redirects, and
-   bounded content-tier reads and the secret-detector rules. The matrix,
-   collectors, and tests must agree.
-5. **M2d — Path-qualification rules:** the rule engine plus the first rules
-   that clear the bar (Jupyter auth disabled is the leading candidate; Ray and
-   Langflow follow), each with documentation references, version ranges,
-   fixtures, and fail-closed tests. If M0 shows rule-enabled traversal cannot
-   be verified, this milestone does not ship.
-6. **M3 — Resume + upload:** resume, CE API client with two-step upload and
-   existence pre-flight, saved queries, end-to-end against a CE instance, and
-   the adapter validation gate re-running `lab/scripts/run-m0-checks.sh`
-   against the candidate CE version/schema.
-7. **M4 — Credentials (future):** authenticated enumeration and richer evidence.
-8. **M5 — Library listing (future, secondary):** README polish, node/edge
-   description docs, submission to the BloodHound docs repo.
+Milestones, status, and the development backlog live in the [roadmap](06-roadmap.md).

@@ -1,13 +1,13 @@
 # LLMHound graph model
 
-> **Status: target design, partly implemented.** Companion to the
-> [design plan](../plans/2026-09-29-llmhound-design.md). M0 (CE 9.7.1 spike),
-> M1 (graph, identity, emitter, config, `extension/schema.json`) and the M2a
-> collectors are implemented on `QA`, but they follow the **earlier model**
-> (`CollectionVantage`, access edges, suffix correlation). This document
-> describes the target; the [Implementation delta](#implementation-delta) lists
-> exactly where the code differs. CE behavior is recorded in
-> [ce-compatibility.md](ce-compatibility.md).
+> **Status: implemented core, specified extensions.** Companion to the
+> [design](01-design.md). The graph, identity, mapping-file attachment, flat
+> access properties, emitter, and the Jupyter, MCP, and Ollama collectors are
+> implemented and tested. The content tier, secret detection, the full property
+> contract, path-qualification rules, and the two-step upload are specified here
+> but not built; the [Implementation status](#implementation-status) table lists
+> exactly which. CE behavior is recorded in
+> [05-ce-compatibility.md](05-ce-compatibility.md).
 
 This is the **canonical home** for node/edge kinds, identity, attachment to
 existing nodes, the flat property contract, and the bar for traversable edges.
@@ -165,9 +165,10 @@ LLMHound does not attribute targets itself. Attribution is an input:
   so on. Each entry must point at a node that exists: the mapping is the
   normalizer's assertion, and `upload` re-verifies it (below).
 - A mapped target gets `ObservedAt` (service → existing node) carrying
-  `match_method = mapping_file`, `match_value`, and `mapping_source`
-  (a mapping-file revision or ID supplied with the file). No `NetworkEndpoint`
-  is created.
+  `match_method = mapping`, `match_value`, and `confidence = asserted` (the
+  mapping is the normalizer's assertion; `mapping_source`, a revision or ID
+  supplied with the file, is specified but not yet recorded). No
+  `NetworkEndpoint` is created.
 - An unmapped target gets `ObservedAt` → `NetworkEndpoint`, plus the reason in
   the evidence sidecar. A target mapped to several objectids is treated as
   unmapped, with the candidates recorded; LLMHound never picks one.
@@ -175,8 +176,8 @@ LLMHound does not attribute targets itself. Attribution is an input:
   Service objectids never depend on it, native BloodHound IDs are never
   overwritten, and LLMHound never emits or modifies nodes of native kinds.
 - No suffix matching, reverse DNS, or CE-side attribution in LLMHound; those
-  belong to the normalizer. (Suffix matching exists in the M1 code; see the
-  [delta](#implementation-delta).)
+  belong to the normalizer. (Earlier versions matched AD suffixes against a
+  supplied inventory; that code is retired to [`legacy/`](../legacy/README.md).)
 - **Why existence matters (M0 Q5/Q6):** an edge to a missing `match_by: id`
   endpoint makes CE create an empty, kindless **stub node**, and a property
   match with zero or several hits is silently dropped. So an attachment edge is
@@ -220,7 +221,7 @@ property filters and avoids edge-multiplicity assumptions.
 ## Property contract
 
 Properties are flat and queryable; they are driven by the
-[saved queries](saved-queries.md) and by the tier-0 pathing questions. Bounded
+[saved queries](04-saved-queries.md) and by the tier-0 pathing questions. Bounded
 structured evidence that graph properties cannot represent goes to the
 `.evidence.jsonl` sidecar, referenced by `evidence_ids`.
 
@@ -285,7 +286,7 @@ versions stay distinct; a proxy banner is not a backend version.
 Each check records `check_id`, target, scan ID, vantage key, operation,
 sanitized source, UTC time, outcome (`success`, `denied`, `unsupported`,
 `failed`, `skipped`), reason, and evidence references; definitions and the 404
-rule are in the [capability matrix](collector-capabilities.md#per-check-result-contract).
+rule are in the [capability matrix](03-collector-capabilities.md#per-check-result-contract).
 Negative and unknown results live in the sidecar, not in positive properties.
 
 ### Coverage
@@ -387,7 +388,7 @@ cannot be validated against the pinned CE does not ship. M0 Q4 confirmed that
 pathfinding honors `is_traversable: false` and that raw search still returns
 non-traversable edges; that an `is_traversable: true` rule edge is honored by
 `only_traversable` pathfinding is still open (R5 in
-[ce-compatibility.md](ce-compatibility.md)).
+[05-ce-compatibility.md](05-ce-compatibility.md)).
 
 ## Source ownership and lifecycle
 
@@ -400,28 +401,34 @@ Attribution, reconciliation, staleness, and cleanup belong to the
 normalization program. LLMHound never emits or modifies native-kind nodes.
 Resume retains original observation timestamps.
 
-## Implementation delta
+## Implementation status
 
-What is on `QA` today versus this target design. Docs that describe the
-implemented behavior as it stands, and remain accurate for the code, are
-[configuration](configuration.md), [m2a-integration](m2a-integration.md),
-[checkpoint-journal](checkpoint-journal.md),
-[jupyter-collector](jupyter-collector.md) and
-[ollama-collector](ollama-collector.md).
+What is built versus specified in this document. Everything in the first table
+is implemented and covered by tests; the second table is the development
+backlog, in the order the [roadmap](06-roadmap.md) schedules it.
 
-| Area | Implemented on `QA` | Target |
-|---|---|---|
-| Access evidence | `CollectionVantage` node plus `UnauthenticatedAccess` / `PublicAccess` edges (`internal/graph`, emitter, schema) | Remove; flat `anon_operations` / `auth_observed` / `vantage_key` properties |
-| Attachment target kind | `Computer` only | Any existing native kind (`AZVM`, Entra devices, ...) |
-| Correlation | Mapping file plus AD-suffix property match against a caller-supplied verified inventory; `ad_domain_suffixes`, `reverse_dns`, `ce_lookup` config fields | Mapping file only; suffix, reverse DNS, and CE lookup superseded by the normalizer. Upload pre-flight verifies existence |
-| Sensitive content | `opt_ins.{resource_content,prompts,configuration_content,workspace_content}`, default false; no content reads | Content tier on by default and bounded (`content.*`), restricted `.content.jsonl`, `secrets` detector toggles |
-| Secret detection | None | High-precision detectors, `has_exposed_secret` / `secret_types` / `secret_last_confirmed` |
-| Flat property contract | The properties emitted today | The full [property contract](#property-contract) |
-| Traversability | `EdgeKind.IsTraversable()` is always false | Rule-gated `CanExecuteOn` (M2d) |
-| Upload | `upload` is a not-implemented stub (M3); the emitter already writes a sourceless linking payload | Two-step upload with existence pre-flight |
+**Implemented**
 
-Closing the delta is a code change; until then, trust the code for what a
-build does and this document for what it should do.
+| Area | Where |
+|---|---|
+| Scoped identity, canonical endpoints, kind mapping (`LLMHound_<Kind>`), all-non-traversable edges | `internal/graph` |
+| Mapping-file attachment to an existing native node of any kind; `NetworkEndpoint` fallback; nil resolver is an empty mapping | `internal/correlate` |
+| Anonymous access as flat properties (`auth_observed`, `anon_operations`, `vantage_key`) derived from operation evidence | `internal/graph/access.go`, collectors |
+| Base payload (`source_kind`) and sourceless linking payload; evidence sidecar | `internal/emitter`, `internal/evidence` |
+| Checkpoint journal and deterministic replay | `internal/checkpoint` |
+| Jupyter, MCP, and Ollama collectors; discovery; `plan` and `scan` | `internal/collectors`, `internal/discovery`, `internal/scanner` |
+
+**Specified, not yet built**
+
+| Area | Specified behavior |
+|---|---|
+| Content tier | Default-on, bounded reads of prompts, config, file and flow bodies into a restricted `.content.jsonl`; replaces today's `opt_ins` gate |
+| Secret detection | High-precision detectors and `has_exposed_secret` / `secret_types` / `secret_last_confirmed` |
+| Full property contract | The complete [property contract](#property-contract); collectors emit a subset today (`exec_surface`, `auth_advertised`, TLS fields, etc. are not all present) |
+| Path qualification | Rule-gated, opt-in `CanExecuteOn` edges (M2d); `EdgeKind.IsTraversable()` is always false today |
+| Upload | Two-step upload with an existence pre-flight (M3); `upload` is a not-implemented stub, though the emitter already splits base and linking payloads |
+| Mapping provenance | `mapping_source` on attachment edges |
+| Surfaces | A2A, vLLM, LiteLLM, Qdrant, MLflow, Open WebUI, LangServe (M2b); long tail (M2c) |
 
 ## Implementation acceptance checks
 

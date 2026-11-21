@@ -335,6 +335,10 @@ the older single-step form; on 9.7.1 the flow above is what actually works.
      Works only for exact single matches (Q6): the collector must resolve
      ambiguity and existence itself; zero/ambiguous matches fall back to
      `NetworkEndpoint` (CE drops such edges silently).
+     **Superseded:** LLMHound no longer emits property matches. Attribution
+     belongs to the normalizer and every attachment is an objectid match
+     (see [02-graph-model.md](02-graph-model.md#attachment-to-existing-nodes)).
+     This item records what CE supports, not what LLMHound does.
    - Endpoint existence must be verified before emission — missing endpoints
      materialize empty kindless stub nodes (Q5 caveat).
 4. **Upload pipeline (per scan):** two-step — (1) LLMHound-owned subgraph
@@ -384,7 +388,7 @@ the older single-step form; on 9.7.1 the flow above is what actually works.
 
 ## Open questions raised by the tier-0 redesign
 
-The 2026-11-20 redesign (see [graph model](graph-model.md)) depends on a few
+The 2026-11-20 redesign (see [graph model](02-graph-model.md)) depends on a few
 behaviors M0 did not test. Each needs a lab check (extend
 `lab/scripts/run-m0-checks.sh`) before the feature that relies on it ships.
 M0's answers above already confirmed: arrays of primitives are accepted (Q3),

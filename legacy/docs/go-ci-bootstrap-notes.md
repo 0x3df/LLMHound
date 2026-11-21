@@ -1,3 +1,5 @@
+> **ARCHIVED.** Bootstrap-era CI notes, written when the repository had no Go module and while two product PRs were open. The module exists and those PRs have merged, so the bootstrap and PR-specific sections no longer apply. The current guide is [`docs/guides/development.md`](../../docs/guides/development.md); see [`legacy/README.md`](../README.md).
+
 # Go CI for QA pull requests
 
 [`.github/workflows/go.yml`](../../.github/workflows/go.yml) runs on normal

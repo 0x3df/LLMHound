@@ -1,6 +1,6 @@
-# M2a integration — live vs unit coverage
+# Scan coverage — live CLI vs unit tests
 
-Companion to the [design](../plans/2026-09-29-llmhound-design.md) M2a vertical
+Companion to the [design](../01-design.md) M2a vertical
 slice. Records which acceptance behaviors were exercised through the product
 CLI against disposable loopback fixtures versus covered only by package unit
 tests. Library-only collector tests do **not** prove CLI integration.
@@ -14,7 +14,7 @@ tests. Library-only collector tests do **not** prove CLI integration.
 | Offline `llmhound plan` (targets × allowlisted checks) | `cmd/llmhound`, `internal/scanner` |
 | `llmhound scan` orchestration → journal → OpenGraph + evidence | `cmd/llmhound`, `internal/scanner` |
 | Jupyter / MCP / Ollama collectors (anonymous, read-only defaults) | `internal/collectors/{jupyter,mcp,ollama}` |
-| Mapping-file Computer correlation + source_kind-free linking payload | `internal/correlate`, `internal/emitter`, scanner tests |
+| Mapping-file attachment to an existing native node (any kind) + source_kind-free linking payload | `internal/correlate`, `internal/emitter`, scanner tests |
 
 ## Driven live (product CLI + loopback fixtures)
 
@@ -42,7 +42,7 @@ Exercised by `cmd/llmhound` tests (`TestScanCLIEndToEndLoopbackFixtures`,
   `cmd/llmhound execute`)
 - Unreachable-port failed coverage and denied `partial` coverage reasons
   (`TestScanner_MixedTargetsAndHonestCoverage`)
-- AD-suffix / CE-API correlation paths (CE lookup reserved for M3)
+- Attachment of a mapped target to a native node of a non-`Computer` kind (library path)
 
 ## Remaining capability gaps (out of this bounded task)
 

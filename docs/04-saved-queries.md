@@ -2,15 +2,15 @@
 
 > **Status: planned.** These queries ship in `extension/saved_searches/` in
 > SpecterOps Query Library format. Kind and property names follow the
-> [graph model](graph-model.md) and may be adjusted by the
-> [M0 findings](ce-compatibility.md). Every property a query filters on is a
+> [graph model](02-graph-model.md) and may be adjusted by the
+> [M0 findings](05-ce-compatibility.md). Every property a query filters on is a
 > flat graph property, not sidecar-only data.
 
 ## Conventions
 
 - **Emitted kind names.** The examples below use clean logical names for
   readability. CE 9.7.1 requires the `LLMHound_` namespace prefix
-  ([M0 Q1](ce-compatibility.md)), so the shipped files are generated with
+  ([M0 Q1](05-ce-compatibility.md)), so the shipped files are generated with
   emitted names (`LLMHound_AIService`, `LLMHound_ObservedAt`,
   `LLMHound_NetworkEndpoint`, ...) from `internal/graph/kinds.go`; native kinds
   (`Computer`, `Group`, ...) stay unqualified. Property names are lowercase.
@@ -26,7 +26,7 @@
   `MemberOf|HasSession|AdminTo|CanRDP|CanPSRemote|ExecuteDCOM|SQLAdmin|AllowedToDelegate|AllowedToAct|GenericAll|GenericWrite|WriteDacl|WriteOwner|Owns|AddMember|ForceChangePassword|AllExtendedRights`;
   Azure kinds are appended. M0 validates the list, tier-0 tag semantics, and
   performance on the pinned CE. If a rule from
-  [path qualification](graph-model.md#path-qualification-traversable-edges) is
+  [path qualification](02-graph-model.md#path-qualification-traversable-edges) is
   enabled, `CanExecuteOn` is added to the list.
 - **`AIService` label.** Carried by every concrete service kind, including
   `MCPServer` and `A2AAgent`. If M0 shows multi-label is unsupported, queries
@@ -37,8 +37,10 @@
 - **Start sets.** `$start` is a node, owned principals, or Domain Users
   (`objectid ENDS WITH '-513'`). Tier 0 is the CE tag
   (`'admin_tier_0' IN n.system_tags`; verify in M0).
-- Access facts are properties: `anon_operations` is an array of succeeded
-  `check_id`s. The IDs below are illustrative until fixed by the collector tests.
+- Access facts are properties: `anon_operations` is an array of check IDs that
+  succeeded anonymously, using the collectors' real IDs (`mcp_initialize`,
+  `mcp_tools_list`, `jupyter_contents`, `jupyter_sessions`, `ollama_tags`, ...).
+  Only enumeration-class checks count; Jupyter version metadata never does.
 
 ## Tier-0 pathing questions
 
@@ -147,7 +149,7 @@ RETURN s
 
 ```cypher
 MATCH (m:MCPServer)-[:ProvidesTool]->(t:MCPTool)
-WHERE 'mcp.tools.list' IN m.anon_operations
+WHERE 'mcp_tools_list' IN m.anon_operations
 RETURN m, t
 ```
 
@@ -155,8 +157,8 @@ RETURN m, t
 
 ```cypher
 MATCH (j:JupyterServer)
-WHERE 'jupyter.api.status' IN j.anon_operations
-   OR 'jupyter.contents.list' IN j.anon_operations
+WHERE 'jupyter_contents' IN j.anon_operations
+   OR 'jupyter_sessions' IN j.anon_operations
 OPTIONAL MATCH (j)-[:Contains]->(f:WorkspaceFile)
 RETURN j, f
 ```

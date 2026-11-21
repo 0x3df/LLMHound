@@ -1,0 +1,22 @@
+# OS and editor
+.DS_Store
+*.swp
+
+# Build output
+/llmhound
+/dist/
+
+# Scan output (can contain sensitive metadata; never commit)
+/out/
+/llmhound-*.json
+/llmhound-*.jsonl
+*.journal.jsonl
+
+# Local configuration and asset mappings (they name internal hosts)
+/llmhound.yaml
+/assets*.json
+/assets*.csv
+
+# Lab runtime state (lab/.gitignore covers the rest)
+lab/.runtime/
+lab/.runtime-*.log

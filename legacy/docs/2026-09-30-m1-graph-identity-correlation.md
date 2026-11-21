@@ -1,3 +1,5 @@
+> **ARCHIVED.** M1 implementation plan for graph identity and correlation. Completed, and its correlation design (AD-suffix matching against a verified inventory) has been superseded. Not current. See [`legacy/README.md`](../README.md) and the live docs under [`docs/`](../../docs/README.md).
+
 # M1 Graph Identity and Correlation Implementation Plan
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.

@@ -1,15 +1,17 @@
 # Collector capability matrix
 
-**Status: M2a Jupyter, MCP, and Ollama collectors implemented and wired through
-`llmhound plan` / `llmhound scan` (`internal/scanner`).** This is the v1 collection contract
-for the [design](../plans/2026-09-29-llmhound-design.md) and
-[graph model](graph-model.md), not a claim that every product release exposes
+**Status: the Jupyter, MCP, and Ollama collectors are implemented and wired
+through `llmhound plan` / `llmhound scan` (`internal/scanner`); the other
+surfaces are specified here and scheduled in the [roadmap](06-roadmap.md).**
+This is the v1 collection contract for the [design](01-design.md) and
+[graph model](02-graph-model.md), not a claim that every product release exposes
 every field anonymously. Exact operations and supported releases must be verified
 against official product/protocol documentation and recorded in collector tests.
-Live CLI coverage vs package-only tests: [m2a-integration.md](m2a-integration.md).
-The content tier and secret detection described below are part of the target
-design and are not implemented yet; today's collectors are metadata-only (see
-the [implementation delta](graph-model.md#implementation-delta)).
+Live CLI coverage vs package-only tests: [scan coverage](internals/scan-coverage.md);
+per-collector behavior: [`collectors/`](collectors/).
+The content tier and secret detection described below are specified but not yet
+built; today's collectors are metadata-only (see the
+[implementation status](02-graph-model.md#implementation-status)).
 
 ## Default collection policy
 
@@ -24,7 +26,7 @@ Existing content reads (the **content tier**: prompts, configuration, file and
 flow bodies, bounded samples) are on by default when a single allowlisted
 anonymous read returns them. They are bounded, stored only in the restricted
 content file, and can be disabled per surface; see
-[Content and secrets](graph-model.md#content-and-secrets). Metadata collection
+[Content and secrets](02-graph-model.md#content-and-secrets). Metadata collection
 must remain useful without them. Exposed secrets are recorded as a boolean
 only, via high-precision detectors, and never stored, used, or validated.
 
@@ -47,7 +49,7 @@ connection and redirect hop. Disable automatic cross-scope redirect following.
   login page is not a successful listing.
 - **Execution surface and auth posture:** classify each service's
   `exec_surface` and `auth_advertised`/`auth_observed` as defined in the
-  [property contract](graph-model.md#property-contract), with the basis
+  [property contract](02-graph-model.md#property-contract), with the basis
   (`observed`, `declared`, or `inferred`). Classification uses only allowlisted
   reads; it never invokes the capability.
 - **Endpoint/deployment:** canonical endpoint, virtual host, base path, observed
@@ -103,10 +105,10 @@ operation inventory and fixtures before it counts as supported.
 
 The project exists to answer tier-0 pathing questions, so collectors must
 extract the facts that matter for them (the [min-max
-principle](graph-model.md#property-contract)). This table lists, per surface,
+principle](02-graph-model.md#property-contract)). This table lists, per surface,
 what to classify beyond identity and version. Values are not evidence of
 exploitability; the **Rule candidate** column names surfaces that might later
-clear the [path-qualification bar](graph-model.md#path-qualification-traversable-edges).
+clear the [path-qualification bar](02-graph-model.md#path-qualification-traversable-edges).
 Every candidate needs official documentation, a version range, and fixtures
 first, and no rule is enabled by default.
 
@@ -156,7 +158,7 @@ assessed. Policy-disabled content reads do not make metadata coverage incomplete
 ## Downstream use
 
 Comparison and reconciliation are handled downstream by the normalization
-program (and a possible `llmhound diff`, see `docs/plans/.future/`). The
+program (and a possible `llmhound diff`, see [future ideas](future-ideas.md)). The
 sidecar retains the vantage key, check, collection policy, service identity,
 and timestamps they need. A timeout or denied listing is not proof that
 previously listed children vanished.

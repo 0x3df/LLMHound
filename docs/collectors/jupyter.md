@@ -1,9 +1,9 @@
 # Jupyter Collector Reference
 
 > **Status: M2a Jupyter collector implemented.** Companion to
-> [`docs/plans/2026-09-29-llmhound-design.md`](../plans/2026-09-29-llmhound-design.md),
-> [`docs/reference/graph-model.md`](graph-model.md), and
-> [`docs/reference/collector-capabilities.md`](collector-capabilities.md).
+> [design](../01-design.md),
+> [graph model](../02-graph-model.md), and
+> [capability matrix](../03-collector-capabilities.md).
 > Implemented in `internal/collectors/jupyter`.
 
 The Jupyter collector performs anonymous, bounded, read-only remote enumeration
@@ -57,22 +57,33 @@ The collector strictly executes only three allowlisted read-only checks:
 ### Nodes Emitted
 
 - **`LLMHound_JupyterServer`**: Scoped service node carrying `product`, `vendor`, `api_version`,
-  `endpoint_host`, `endpoint_port`, `auth_required`, `active_sessions`, and `kernels`.
+  `endpoint_host`, `endpoint_port`, `auth_required`, `active_sessions`, `kernels`, `vantage_key`,
+  and the flat access properties `auth_observed` and `anon_operations` (below).
 - **`LLMHound_AIService`**: Multi-kind umbrella label carried by the server node.
 - **`LLMHound_WorkspaceFile`**: Resource node for each enumerated notebook or file, scoped by
   service ID and resource path key (`item.Path`).
-- **`LLMHound_CollectionVantage`**: Observation vantage node.
-- **`LLMHound_NetworkEndpoint`**: Fallback network endpoint node when target does not correlate to
-  an existing AD `Computer`. (When target correlates to a native `Computer`, no `NetworkEndpoint`
-  node is created).
+- **`LLMHound_NetworkEndpoint`**: Fallback node when the asset mapping does not name an existing
+  BloodHound node for the target. (When it does, no `NetworkEndpoint` node is created.)
 
 ### Edges Emitted
 
 - **`LLMHound_Contains`**: Topology edge from `JupyterServer` to each enumerated `WorkspaceFile`.
-- **`LLMHound_UnauthenticatedAccess`**: Access edge from `CollectionVantage` to `JupyterServer`,
-  emitted only when workspace contents or sessions enumeration succeeds anonymously.
-- **`LLMHound_ObservedAt`**: Topology edge from `JupyterServer` to either the correlated AD
-  `Computer` (native-linking, without `source_kind`) or fallback `NetworkEndpoint`.
+- **`LLMHound_ObservedAt`**: Topology edge from `JupyterServer` to either the existing
+  native node the mapping names (a native-linking edge, emitted without `source_kind`) or the
+  fallback `NetworkEndpoint`.
+
+### Anonymous access (properties, not edges)
+
+Access is recorded on the `JupyterServer` node from the **enumeration** checks only
+(`jupyter_contents` and `jupyter_sessions`):
+
+- `auth_observed`: `anonymous` (an enumeration check succeeded anonymously), `denied`,
+  `mixed`, or `unknown`.
+- `anon_operations`: the check IDs that succeeded anonymously (omitted when none did).
+
+`jupyter_version` is deliberately excluded: Jupyter exposes version metadata even when
+authentication is enabled, so it must not make a protected server look anonymously
+accessible. An HTML login page is not a successful listing.
 
 ## Evidence Sidecar Emission
 

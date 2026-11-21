@@ -2,11 +2,19 @@
 
 A pinned, isolated BloodHound CE + PostgreSQL lab that answers the M0
 compatibility questions in
-[`docs/reference/ce-compatibility.md`](../docs/reference/ce-compatibility.md)
+[`docs/05-ce-compatibility.md`](../docs/05-ce-compatibility.md)
 with reproducible checks. The lab binds to loopback only, never touches any
 other BloodHound server, and performs no network scanning of real targets.
 All fixtures (toy extension schema, toy payloads, synthetic AD data) are
 original to this repository.
+
+> **The fixtures are a CE probe, not the product schema.** They were written for
+> the M0 spike and deliberately include shapes the product no longer emits (a
+> `CollectionVantage` node, access edges, property-matched endpoints) because
+> those were exactly what M0 tested. The shipping schema is
+> [`extension/schema.json`](../extension/schema.json). The adapter validation gate
+> (M3) re-runs these checks against a candidate CE release and extends them with the
+> real schema.
 
 ## Pin
 

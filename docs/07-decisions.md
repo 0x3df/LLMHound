@@ -1,0 +1,31 @@
+# Decision log
+
+**Reading order:** 8 of 8 (see [docs index](README.md)) · Why LLMHound is shaped the way it
+is. Add a row when a decision is made; supersede rather than delete, so the reasoning stays
+traceable. Superseded designs are kept under [`legacy/`](../legacy/README.md).
+
+| # | Decision | Why | Consequence | Date |
+|---|---|---|---|---|
+| 1 | **Primary goal is enriching the existing attack-path graph** (SharpHound, then AzureHound), answering "shortest path to tier 0", not building a standalone AI inventory | The value is in joining AI services onto paths the program already trusts | Everything attaches to existing nodes; queries and properties are written backwards from the [headline questions](00-executive-summary.md#what-you-can-ask-afterwards) | 2026-11-20 |
+| 2 | **Remote, network-only collection** from one scanner VM; no host-local scanning | A collection server needs no foothold and no per-host agent | No reading of agent configs, env vars, or keychains | 2026-09-29 |
+| 3 | **v1 is anonymous and read-only**; credentialed enumeration is M4 | Keeps authorization simple and the risk of side effects near zero | Never sends, guesses, tests, or uses credentials | 2026-09-29 |
+| 4 | **Pure Go, single static binary**, modeled on ShareHound's architecture, informed by AgentHound's behavior | One artifact on a scanner VM; proven target → discovery → worker pool → checkpoint → emission shape | Not OpenHound (Python), not a fork or wrapper | 2026-09-29 |
+| 5 | **100% original code**; reference projects are behavioral only. Apache-2.0 | Avoids attribution and licensing entanglement | Never paste code from a reference repo; see [design](01-design.md#provenance-and-licensing-posture) | 2026-09-29 |
+| 6 | **Name `LLMHound`**; one extension covers all surfaces | Checked against GitHub and the OpenGraph library; MCPHound, AIHound, AgentHound and others are taken | Source kind and extension namespace are `LLMHound` | 2026-09-29 |
+| 7 | **Emitted kinds are `LLMHound_<Kind>`**; code uses clean logical names, mapped centrally in `internal/graph/kinds.go` | CE 9.7.1 requires a mandatory, exclusively owned namespace prefix ([M0 Q1](05-ce-compatibility.md)) | Schema, payloads, and saved queries use emitted names; property names are lowercase | 2026-09-30 |
+| 8 | **A separate normalization program owns attribution and cleanup.** LLMHound consumes its asset mapping and never matches by DNS, suffix, or CE lookup | Attribution needs data and policy LLMHound should not duplicate; M0 showed CE's property matching silently drops ambiguous matches | Attachment is by objectid and native kind only; unmapped targets fall back to `NetworkEndpoint` | 2026-11-20 |
+| 9 | **Attach to any existing native kind**, not only `Computer` | AzureHound brings `AZVM` and Entra devices | Mapping carries `object_id` and `kind`; native kinds are never emitted | 2026-11-20 |
+| 10 | **Two-step upload**: owned subgraph with `source_kind`, then a linking payload to native nodes **without** it | A `source_kind` payload tags every node it references, and source cleanup then deletes them ([M0 Q5](05-ce-compatibility.md)) | The emitter already splits payloads; `upload` (M3) adds an existence pre-flight because a missing endpoint creates a stub node | 2026-09-30 |
+| 11 | **Anonymous access is flat properties, not edges**; no `CollectionVantage` node | One scanner VM is the use case; properties filter with plain Cypher and avoid edge-multiplicity questions | `auth_observed`, `anon_operations`, `vantage_key` on the service; only enumeration-class checks count (Jupyter version metadata never does) | 2026-11-20 |
+| 12 | **Nothing is traversable by default.** A traversable edge (`CanExecuteOn`) needs an opt-in rule clearing a six-point evidence bar | A listening service is not an attack transition; false paths damage the program | AD/Azure edges supply paths; rules are scheduled last (M2d) and gated on CE behavior | 2026-11-20 |
+| 13 | **Maximize collected data within the policy** (min-max), each value labeled observed / declared / inferred | The tier-0 question benefits from every safe fact about a service | Flat, queryable properties preferred over sidecar-only storage | 2026-11-20 |
+| 14 | **Precision over recall for every positive claim** | In a very large environment a false positive is the one unaffordable outcome | Unknown stays unknown; booleans are set only on deterministic evidence; absence is never a claim | 2026-11-20 |
+| 15 | **Content tier on by default, bounded, in a restricted file**; secrets are a boolean, never a value | Prompts and config are high-value context, but BloodHound is widely readable and a payload of live credentials is a liability | `.content.jsonl` stays out of the ingest path; detectors are structure-verified with zero-false-positive corpora; found credentials are never used or validated | 2026-11-20 |
+| 16 | **Support is declared per exact CE version/schema**, re-validated by a repeatable suite | Version numbers alone are not compatibility | Pinned CE 9.7.1 + PostgreSQL 18.6; adapter gate in M3 | 2026-09-30 |
+| 17 | **Docs have one canonical home per rule**; other docs link rather than restate | Duplication caused drift | Model and contracts in [02](02-graph-model.md); checks and outcomes in [03](03-collector-capabilities.md) | 2026-11-20 |
+| 18 | **Retire, don't delete.** Superseded docs and code move to `legacy/`; the full earlier tree is tagged `legacy/earlier-model-m2a` | The reasoning behind a design is worth keeping | Archived Go files carry `//go:build ignore` and are never compiled | 2026-11-20 |
+
+## Deferred
+
+Change comparison (`llmhound diff`), CVE matching, exploit checks, tool invocation, and
+inference requests are parked in [future ideas](future-ideas.md). Nothing there is in scope.

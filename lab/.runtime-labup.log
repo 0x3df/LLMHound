@@ -1,4 +1,0 @@
-wrote .env with a generated random password (kept untracked)
-pulling pinned images (BLOODHOUND_TAG, postgres:18) ...
- bloodhound Pulling 
- app-db Pulling 

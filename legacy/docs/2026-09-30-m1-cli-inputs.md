@@ -1,3 +1,5 @@
+> **ARCHIVED.** M1 implementation plan for the CLI and target inputs. Completed; kept for history. Not current. See [`legacy/README.md`](../README.md) and the live docs under [`docs/`](../../docs/README.md).
+
 # M1 CLI and Input Preparation Implementation Plan
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.

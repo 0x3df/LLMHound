@@ -5,9 +5,6 @@ intentionally absent from active v1 planning. No milestone, schema requirement,
 implementation commitment, or acceptance criterion follows from this note.
 Revisit only through a separate explicit design decision.
 
-This dot-directory keeps the note out of normal documentation navigation; it
-is not a security boundary or a guarantee that Git/editor tools hide it.
-
 ## Parked topics
 
 - **Change comparisons (`llmhound diff`):** an offline command comparing two

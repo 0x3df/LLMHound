@@ -1,6 +1,6 @@
 # Ollama Collector Reference
 
-> **Status: M2a Ollama collector implemented.** Companion to
+> **Status: M2a + D3 + D4 Ollama collector implemented.** Companion to
 > [design](../01-design.md),
 > [capability matrix](../03-collector-capabilities.md), and
 > [graph model](../02-graph-model.md).
@@ -19,15 +19,18 @@ graph/evidence output, and checkpoint journal contracts.
   `/v1/completions`, `/v1/embeddings`, `/api/pull`, `/api/push`, `/api/create`,
   `/api/delete`, `/api/copy`, `/api/blobs`) are strictly forbidden and rejected at
   the transport layer.
-- **Default-On Content Tier & Provenance:** `/api/show` runs by default under the
-  `content.*` policy (disable globally via `--content=false` or per surface via
-  `--content-disable=ollama` / `content.surfaces.ollama: false`). Redacted
-  metadata (`parent_model`, `license`, details `family`) is kept on `AIModel`
-  nodes, while system prompts, modelfiles, and templates are written strictly within
-  configured `content.*` bounds into `<prefix>.content.jsonl` (mode `0600`) and
-  summarized on `OllamaInstance` (`content_bytes`, `content_truncated`,
-  `system_prompt_present`, `config_collected`). Content bodies never enter graph
-  payloads, sidecars, checkpoints, or logs.
+- **Default-On Content Tier, Secret Detection & Provenance:** `/api/show` runs by
+  default under the `content.*` policy (disable globally via `--content=false` or
+  per surface via `--content-disable=ollama` / `content.surfaces.ollama: false`).
+  Redacted metadata (`parent_model`, `license`, details `family`) is kept on
+  `AIModel` nodes, while system prompts, modelfiles, and templates are written
+  strictly within configured `content.*` bounds into `<prefix>.content.jsonl`
+  (mode `0600`), scanned by `internal/secrets` (replacing verified secret spans
+  with `[secret:<type>]` and recording `detected_exposures` in `.evidence.jsonl`),
+  and summarized on `OllamaInstance` (`content_bytes`, `content_truncated`,
+  `system_prompt_present`, `config_collected`, `has_exposed_secret`,
+  `secret_types`, `secret_last_confirmed`). Content bodies and raw secret values
+  never enter graph payloads, sidecars, checkpoints, or logs.
 - **Bounded Resource Limits:** Respects configured `max_response_bytes`,
   `max_items` (truncating `/api/tags` and `/api/ps` enumeration with `CoverageTruncated`
   when exceeded), `content.*` byte/item limits, `connect_timeout`, and `response_timeout`.

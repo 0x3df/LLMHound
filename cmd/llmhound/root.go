@@ -144,7 +144,7 @@ func newRootCommand() *cobra.Command {
 	scanCmd := &cobra.Command{
 		Use:     "scan",
 		Short:   "Remotely enumerate AI infrastructure across configured targets",
-		Long:    "Discovers and enumerates AI services (Jupyter, MCP, Ollama) on prepared\ntargets, writing through a checkpoint journal and emitting OpenGraph JSON\nand evidence sidecar files.",
+		Long:    "Discovers and enumerates AI services (Jupyter, MCP, Ollama, A2A, vLLM, Qdrant) on prepared\ntargets, writing through a checkpoint journal and emitting OpenGraph JSON\nand evidence sidecar files.",
 		Args:    cobra.NoArgs,
 		PreRunE: prepare,
 		RunE: func(cmd *cobra.Command, _ []string) error {

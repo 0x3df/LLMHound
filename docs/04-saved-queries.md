@@ -4,8 +4,7 @@
 > `lab/scripts/run-d2-checks.sh`). The rest are planned. These queries ship in `extension/saved_searches/` in
 > SpecterOps Query Library format. Their shapes were validated on CE 9.7.1
 > ([R2](05-ce-compatibility.md#follow-up-answers-for-the-tier-0-redesign-r1r9));
-> running them against sample data is [D2](06-roadmap.md). Kind and property names follow the
-> [graph model](02-graph-model.md) and may be adjusted by the
+> kind and property names follow the [graph model](02-graph-model.md) and the
 > [M0 findings](05-ce-compatibility.md). Every property a query filters on is a
 > flat graph property, not sidecar-only data.
 
@@ -46,8 +45,8 @@
   the shortest-path API, one start and one end node at a time. Results are capped
   near 1,000 nodes, so every query that can return many rows has a `LIMIT`.
 - **`AIService` label.** Carried by every concrete service kind, including
-  `MCPServer` and `A2AAgent`. If M0 shows multi-label is unsupported, queries
-  are generated with explicit kind checks.
+  `MCPServer` and `A2AAgent`. M0 Q2 and R2 confirmed multi-label support in CE 9.7.1,
+  so queries filter on `LLMHound_AIService`.
 - **Attached host.** `h` is any existing node a service is attached to
   (`Computer`, `AZVM`, …); the `WHERE NOT h:NetworkEndpoint` filter excludes
   unmapped targets.
@@ -72,10 +71,12 @@ RETURN p
 LIMIT 100
 ```
 
-`h:Computer` is the host kind; the generator emits one query per native host kind
-that mappings use (`AZVM`, ...). The path shows the route; the services on each
-host come from P4 or the entity panel (a `shortestPath` endpoint cannot also bind
-the service, see the shape rules above).
+`h:Computer` illustrates a single native host kind; the shipped generated
+queries leave `h` unlabeled (`->(h)`), because the `ObservedAt` pattern
+predicate matches any mapped native host kind (`Computer`, `AZVM`, ...) in one
+query. The path shows the route; the services on each host come from P4 or the
+entity panel (a `shortestPath` endpoint cannot also bind the service, see the
+shape rules above).
 
 ### P2. Shortest path from an asset to any AI host
 

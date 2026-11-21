@@ -47,6 +47,8 @@ var bannedPathPrefixes = []string{
 	"/v1/chat/completions",
 	"/v1/completions",
 	"/v1/embeddings",
+	"/v1/images/generations",
+	"/v1/audio/",
 	"/api/pull",
 	"/api/push",
 	"/api/create",

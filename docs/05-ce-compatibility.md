@@ -350,9 +350,10 @@ the older single-step form; on 9.7.1 the flow above is what actually works.
    `POST /api/v2/clear-database {deleteSourceKinds: [<LLMHound id>]}` where
    the id comes from `GET /api/v2/graphs/source-kinds`; deletion is
    asynchronous (~1 min) and its completion must be awaited/verified.
-5. **Non-traversable edges:** every LLMHound relationship kind registered
-   with `is_traversable: false` (Q4). No LLMHound edge is ever traversable
-   in v1.
+5. **Non-traversable edges:** every LLMHound relationship kind is registered
+   with `is_traversable: false` (Q4). No LLMHound edge is traversable by default.
+   *(Updated 2026-11-21: opt-in path-qualification rules in M2d may register
+   `LLMHound_CanExecuteOn` as traversable, verified at the API level by R5 below.)*
 6. **Adapter honesty notes (observed CE behaviors that affect clients):**
    - `GET /api/v2/graphs/source_kinds` (docs) → 404; use
      `GET /api/v2/graphs/source-kinds` (hyphen), shape `{data:{kinds:[…]}}`.

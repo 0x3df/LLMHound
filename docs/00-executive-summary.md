@@ -1,9 +1,10 @@
 # LLMHound — Executive summary
 
 **Reading order:** 1 of 8 (see [docs index](README.md)) · **Audience:** anyone who needs the
-whole picture in five minutes · **Status as of 2026-11-21:** core engine, three collectors,
-shared property contract (D1), headline saved queries (D2), and bounded content tier (D3)
-built and tested; not yet used against a real environment.
+whole picture in five minutes · **Status as of 2026-11-21:** core engine, six collectors
+(Jupyter, MCP, Ollama, A2A, vLLM, Qdrant), shared property contract (D1), headline saved
+queries (D2), bounded content tier (D3), and high-precision secret detection (D4) built and
+tested; not yet used against a real environment.
 
 ## The one-minute version
 
@@ -47,8 +48,10 @@ anyone?*
    what models, tools, or notebooks it lists, and what it connects to.
 3. **Attach.** Each finding links to the host already in BloodHound. Anything it cannot
    attribute is kept as an "unattributed" endpoint for the normalizer to resolve later.
-4. **Hand off.** It writes a graph file and an evidence file. Loading them into BloodHound
-   is today a manual or pipeline step; a built-in uploader is planned.
+4. **Hand off.** It writes a graph payload (plus a linking payload when targets are mapped),
+   an evidence file, a restricted content file (`.content.jsonl`, mode `0600`), and a scan
+   journal. Loading into BloodHound is today a manual or pipeline step; a built-in uploader
+   is planned.
 
 ## What you can ask afterwards
 
@@ -78,8 +81,8 @@ anyone?*
 
 | | |
 |---|---|
-| **Built and tested** | The core engine; end-to-end collection for **3 of the 10 planned core services** (Jupyter, MCP servers, Ollama); shared service properties (D1); default-on, bounded content collection into restricted `.content.jsonl` (D3); high-precision `private_key`, `github_token`, and `aws_access_key` secret detection (D4); a crash-safe scan journal (the resume command itself is planned); graph and evidence output; shipped saved queries (`P1`, `P2`, `P4`, `P6`) validated against **BloodHound CE 9.7.1** in a reproducible lab (D2). |
-| **Not built yet** | The other 7 core services (M2b) and long tail (M2c); the planned attack-transition rules (M2d); the built-in uploader and `resume` command (M3). |
+| **Built and tested** | The core engine; end-to-end collection for **6 of the 10 planned core services** (Jupyter, MCP servers, Ollama, A2A agents, vLLM, and Qdrant); shared service properties (D1); default-on, bounded content collection into restricted `.content.jsonl` (D3); high-precision `private_key`, `github_token`, and `aws_access_key` secret detection (D4); a crash-safe scan journal (the resume command itself is planned); graph and evidence output; shipped saved queries (`P1`, `P2`, `P4`, `P6`) validated against **BloodHound CE 9.7.1** in a reproducible lab (D2). |
+| **Not built yet** | The other 4 core services in M2b (LiteLLM, MLflow, Open WebUI, LangServe) and long tail (M2c); the planned attack-transition rules (M2d); the built-in uploader and `resume` command (M3). |
 | **Not yet done** | A scan of a real environment. Nothing here has run against production. |
 
 The [roadmap](06-roadmap.md) sequences the remaining work; it deliberately gives order and

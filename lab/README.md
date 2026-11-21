@@ -24,7 +24,7 @@ original to this repository.
 | Graph database    | PostgreSQL 18 (`graph_driver=pg`, app-db)        |
 | Docker images     | `specterops/bloodhound:9.7.1`, `postgres:18`     |
 
-Record the observed image digests in `ce-compatibility.md` when you run the
+Record the observed image digests in `docs/05-ce-compatibility.md` when you run the
 checks (the `E3` check captures them into the results).
 
 ## Requirements
@@ -41,6 +41,7 @@ cd lab
 ./scripts/validate-fixtures.sh # offline fixture validation (no lab needed)
 ./scripts/run-m0-checks.sh     # run all M0 question checks (~25 min; ingest is asynchronous)
 ./scripts/run-r-checks.sh      # tier-0 follow-ups R1–R9 with the real schema (~40 min)
+./scripts/run-d2-checks.sh     # validate shipped saved searches against real scan output
 ./scripts/lab-down.sh          # stop and remove ONLY this lab's resources
 ```
 
@@ -50,7 +51,7 @@ cd lab
 (status codes, response excerpts, Cypher results) so findings can be traced
 back to requests.
 
-Check IDs follow the question numbers in `ce-compatibility.md`:
+Check IDs follow the question numbers in `docs/05-ce-compatibility.md`:
 `Q1.*` kind namespacing, `Q2.*` multi-label nodes, `Q3.*` property types,
 `Q4.*` non-traversable edges/pathfinding, `Q5.*` source_kind cleanup and the
 AD-computer workaround, `Q6.*` property-matched edge endpoints,

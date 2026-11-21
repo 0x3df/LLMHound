@@ -1,8 +1,8 @@
 // Package ollama provides anonymous, read-only collection of Ollama LLM inference servers.
 // It verifies documented version and model metadata endpoints (/api/version, /api/tags, /api/ps),
 // records honest outcomes, reasons, and coverage, records model provenance, enforces size limits,
-// requires explicit opt-in for sensitive modelfiles/prompts (/api/show), and strictly forbids
-// any generation or mutation operations.
+// collects bounded modelfiles/prompts (/api/show) into .content.jsonl by default under content.*
+// policy with high-precision secret redaction, and strictly forbids any generation or mutation operations.
 package ollama
 
 import (

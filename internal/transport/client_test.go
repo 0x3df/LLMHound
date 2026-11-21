@@ -41,6 +41,8 @@ func TestTransport_SafetyEnforcement(t *testing.T) {
 		"/api/generate",
 		"/api/chat",
 		"/api/embeddings",
+		"/v1/images/generations",
+		"/v1/audio/speech",
 		"/api/pull",
 		"/api/push",
 		"/api/create",

@@ -38,8 +38,8 @@ second inventory.
 
 | | |
 |---|---|
-| **Works today** | Offline `targets` and `plan`; `scan` for **Jupyter, MCP, and Ollama** with default-on bounded content collection (`.content.jsonl`) and high-precision secret detection for private keys, classic GitHub tokens, and AWS access-key pairs; checkpoint journal; graph and evidence output; shipped saved BloodHound queries (`extension/saved_searches/`); validated against **BloodHound CE 9.7.1** in a reproducible [lab](lab/README.md). |
-| **Planned** | The other seven core surfaces (A2A, vLLM, LiteLLM, Qdrant, MLflow, Open WebUI, LangServe) and a long tail; opt-in attack-transition rules (M2d); `upload` and `resume` (M3). |
+| **Works today** | Offline `targets` and `plan`; `scan` for **Jupyter, MCP, Ollama, A2A, vLLM, and Qdrant** with default-on bounded content collection (`.content.jsonl`) and high-precision secret detection for private keys, classic GitHub tokens, and AWS access-key pairs; checkpoint journal; graph and evidence output; shipped saved BloodHound queries (`extension/saved_searches/`); validated against **BloodHound CE 9.7.1** in a reproducible [lab](lab/README.md). |
+| **Planned** | The remaining four core surfaces in M2b (LiteLLM, MLflow, Open WebUI, LangServe) and the M2c long tail; opt-in attack-transition rules (M2d); `upload` and `resume` (M3). |
 | **Not yet done** | A scan of a real environment. Treat it as pre-release. |
 
 See the [roadmap](docs/06-roadmap.md) for the ordered plan.
@@ -54,7 +54,10 @@ secrets are never stored.
 | **Jupyter** | ✅ | Auth posture, API version, sessions and kernels, workspace listing, bounded text/notebook bodies (into `.content.jsonl`) |
 | **MCP** | ✅ | Server identity and protocol version, tools, resources, prompts, advertised auth servers, bounded text resource bodies (into `.content.jsonl`) |
 | **Ollama** | ✅ | Runtime version, model catalog with digests, running models, bounded `/api/show` prompts/modelfiles/templates (into `.content.jsonl`) |
-| A2A · vLLM · LiteLLM · Qdrant · MLflow · Open WebUI · LangServe | planned | See the [capability matrix](docs/03-collector-capabilities.md) |
+| **A2A** | ✅ | Public agent card metadata, advertised skills and capabilities, security scheme declarations, sanitized interface refs, bounded card capture (into `.content.jsonl`) |
+| **vLLM** | ✅ | Runtime version (when exposed), vLLM-verified served model catalog and aliases (`max_model_len`, `root`, `parent`) |
+| **Qdrant** | ✅ | Version and commit, collection inventory and vector schemas, snapshot listing, bounded payload-only point sampling (into `.content.jsonl`, no vectors) |
+| LiteLLM · MLflow · Open WebUI · LangServe | planned | See the [capability matrix](docs/03-collector-capabilities.md) |
 | OpenAI-compatible · Ray · Langflow · Flowise · ChromaDB | planned | Same |
 
 ## Quick start

@@ -38,7 +38,7 @@ UPDATE_GOLDEN=1 go test ./internal/emitter -run TestGoldenEmission   # then revi
 
 `cmd/llmhound` CLI · `internal/config` YAML + flags · `internal/targets` target prep ·
 `internal/discovery` data-driven fingerprints · `internal/transport` bounded TLS-aware HTTP ·
-`internal/collectors/{jupyter,mcp,ollama}` one package per surface · `internal/content`
+`internal/collectors/<surface>` one package per surface (jupyter, mcp, ollama, a2a, vllm, qdrant) · `internal/content`
 bounded content-tier records + 0600 writer · `internal/secrets` high-precision
 secret detectors over content bodies · `internal/correlate` mapping → existing
 native node or `NetworkEndpoint` · `internal/graph` identity, kinds, observations, edges,

@@ -41,8 +41,8 @@ func TestScanner_Plan(t *testing.T) {
 	}
 
 	for _, tp := range plans {
-		if len(tp.Surfaces) != 3 {
-			t.Fatalf("target %s expected 3 surfaces, got %d", tp.Target, len(tp.Surfaces))
+		if len(tp.Surfaces) != 6 {
+			t.Fatalf("target %s expected 6 surfaces, got %d", tp.Target, len(tp.Surfaces))
 		}
 
 		surfaceNames := make(map[discovery.Surface]bool)
@@ -89,10 +89,26 @@ func TestScanner_Plan(t *testing.T) {
 					t.Errorf("mcp surface missing active mcp_resources_read check in plan")
 				}
 			}
+			if sp.Surface == discovery.SurfaceQdrant {
+				foundSample := false
+				for _, chk := range sp.Checks {
+					if chk.CheckID == "qdrant_points_sample" && chk.Active {
+						foundSample = true
+					}
+				}
+				if !foundSample {
+					t.Errorf("qdrant surface missing active qdrant_points_sample check in plan")
+				}
+			}
 		}
 
-		if !surfaceNames[discovery.SurfaceJupyter] || !surfaceNames[discovery.SurfaceMCP] || !surfaceNames[discovery.SurfaceOllama] {
-			t.Errorf("target %s missing expected surfaces in plan: %+v", tp.Target, surfaceNames)
+		for _, wantSurf := range []discovery.Surface{
+			discovery.SurfaceJupyter, discovery.SurfaceMCP, discovery.SurfaceOllama,
+			discovery.SurfaceA2A, discovery.SurfaceVLLM, discovery.SurfaceQdrant,
+		} {
+			if !surfaceNames[wantSurf] {
+				t.Errorf("target %s missing surface %s in plan: %+v", tp.Target, wantSurf, surfaceNames)
+			}
 		}
 	}
 
@@ -109,7 +125,7 @@ func TestScanner_Plan(t *testing.T) {
 	plansOff := sOff.Plan([]string{"192.0.2.1"})
 	for _, sp := range plansOff[0].Surfaces {
 		for _, chk := range sp.Checks {
-			if chk.CheckID == "ollama_show" || chk.CheckID == "jupyter_file_content" || chk.CheckID == "mcp_resources_read" {
+			if chk.CheckID == "ollama_show" || chk.CheckID == "jupyter_file_content" || chk.CheckID == "mcp_resources_read" || chk.CheckID == "qdrant_points_sample" {
 				if chk.Active || chk.SkipReason == "" {
 					t.Errorf("%s should be inactive with skip reason when content disabled, active=%v reason=%q", chk.CheckID, chk.Active, chk.SkipReason)
 				}
@@ -122,7 +138,7 @@ func TestScanner_Plan(t *testing.T) {
 	cfgSurf.Scope = "corp-scope"
 	cfgSurf.VantageKey = "scanner-01"
 	cfgSurf.Targets = []string{"192.0.2.1"}
-	cfgSurf.Content.Surfaces = map[string]bool{"ollama": false}
+	cfgSurf.Content.Surfaces = map[string]bool{"ollama": false, "qdrant": false}
 	sSurf, err := scanner.New(cfgSurf)
 	if err != nil {
 		t.Fatalf("scanner.New with surface disable failed: %v", err)
@@ -133,8 +149,11 @@ func TestScanner_Plan(t *testing.T) {
 			if sp.Surface == discovery.SurfaceOllama && chk.CheckID == "ollama_show" && chk.Active {
 				t.Errorf("ollama_show should be inactive when content.surfaces[ollama]=false")
 			}
+			if sp.Surface == discovery.SurfaceQdrant && chk.CheckID == "qdrant_points_sample" && chk.Active {
+				t.Errorf("qdrant_points_sample should be inactive when content.surfaces[qdrant]=false")
+			}
 			if sp.Surface == discovery.SurfaceJupyter && chk.CheckID == "jupyter_file_content" && !chk.Active {
-				t.Errorf("jupyter_file_content should remain active when only ollama disabled")
+				t.Errorf("jupyter_file_content should remain active when only ollama/qdrant disabled")
 			}
 		}
 	}
@@ -878,4 +897,172 @@ func TestScanner_DisabledContentPreservesExistingArtifactAndSkipsFresh(t *testin
 		t.Errorf("expected completed target even when content disabled")
 	}
 
+}
+
+func setupMockA2A(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/.well-known/agent-card.json" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{
+				"name":"PlannerAgent",
+				"version":"1.2.0",
+				"protocolVersion":"0.3.0",
+				"url":"https://agent.internal/rpc",
+				"provider":{"organization":"TestOrg"},
+				"securitySchemes":{"bearer":{"type":"http","scheme":"bearer"}},
+				"security":[{"bearer":[]}],
+				"skills":[{"id":"plan","name":"Plan"}]
+			}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+}
+
+func setupMockVLLM(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/version":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"version":"0.6.4"}`))
+		case "/v1/models":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"llama3-8b","owned_by":"vllm","max_model_len":8192}]}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+}
+
+func setupMockQdrant(t *testing.T, extra string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"title":"qdrant - vector search engine","version":"1.12.5","commit":"deadbeef"}`))
+		case "/collections":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"result":{"collections":[{"name":"kb"}]},"status":"ok"}`))
+		case "/collections/kb":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"result":{"status":"green","points_count":1,"config":{"params":{"vectors":{"size":1536,"distance":"Cosine"}}}}}`))
+		case "/snapshots":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"result":[]}`))
+		case "/collections/kb/points/scroll":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(fmt.Sprintf(`{"result":{"points":[{"id":1,"vector":[0.1,0.2],"payload":{"note":"SCANNER_QDRANT_SECRET %s"}}],"next_page_offset":null}}`, extra)))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+}
+
+func TestScanner_M2bCohortEndToEnd(t *testing.T) {
+	a2aSrv := setupMockA2A(t)
+	defer a2aSrv.Close()
+	vllmSrv := setupMockVLLM(t)
+	defer vllmSrv.Close()
+	qdrantSrv := setupMockQdrant(t, "safe-note")
+	defer qdrantSrv.Close()
+	genericOpenAI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"gpt-4o","owned_by":"openai"}]}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer genericOpenAI.Close()
+
+	defs := []discovery.Definition{
+		{
+			Surface:     discovery.SurfaceA2A,
+			DefaultPort: parsePort(a2aSrv.URL),
+			ProbePaths:  discovery.A2ADefinition().ProbePaths,
+			Match:       discovery.A2ADefinition().Match,
+		},
+		{
+			Surface:     discovery.SurfaceVLLM,
+			DefaultPort: parsePort(vllmSrv.URL),
+			ProbePaths:  discovery.VLLMDefinition().ProbePaths,
+			Match:       discovery.VLLMDefinition().Match,
+		},
+		{
+			Surface:     discovery.SurfaceQdrant,
+			DefaultPort: parsePort(qdrantSrv.URL),
+			ProbePaths:  discovery.QdrantDefinition().ProbePaths,
+			Match:       discovery.QdrantDefinition().Match,
+		},
+	}
+
+	tmpDir := t.TempDir()
+	cfg := config.Defaults()
+	cfg.Scope = "m2b-scope"
+	cfg.VantageKey = "vantage-m2b"
+	cfg.Targets = []string{"127.0.0.1"}
+
+	s, err := scanner.New(cfg, scanner.WithDefinitions(defs))
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := s.Scan(context.Background(), []string{"127.0.0.1"}, tmpDir, "m2b")
+	if err != nil {
+		t.Fatalf("Scan failed: %v", err)
+	}
+
+	payloadData, err := os.ReadFile(res.Artifacts.BasePayloadPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload emitter.Payload
+	if err := json.Unmarshal(payloadData, &payload); err != nil {
+		t.Fatal(err)
+	}
+	foundKinds := map[string]bool{}
+	for _, n := range payload.Graph.Nodes {
+		for _, k := range n.Kinds {
+			foundKinds[k] = true
+		}
+	}
+	for _, want := range []string{
+		"LLMHound_A2AAgent", "LLMHound_A2ASkill",
+		"LLMHound_VLLMInstance", "LLMHound_AIModel",
+		"LLMHound_QdrantInstance", "LLMHound_VectorCollection",
+	} {
+		if !foundKinds[want] {
+			t.Errorf("missing node kind %s in %+v", want, foundKinds)
+		}
+	}
+
+	contentRaw, err := os.ReadFile(res.ContentPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(contentRaw), `"surface":"a2a"`) || !strings.Contains(string(contentRaw), `"surface":"qdrant"`) {
+		t.Errorf("content file missing a2a or qdrant surfaces: %s", contentRaw)
+	}
+	if strings.Contains(string(payloadData), "SCANNER_QDRANT_SECRET") {
+		t.Errorf("qdrant content leaked into graph payload")
+	}
+
+	// Generic OpenAI-compatible server probed as vllm must not match or emit VLLMInstance.
+	sGen, err := scanner.New(cfg, scanner.WithDefinitions([]discovery.Definition{{
+		Surface:     discovery.SurfaceVLLM,
+		DefaultPort: parsePort(genericOpenAI.URL),
+		ProbePaths:  discovery.VLLMDefinition().ProbePaths,
+		Match:       discovery.VLLMDefinition().Match,
+	}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resGen, err := sGen.Scan(context.Background(), []string{"127.0.0.1"}, t.TempDir(), "generic-openai")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resGen.State.IsCompleted("127.0.0.1", "vllm") || len(resGen.State.Nodes()) != 0 {
+		t.Errorf("generic OpenAI server must fail vllm discovery without nodes: nodes=%d", len(resGen.State.Nodes()))
+	}
 }

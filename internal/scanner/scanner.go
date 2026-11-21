@@ -15,9 +15,12 @@ import (
 	"time"
 
 	"github.com/0x3df/LLMHound/internal/checkpoint"
+	"github.com/0x3df/LLMHound/internal/collectors/a2a"
 	"github.com/0x3df/LLMHound/internal/collectors/jupyter"
 	collectormcp "github.com/0x3df/LLMHound/internal/collectors/mcp"
 	"github.com/0x3df/LLMHound/internal/collectors/ollama"
+	"github.com/0x3df/LLMHound/internal/collectors/qdrant"
+	"github.com/0x3df/LLMHound/internal/collectors/vllm"
 	"github.com/0x3df/LLMHound/internal/config"
 	"github.com/0x3df/LLMHound/internal/content"
 	"github.com/0x3df/LLMHound/internal/correlate"
@@ -293,6 +296,87 @@ func (s *Scanner) planSurfaces(_ string) []SurfacePlan {
 				},
 				showCheck,
 			}
+
+		case discovery.SurfaceA2A:
+			sp.Checks = []PlannedCheck{
+				{
+					CheckID:   a2a.CheckAgentCard,
+					Operation: a2a.CheckAgentCard,
+					Method:    http.MethodGet,
+					Endpoint:  "/.well-known/agent-card.json",
+					Purpose:   "Retrieve public A2A agent card metadata, skills, and auth declarations",
+					Active:    true,
+				},
+			}
+
+		case discovery.SurfaceVLLM:
+			sp.Checks = []PlannedCheck{
+				{
+					CheckID:   vllm.CheckVersion,
+					Operation: vllm.CheckVersion,
+					Method:    http.MethodGet,
+					Endpoint:  "/version",
+					Purpose:   "Retrieve reported vLLM runtime version",
+					Active:    true,
+				},
+				{
+					CheckID:   vllm.CheckModels,
+					Operation: vllm.CheckModels,
+					Method:    http.MethodGet,
+					Endpoint:  "/v1/models",
+					Purpose:   "Enumerate served models and aliases",
+					Active:    true,
+				},
+			}
+
+		case discovery.SurfaceQdrant:
+			contentActive := s.cfg.Content.EnabledFor("qdrant")
+			sampleCheck := PlannedCheck{
+				CheckID:   qdrant.CheckPointsSample,
+				Operation: qdrant.CheckPointsSample,
+				Method:    http.MethodPost,
+				Endpoint:  "/collections/<name>/points/scroll",
+				Purpose:   "Collect bounded point payload samples (without vectors) into restricted .content.jsonl",
+				Active:    contentActive,
+			}
+			if !contentActive {
+				sampleCheck.SkipReason = "policy: content collection disabled"
+			}
+			sp.Checks = []PlannedCheck{
+				{
+					CheckID:   qdrant.CheckVersion,
+					Operation: qdrant.CheckVersion,
+					Method:    http.MethodGet,
+					Endpoint:  "/",
+					Purpose:   "Retrieve Qdrant version and build commit metadata",
+					Active:    true,
+				},
+				{
+					CheckID:   qdrant.CheckCollections,
+					Operation: qdrant.CheckCollections,
+					Method:    http.MethodGet,
+					Endpoint:  "/collections",
+					Purpose:   "Enumerate Qdrant vector collections",
+					Active:    true,
+				},
+				{
+					CheckID:   qdrant.CheckCollectionInfo,
+					Operation: qdrant.CheckCollectionInfo,
+					Method:    http.MethodGet,
+					Endpoint:  "/collections/<name>",
+					Purpose:   "Retrieve collection schema, counts, and vector dimensions",
+					Active:    true,
+				},
+				{
+					CheckID:   qdrant.CheckSnapshots,
+					Operation: qdrant.CheckSnapshots,
+					Method:    http.MethodGet,
+					Endpoint:  "/snapshots",
+					Purpose:   "Enumerate exposed Qdrant snapshot listings",
+					Active:    true,
+				},
+				sampleCheck,
+			}
 		}
 
 		surfacePlans = append(surfacePlans, sp)
@@ -380,9 +464,12 @@ func (s *Scanner) Scan(ctx context.Context, targets []string, outputDir, prefix 
 		return nil, fmt.Errorf("initialize jupyter collector: %w", err)
 	}
 
-	ollamaCfg := s.cfg
-	ollamaCfg.Targets = append([]string(nil), targets...)
-	ollamaCol := ollama.New(ollamaCfg, ollama.WithContentSink(contentWriter))
+	surfCfg := s.cfg
+	surfCfg.Targets = append([]string(nil), targets...)
+	ollamaCol := ollama.New(surfCfg, ollama.WithContentSink(contentWriter))
+	a2aCol := a2a.New(surfCfg, a2a.WithContentSink(contentWriter))
+	vllmCol := vllm.New(surfCfg)
+	qdrantCol := qdrant.New(surfCfg, qdrant.WithContentSink(contentWriter))
 
 	mcpOpts := []collectormcp.Option{
 		collectormcp.WithScanID(scanID),
@@ -444,7 +531,8 @@ func (s *Scanner) Scan(ctx context.Context, targets []string, outputDir, prefix 
 
 			for _, def := range s.definitions {
 				switch def.Surface {
-				case discovery.SurfaceJupyter, discovery.SurfaceOllama, discovery.SurfaceMCP:
+				case discovery.SurfaceJupyter, discovery.SurfaceOllama, discovery.SurfaceMCP,
+					discovery.SurfaceA2A, discovery.SurfaceVLLM, discovery.SurfaceQdrant:
 				default:
 					continue
 				}
@@ -494,6 +582,42 @@ func (s *Scanner) Scan(ctx context.Context, targets []string, outputDir, prefix 
 					if _, err := mcpCol.CollectTarget(ctx, mcpTarget, journal); err != nil {
 						recordFailure(fmt.Errorf("mcp collect %s: %w", host, err))
 					}
+				case discovery.SurfaceA2A:
+					target := host
+					if def.DefaultPort != a2a.DefaultPort {
+						target = baseURL
+					}
+					res, err := a2aCol.Collect(ctx, target, s.cfg.Scope, s.cfg.VantageKey, scanID, now, resolver)
+					if err != nil {
+						recordFailure(fmt.Errorf("a2a collect %s: %w", host, err))
+						continue
+					}
+					res.Target = host
+					record(res)
+				case discovery.SurfaceVLLM:
+					target := host
+					if def.DefaultPort != vllm.DefaultPort {
+						target = baseURL
+					}
+					res, err := vllmCol.Collect(ctx, target, s.cfg.Scope, s.cfg.VantageKey, scanID, now, resolver)
+					if err != nil {
+						recordFailure(fmt.Errorf("vllm collect %s: %w", host, err))
+						continue
+					}
+					res.Target = host
+					record(res)
+				case discovery.SurfaceQdrant:
+					target := host
+					if def.DefaultPort != qdrant.DefaultPort {
+						target = baseURL
+					}
+					res, err := qdrantCol.Collect(ctx, target, s.cfg.Scope, s.cfg.VantageKey, scanID, now, resolver)
+					if err != nil {
+						recordFailure(fmt.Errorf("qdrant collect %s: %w", host, err))
+						continue
+					}
+					res.Target = host
+					record(res)
 				}
 			}
 		}(targetHost)

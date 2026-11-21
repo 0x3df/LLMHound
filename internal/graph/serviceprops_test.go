@@ -10,7 +10,11 @@ import (
 
 func TestServiceFactsOmitsUnknowns(t *testing.T) {
 	p := ServiceFacts{Name: "X"}.Properties()
-	for _, k := range []string{"auth_advertised", "exec_surface", "exec_surface_basis", "tls_verification", "product"} {
+	for _, k := range []string{
+		"auth_advertised", "exec_surface", "exec_surface_basis", "tls_verification", "product",
+		"build_id", "commit", "backend_refs", "store_refs", "backend_refs_basis",
+		"model_count", "tool_count", "resource_count", "collection_count", "skill_count",
+	} {
 		if _, ok := p[k]; ok {
 			t.Errorf("%s must be omitted when unset", k)
 		}
@@ -135,5 +139,67 @@ func TestServiceFactsEndpointAndHTTP(t *testing.T) {
 	}
 	if p["tls_verification"] != "n_a" {
 		t.Fatalf("plain http must be n_a, got %v", p["tls_verification"])
+	}
+}
+
+func TestServiceFactsBuildDependenciesAndCounts(t *testing.T) {
+	intPtr := func(n int) *int { return &n }
+	f := ServiceFacts{
+		BuildID:          "build-\n42\x00",
+		Commit:           "  abc1234\t",
+		BackendRefs:      []string{"https://b.example", "https://a.example", "https://b.example", ""},
+		StoreRefs:        []string{"s3://bucket-b", "s3://bucket-a", "s3://bucket-a"},
+		BackendRefsBasis: BasisDeclared,
+		ModelCount:       intPtr(0),
+		ToolCount:        intPtr(3),
+		ResourceCount:    intPtr(-1),
+		CollectionCount:  intPtr(2),
+		SkillCount:       intPtr(5),
+	}
+	p := f.Properties()
+	if p["build_id"] != "build-42" {
+		t.Fatalf("build_id = %v, want build-42", p["build_id"])
+	}
+	if p["commit"] != "abc1234" {
+		t.Fatalf("commit = %v, want abc1234", p["commit"])
+	}
+	if !reflect.DeepEqual(p["backend_refs"], []string{"https://a.example", "https://b.example"}) {
+		t.Fatalf("backend_refs = %v", p["backend_refs"])
+	}
+	if !reflect.DeepEqual(p["store_refs"], []string{"s3://bucket-a", "s3://bucket-b"}) {
+		t.Fatalf("store_refs = %v", p["store_refs"])
+	}
+	if p["backend_refs_basis"] != BasisDeclared {
+		t.Fatalf("backend_refs_basis = %v", p["backend_refs_basis"])
+	}
+	if v, ok := p["model_count"]; !ok || v != 0 {
+		t.Fatalf("model_count = (%v, %v), want 0", v, ok)
+	}
+	if p["tool_count"] != 3 || p["collection_count"] != 2 || p["skill_count"] != 5 {
+		t.Fatalf("counts unexpected: %v", p)
+	}
+	if _, ok := p["resource_count"]; ok {
+		t.Fatalf("negative count must be omitted: %v", p["resource_count"])
+	}
+
+	// Invalid BackendRefsBasis must be omitted even when refs are present.
+	badBasis := ServiceFacts{
+		BackendRefs:      []string{"https://a.example"},
+		BackendRefsBasis: "guessed",
+	}.Properties()
+	if _, ok := badBasis["backend_refs_basis"]; ok {
+		t.Fatalf("invalid backend_refs_basis must be omitted: %v", badBasis)
+	}
+
+	// Control-only BuildID and Commit must be omitted.
+	ctrlOnly := ServiceFacts{
+		BuildID: "\n\x00\t",
+		Commit:  "\x7f ",
+	}.Properties()
+	if _, ok := ctrlOnly["build_id"]; ok {
+		t.Fatalf("control-only build_id must be omitted: %v", ctrlOnly)
+	}
+	if _, ok := ctrlOnly["commit"]; ok {
+		t.Fatalf("control-only commit must be omitted: %v", ctrlOnly)
 	}
 }

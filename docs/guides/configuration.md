@@ -1,13 +1,13 @@
 # Configuration, plan, and scan
 
-**Implemented M2a + D3 content tier + D4 secret detection:** Cobra help/version,
-strict YAML loading, explicit flag replacements, policy validation, offline
-`targets` preparation, offline `plan` (targets × allowlisted checks, no traffic),
-and `scan` for Jupyter / MCP / Ollama through `internal/scanner` (checkpoint
-journal, OpenGraph payload, evidence sidecar, and default-on, bounded
+**Implemented M2a + D3 content tier + D4 secret detection + M2b cohort 1 (A2A, vLLM, Qdrant):**
+Cobra help/version, strict YAML loading, explicit flag replacements, policy validation,
+offline `targets` preparation, offline `plan` (targets × allowlisted checks, no traffic),
+and `scan` for Jupyter / MCP / Ollama / A2A / vLLM / Qdrant through `internal/scanner`
+(checkpoint journal, OpenGraph payload, evidence sidecar, and default-on, bounded
 `.content.jsonl` content tier with high-precision secret detection).
-`upload` and `resume` remain honest not-implemented stubs (M3). Detector
-semantics are specified in the
+`upload` remains an honest not-implemented stub and `resume` is not yet implemented (M3).
+Detector semantics are specified in the
 [graph model](../02-graph-model.md#content-and-secrets). Live
 CLI vs package coverage is recorded in [scan coverage](../internals/scan-coverage.md).
 
@@ -107,9 +107,9 @@ sidecar is emitted.
 ### Scan and plan commands
 
 - `llmhound plan`: prints prepared targets × embedded allowlisted checks for
-  Jupyter, MCP, and Ollama. No DNS, no target connections, no artifacts.
-  Content checks (`ollama_show`, `jupyter_file_content`, `mcp_resources_read`)
-  are active by default and show a policy skip reason when disabled via
+  Jupyter, MCP, Ollama, A2A, vLLM, and Qdrant. No DNS, no target connections, no artifacts.
+  Content checks (`ollama_show`, `jupyter_file_content`, `mcp_resources_read`,
+  `qdrant_points_sample`) are active by default and show a policy skip reason when disabled via
   `--content=false` or `--content-disable`.
 - `llmhound scan`: discovers and enumerates those surfaces, writes
   `<prefix>.journal.jsonl`, `<prefix>.json` (or `<prefix>-base.json` and
@@ -120,10 +120,10 @@ sidecar is emitted.
   port/path overrides that inherit builtin matchers). Only surfaces present in
   the active definitions are scanned, so `plan` and `scan` agree. See
   [scan coverage](../internals/scan-coverage.md) for probe and coverage behavior.
-  Known limitation: only the Jupyter, MCP, and Ollama surfaces have collectors
-  in M2a; a custom `--discovery-file` entry for any other surface is honored
-  by `plan` (listed with no checks) and probed by `scan`, but no collector can
-  enumerate it yet, so its coverage record stays at the probe result.
+  Known limitation: only the Jupyter, MCP, Ollama, A2A, vLLM, and Qdrant surfaces
+  have collectors today; a custom `--discovery-file` entry for any other surface is
+  honored by `plan` (listed with no checks) and probed by `scan`, but no collector
+  can enumerate it yet, so its coverage record stays at the probe result.
 
 ### Bounds
 
@@ -164,8 +164,9 @@ These values are parsed/validated. Scan collectors apply TLS, User-Agent, the
   up to 256 bytes. Add non-secret operator contact information if desired.
 - `content.enabled` (`--content`): default `true`; collect bounded existing
   content (Ollama prompts/modelfiles/templates, Jupyter text/notebook bodies,
-  MCP text resources) into `<prefix>.content.jsonl` (mode `0600`) without
-  leaking bodies into payloads, sidecars, checkpoints, or logs.
+  MCP text resources, A2A agent cards, Qdrant point payload samples) into
+  `<prefix>.content.jsonl` (mode `0600`) without leaking bodies into payloads,
+  sidecars, checkpoints, or logs.
 - `content.max_item_bytes` (`--content-max-item-bytes`): default `262144`
   (256 KiB; range `1`–`16777216`).
 - `content.max_items_per_resource` (`--content-max-items-per-resource`):
@@ -176,7 +177,7 @@ These values are parsed/validated. Scan collectors apply TLS, User-Agent, the
   (range `1`–`1000`).
 - `content.surfaces` (`--content-disable`): per-surface enable map in YAML
   (valid keys: capability-matrix surface names such as `ollama`, `jupyter`,
-  `mcp`); `--content-disable` accepts comma-separated or repeated surface names
+  `mcp`, `a2a`, `qdrant`); `--content-disable` accepts comma-separated or repeated surface names
   to disable content reads for those surfaces.
 - `secrets.detectors`: per-detector enable map over content bodies; every
   detector is enabled unless explicitly set to `false`. Valid keys:

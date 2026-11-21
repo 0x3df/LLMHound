@@ -69,6 +69,8 @@ type ServiceFacts struct {
 	Name     string
 	Product  string
 	Vendor   string
+	BuildID  string
+	Commit   string
 
 	Access     Access
 	VantageKey string
@@ -81,6 +83,19 @@ type ServiceFacts struct {
 	// says how that was established. Both are omitted when the list is empty.
 	ExecSurface      []string
 	ExecSurfaceBasis string
+
+	// BackendRefs and StoreRefs list sanitized dependency references; the basis
+	// says how they were established. Both are omitted when empty.
+	BackendRefs      []string
+	StoreRefs        []string
+	BackendRefsBasis string
+
+	// Inventory counts distinguish observed zero from unknown/unset (nil).
+	ModelCount      *int
+	ToolCount       *int
+	ResourceCount   *int
+	CollectionCount *int
+	SkillCount      *int
 
 	// TLS is nil when no TLS observation exists.
 	TLS *TLSSummary
@@ -114,6 +129,12 @@ func (f ServiceFacts) Properties() map[string]any {
 	if f.Vendor != "" {
 		p["vendor"] = f.Vendor
 	}
+	if b := boundReason(f.BuildID); b != "" {
+		p["build_id"] = b
+	}
+	if c := boundReason(f.Commit); c != "" {
+		p["commit"] = c
+	}
 	if f.VantageKey != "" {
 		p["vantage_key"] = f.VantageKey
 	}
@@ -128,6 +149,31 @@ func (f ServiceFacts) Properties() map[string]any {
 	if surfaces := uniqueSorted(f.ExecSurface); len(surfaces) > 0 && validBasis(f.ExecSurfaceBasis) {
 		p["exec_surface"] = surfaces
 		p["exec_surface_basis"] = f.ExecSurfaceBasis
+	}
+	backends := uniqueSorted(f.BackendRefs)
+	if len(backends) > 0 {
+		p["backend_refs"] = backends
+	}
+	stores := uniqueSorted(f.StoreRefs)
+	if len(stores) > 0 {
+		p["store_refs"] = stores
+	}
+	if (len(backends) > 0 || len(stores) > 0) && validBasis(f.BackendRefsBasis) {
+		p["backend_refs_basis"] = f.BackendRefsBasis
+	}
+	for _, count := range []struct {
+		key string
+		val *int
+	}{
+		{"model_count", f.ModelCount},
+		{"tool_count", f.ToolCount},
+		{"resource_count", f.ResourceCount},
+		{"collection_count", f.CollectionCount},
+		{"skill_count", f.SkillCount},
+	} {
+		if count.val != nil && *count.val >= 0 {
+			p[count.key] = *count.val
+		}
 	}
 	if f.Content != nil && f.Content.Collected {
 		p["content_bytes"] = f.Content.Bytes

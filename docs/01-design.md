@@ -1,6 +1,6 @@
 # LLMHound — Design
 
-**Revised:** 2026-11-20 · **Reading order:** 2 of 8 (see [docs index](README.md))
+**Revised:** 2026-11-21 · **Reading order:** 2 of 8 (see [docs index](README.md))
 
 Architecture, scope, and behavior. This is the *what and how*; the *why* is in the
 [executive summary](00-executive-summary.md), the graph contract is in the
@@ -61,7 +61,7 @@ decide which properties must be flat and queryable.
 - Target attribution, reverse DNS or FQDN guessing, CE-side lookups, stale-data
   reconciliation and cleanup — owned by the separate normalization program
 - Active exploit validation, tool invocation, inference requests
-  (see [`.future`](future-ideas.md))
+  (see [future ideas](future-ideas.md))
 - BloodHound Enterprise-only features
 - Change comparisons / `llmhound diff` (deferred)
 
@@ -102,8 +102,8 @@ targets (CIDR ranges / targets-file, minus exclude)
   → deterministic graph (SHA-256 objectids) + optional path-qualification rules
   → emission: OpenGraph payload (JSON; ZIP stream for large scans)
       + evidence sidecar (.evidence.jsonl) + restricted content file (.content.jsonl)
-  → BloodHound CE: PUT /api/v2/extensions, POST /api/v2/file-upload,
-      POST /api/v2/saved-queries
+  → BloodHound CE: PUT /api/v2/extensions, job-based file upload
+      (/api/v2/file-upload/*), POST /api/v2/saved-queries/import
   — checkpoint journal throughout, resumable
 ```
 
@@ -147,7 +147,7 @@ LLMHound/
 │   ├── targets/              # CIDR/file parsing, dedup, exclude
 │   ├── discovery/            # data-driven port probes + path fingerprints → service typing
 │   ├── transport/            # shared bounded, TLS-aware HTTP client
-│   ├── collectors/           # one package per surface: jupyter, mcp, ollama (more in M2b/M2c)
+│   ├── collectors/           # one package per surface: jupyter, mcp, ollama, a2a, vllm, qdrant (more in M2b/M2c)
 │   ├── content/              # bounded content-tier records, redaction hook, 0600 lazy writer
 │   ├── secrets/              # parse/checksum-verified secret detectors over content bodies
 │   ├── correlate/            # asset mapping → existing native node, else NetworkEndpoint
@@ -179,8 +179,9 @@ qualification, and acceptance checks. Per-surface checks and outcomes are in
 [`collector-capabilities.md`](03-collector-capabilities.md). Key
 design points:
 
-- Source identifier and `source_kind` are `LLMHound`; kinds use clean names,
-  with any CE-required qualification mapped centrally after M0.
+- Source identifier and `source_kind` are `LLMHound`; kinds use clean logical
+  names in code and docs, mapped centrally to `LLMHound_<Kind>` in
+  `internal/graph/kinds.go` (M0 Q1).
 - Services attach to **existing** nodes by objectid from the mapping file. No
   FQDN guessing, no identity merge, no native nodes emitted or modified.
 - Anonymous access is recorded as flat properties, not edges.
@@ -188,23 +189,26 @@ design points:
 
 ## Outputs and configuration
 
-- **OpenGraph payload** — `llmhound-<ts>.json` (or `.zip`): nodes and edges
-  with flat, queryable properties referencing evidence by stable ID.
-- **Evidence sidecar** — `llmhound-<ts>.evidence.jsonl`: one record per check
+- **OpenGraph payload** — `<prefix>.json` (or `<prefix>-base.json` +
+  `<prefix>-linking.json` when native mapping correlation applies; ZIP streaming
+  planned): nodes and edges with flat, queryable properties referencing evidence
+  by stable ID.
+- **Evidence sidecar** — `<prefix>.evidence.jsonl`: one record per check
   result, fingerprint, TLS observation, redirect, and attachment decision.
   Shareable: no content bodies or raw secrets.
-- **Content file** — `llmhound-<ts>.content.jsonl` (mode 0600): bounded content
+- **Content file** — `<prefix>.content.jsonl` (mode 0600): bounded content
   bodies with secret spans replaced by `[secret:<type>]`. Not shipped through
   the BloodHound ingest pipeline.
-- **`llmhound.yaml`** — deployment scope, `vantage_key`, targets and `exclude`,
-  concurrency/rate/timeout/size bounds, `content` settings (global and
-  per-surface enable, byte/item caps), `secrets` detector enables, TLS mode,
-  User-Agent, `mapping_file`, `assumed_reach_principals`, enabled `rules`, and
-  collection toggles such as `workspace_listing` (on by default because paths
-  are high-value, bounded and redacted; disable where file names are
-  sensitive). Flags override file values; the effective policy is recorded with
-  each scan. Missing required values (scope, vantage key) fail before any
-  network activity.
+- **Checkpoint journal** — `<prefix>.journal.jsonl`: append-only scan journal
+  used for deterministic replay and planned resume (M3).
+- **`llmhound.yaml`** — built keys: deployment `scope`, `vantage_key`,
+  `targets`/`cidrs`/`targets_files` and `exclude`/`exclude_files`, `bounds`
+  (concurrency/rate/timeout/size/page/item/redirect limits), `content` settings
+  (global and per-surface enable, byte/item/sample caps), `secrets.detectors`
+  enables, `insecure` TLS mode, `user_agent`, and `correlation.mapping_file`.
+  Planned for M2d: `assumed_reach_principals` and enabled `rules`. Flags
+  override file values; the effective policy is recorded with each scan. Missing
+  required values (scope, vantage key) fail before any network activity.
 
 Retain bounded evidence, preferring structured metadata and redacted excerpts
 over raw responses. Payloads and journals need restricted access and documented

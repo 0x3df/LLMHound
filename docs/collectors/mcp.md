@@ -1,8 +1,8 @@
 # MCP collector
 
-Anonymous, read-only enumeration of Model Context Protocol servers over network
-transports. Package: `internal/collectors/mcp`. Contract: the MCP row of the
-[capability matrix](../03-collector-capabilities.md).
+> **Status: M2a + D3 + D4 MCP collector implemented.** Anonymous, read-only enumeration of
+> Model Context Protocol servers over network transports. Package: `internal/collectors/mcp`.
+> Contract: the MCP row of the [capability matrix](../03-collector-capabilities.md).
 
 ## Behavior
 
@@ -16,9 +16,12 @@ transports. Package: `internal/collectors/mcp`. Contract: the MCP row of the
   `content.surfaces.mcp` allow (default `true`), non-binary listed resources are read via
   `resources/read` within `content.*` byte/item limits into `<prefix>.content.jsonl` (mode
   `0600`). Binary MIME types/extensions and binary/null-byte payloads are skipped, bodies never
-  enter graph nodes or `.evidence.jsonl`, and `MCPServer` carries only `content_bytes` and
-  `content_truncated`. `mcp_resources_read` is omitted from `anon_operations`. Disable with
-  `--content=false` or `--content-disable=mcp`.
+  enter graph nodes or `.evidence.jsonl`, and `MCPServer` carries only summary flags/sizes
+  (`content_bytes`, `content_truncated`) plus secret presence flags (`has_exposed_secret`,
+  `secret_types`, `secret_last_confirmed`) when `internal/secrets` matches; matched secret
+  values are replaced by `[secret:<type>]` in `.content.jsonl` and recorded by type and
+  location (`detected_exposures`) in `.evidence.jsonl`. `mcp_resources_read` is omitted from
+  `anon_operations`. Disable with `--content=false` or `--content-disable=mcp`.
 - **On HTTP 401:** the collector records the denial and, where available, fetches the anonymous
   RFC 9728 protected-resource metadata (`/.well-known/oauth-protected-resource`) to record the
   advertised authorization server(s). Those URLs are recorded, never followed. On 403 the

@@ -160,12 +160,12 @@ func TestUploadStillUnimplementedAndPlanWritesNoArtifacts(t *testing.T) {
 	if !strings.Contains(out, "TARGET: ai.example.test") {
 		t.Fatalf("plan missing target: %q", out)
 	}
-	for _, surface := range []string{"jupyter", "mcp", "ollama"} {
+	for _, surface := range []string{"jupyter", "mcp", "ollama", "a2a", "vllm", "qdrant"} {
 		if !strings.Contains(out, "SURFACE: "+surface) {
 			t.Fatalf("plan missing surface %s: %q", surface, out)
 		}
 	}
-	for _, chk := range []string{"ollama_show", "jupyter_file_content", "mcp_resources_read"} {
+	for _, chk := range []string{"ollama_show", "jupyter_file_content", "mcp_resources_read", "qdrant_points_sample"} {
 		if !strings.Contains(out, chk) {
 			t.Fatalf("plan missing content check %s: %q", chk, out)
 		}
@@ -178,8 +178,8 @@ func TestUploadStillUnimplementedAndPlanWritesNoArtifacts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("plan --content=false: %q %v", outOff, err)
 	}
-	if !strings.Contains(outOff, "ollama_show") || !strings.Contains(outOff, "policy:") {
-		t.Fatalf("plan --content=false should show inactive ollama_show with policy skip: %q", outOff)
+	if !strings.Contains(outOff, "ollama_show") || !strings.Contains(outOff, "qdrant_points_sample") || !strings.Contains(outOff, "policy:") {
+		t.Fatalf("plan --content=false should show inactive content checks with policy skip: %q", outOff)
 	}
 
 	files, err := os.ReadDir(".")
@@ -581,5 +581,124 @@ func TestRemovedCorrelationFlagsAreRejected(t *testing.T) {
 		if _, err := execute(args...); err == nil {
 			t.Fatalf("removed flag %v accepted", flag)
 		}
+	}
+}
+
+func TestScanCLIM2bCohortLoopbackFixtures(t *testing.T) {
+	inEmptyDirectory(t)
+	tok := secretstest.GitHubToken("ghp", "Mn1Op5Qr9St3Uv7Wx2Yz6Ab0Cd4Ef8")
+
+	a2aSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/.well-known/agent-card.json" {
+			_, _ = w.Write([]byte(`{"name":"CLIAgent","version":"1.0.0","skills":[{"id":"sk1","name":"Sk1"}]}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer a2aSrv.Close()
+
+	vllmSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/version":
+			_, _ = w.Write([]byte(`{"version":"0.6.4"}`))
+		case "/v1/models":
+			_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"qwen2.5","owned_by":"vllm"}]}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer vllmSrv.Close()
+
+	qdrantSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			_, _ = w.Write([]byte(`{"title":"qdrant","version":"1.12.5","commit":"cafebabe"}`))
+		case "/collections":
+			_, _ = w.Write([]byte(`{"result":{"collections":[{"name":"secrets_kb"}]},"status":"ok"}`))
+		case "/collections/secrets_kb":
+			_, _ = w.Write([]byte(`{"result":{"status":"green","points_count":1,"config":{"params":{"vectors":{"size":128,"distance":"Cosine"}}}}}`))
+		case "/snapshots":
+			_, _ = w.Write([]byte(`{"result":[]}`))
+		case "/collections/secrets_kb/points/scroll":
+			_, _ = w.Write([]byte(fmt.Sprintf(`{"result":{"points":[{"id":42,"payload":{"token":"%s"}}],"next_page_offset":null}}`, tok)))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer qdrantSrv.Close()
+
+	defs := fmt.Sprintf(`[
+  {"surface":"a2a","default_port":%d,"probe_paths":["/.well-known/agent-card.json"]},
+  {"surface":"vllm","default_port":%d,"probe_paths":["/v1/models","/version"]},
+  {"surface":"qdrant","default_port":%d,"probe_paths":["/","/collections"]}
+]`, portOf(a2aSrv.URL), portOf(vllmSrv.URL), portOf(qdrantSrv.URL))
+	if err := os.WriteFile("m2b-discovery.json", []byte(defs), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	outDir := t.TempDir()
+	out, err := execute(
+		"scan",
+		"--scope", "cli-m2b",
+		"--vantage", "cli-vantage",
+		"--targets", "127.0.0.1",
+		"--discovery-file", "m2b-discovery.json",
+		"--output-dir", outDir,
+		"--prefix", "m2b-live",
+	)
+	if err != nil {
+		t.Fatalf("scan: %q %v", out, err)
+	}
+
+	contentPath := filepath.Join(outDir, "m2b-live.content.jsonl")
+	cInfo, err := os.Stat(contentPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cInfo.Mode().Perm() != 0600 {
+		t.Errorf("content file mode = %o, want 0600", cInfo.Mode().Perm())
+	}
+	contentRaw, err := os.ReadFile(contentPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(contentRaw), "[secret:github_token]") || strings.Contains(string(contentRaw), tok) {
+		t.Errorf("content file must redact token and not retain value")
+	}
+
+	payloadData, err := os.ReadFile(filepath.Join(outDir, "m2b-live.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload emitter.Payload
+	if err := json.Unmarshal(payloadData, &payload); err != nil {
+		t.Fatal(err)
+	}
+	qProps := propsOfKind(t, payload, "LLMHound_QdrantInstance")
+	if qProps["has_exposed_secret"] != true {
+		t.Errorf("QdrantInstance has_exposed_secret = %v, want true", qProps["has_exposed_secret"])
+	}
+	sidecar, err := os.ReadFile(filepath.Join(outDir, "m2b-live.evidence.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(sidecar), `"detected_exposures"`) {
+		t.Errorf("sidecar missing detected_exposures: %s", sidecar)
+	}
+	entries, err := os.ReadDir(outDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		raw, err := os.ReadFile(filepath.Join(outDir, e.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(raw), tok) {
+			t.Errorf("secret value leaked into %s", e.Name())
+		}
+	}
+	if strings.Contains(out, tok) {
+		t.Errorf("secret value leaked into CLI stdout")
 	}
 }

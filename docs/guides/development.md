@@ -46,6 +46,7 @@ against a candidate CE release.
 ```bash
 cd lab && ./scripts/lab-up.sh && ./scripts/run-m0-checks.sh   # see lab/README.md
 ./scripts/run-r-checks.sh                                    # R1–R9, ~40 min (ingest is slow)
+./scripts/run-d2-checks.sh                                   # saved searches on emitted scan data
 ```
 
 ## Continuous integration

@@ -1,6 +1,6 @@
 # Jupyter Collector Reference
 
-> **Status: M2a + D3 Jupyter collector implemented.** Companion to
+> **Status: M2a + D3 + D4 Jupyter collector implemented.** Companion to
 > [design](../01-design.md),
 > [graph model](../02-graph-model.md), and
 > [capability matrix](../03-collector-capabilities.md).
@@ -40,14 +40,17 @@ The collector strictly executes only allowlisted read-only checks:
    WebSocket channels on `/api/kernels/<id>/channels`) are never contacted.
 2. **No Mutations**: Only HTTP `GET` requests are issued. Mutation endpoints (`POST`, `PUT`,
    `DELETE`, `PATCH`) are never called.
-3. **Bounded Content Reads & Binary Exclusion**: When `content.enabled` and
+3. **Bounded Content Reads, Secret Detection & Binary Exclusion**: When `content.enabled` and
    `content.surfaces.jupyter` allow (default `true` via CLI/config), `jupyter_file_content`
    fetches non-binary notebooks and workspace text files listed under `/api/contents` into
    `<prefix>.content.jsonl` (mode `0600`), bounded by `content.max_item_bytes`,
    `content.max_items_per_resource`, and `content.max_service_bytes`. Binary extensions,
    `base64` encodings, binary MIME types, and null-byte payloads are skipped, and content
-   bodies never enter graph payloads, sidecar records, or journals (`JupyterServer` records
-   only `content_bytes` and `content_truncated`). Disable with `--content=false` or
+   bodies never enter graph payloads, sidecar records, or journals. High-precision secret
+   detectors (`internal/secrets`) scan collected bodies, replace verified matches with
+   `[secret:<type>]`, record `detected_exposures` by type and location in `.evidence.jsonl`,
+   and summarize `JupyterServer` with `content_bytes`, `content_truncated`, `has_exposed_secret`,
+   `secret_types`, and `secret_last_confirmed`. Disable with `--content=false` or
    `--content-disable=jupyter`.
 4. **Authentication Boundaries**: The collector stops at authentication boundaries. HTTP 401/403
    responses and HTTP 200/302 HTML login pages are recognized as honest access denials (`denied`),
@@ -101,6 +104,6 @@ The collector emits structured evidence records into the `.evidence.jsonl` sidec
 - **`check_result`**: Per-check outcome (`success`, `denied`, `failed`), reason, and HTTP details.
 - **`fingerprint`**: Reported API version, product ("Jupyter Server"), vendor ("Project Jupyter"),
   and observation method ("api_version").
-- **`correlation`**: Decision provenance linking target to AD Computer or NetworkEndpoint fallback.
+- **`correlation`**: Decision provenance linking target to an existing native BloodHound node or NetworkEndpoint fallback.
 - **`tls`**: When collecting over HTTPS, leaf certificate SHA-256 fingerprint, issuer, subject,
   SANs, validity interval, and negotiated TLS version.

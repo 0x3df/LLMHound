@@ -20,6 +20,9 @@ const (
 	SurfaceJupyter Surface = "jupyter"
 	SurfaceOllama  Surface = "ollama"
 	SurfaceMCP     Surface = "mcp"
+	SurfaceA2A     Surface = "a2a"
+	SurfaceVLLM    Surface = "vllm"
+	SurfaceQdrant  Surface = "qdrant"
 )
 
 // MatchFunc inspects an HTTP probe response to verify a service match.
@@ -39,6 +42,9 @@ func BuiltinDefinitions() []Definition {
 		JupyterDefinition(),
 		OllamaDefinition(),
 		MCPDefinition(),
+		A2ADefinition(),
+		VLLMDefinition(),
+		QdrantDefinition(),
 	}
 }
 
@@ -192,6 +198,126 @@ func IsJupyterLoginRedirect(location string) bool {
 	}
 	next := strings.ToLower(u.Query().Get("next"))
 	return strings.Contains(next, "/tree") || strings.Contains(next, "/lab")
+}
+
+// A2ADefinition returns the fingerprint definition for Agent2Agent (A2A) endpoints.
+func A2ADefinition() Definition {
+	return Definition{
+		Surface:     SurfaceA2A,
+		DefaultPort: 8080,
+		ProbePaths:  []string{"/.well-known/agent-card.json", "/.well-known/agent.json"},
+		Match: func(status int, headers http.Header, body []byte) bool {
+			bodyStr := strings.ToLower(string(body))
+			if status == http.StatusOK {
+				var doc map[string]json.RawMessage
+				if json.Unmarshal(body, &doc) != nil {
+					return false
+				}
+				var name string
+				if rawName, ok := doc["name"]; !ok || json.Unmarshal(rawName, &name) != nil || strings.TrimSpace(name) == "" {
+					return false
+				}
+				for _, key := range []string{"skills", "capabilities", "protocolVersion", "defaultInputModes", "supportedInterfaces", "additionalInterfaces"} {
+					if _, ok := doc[key]; ok {
+						return true
+					}
+				}
+				if _, hasURL := doc["url"]; hasURL {
+					for _, key := range []string{"security", "securitySchemes", "version"} {
+						if _, ok := doc[key]; ok {
+							return true
+						}
+					}
+				}
+				return false
+			}
+			if status == http.StatusUnauthorized || status == http.StatusForbidden {
+				www := strings.ToLower(headers.Get("Www-Authenticate"))
+				return strings.Contains(bodyStr, "agent-card") || strings.Contains(bodyStr, "a2a") || strings.Contains(www, "a2a")
+			}
+			return false
+		},
+	}
+}
+
+// VLLMDefinition returns the fingerprint definition for vLLM inference servers.
+// Generic OpenAI-compatible /v1/models responses without vLLM-specific evidence
+// intentionally do not match.
+func VLLMDefinition() Definition {
+	return Definition{
+		Surface:     SurfaceVLLM,
+		DefaultPort: 8000,
+		ProbePaths:  []string{"/v1/models", "/version"},
+		Match: func(status int, headers http.Header, body []byte) bool {
+			if strings.Contains(strings.ToLower(headers.Get("Server")), "vllm") {
+				return true
+			}
+			bodyStr := strings.ToLower(string(body))
+			if status == http.StatusOK {
+				var models struct {
+					Data []struct {
+						OwnedBy     string `json:"owned_by"`
+						MaxModelLen *int64 `json:"max_model_len"`
+					} `json:"data"`
+				}
+				if json.Unmarshal(body, &models) == nil && models.Data != nil {
+					for _, m := range models.Data {
+						if strings.EqualFold(strings.TrimSpace(m.OwnedBy), "vllm") || m.MaxModelLen != nil {
+							return true
+						}
+					}
+					return false
+				}
+				var ver struct {
+					Version string `json:"version"`
+				}
+				var doc map[string]json.RawMessage
+				if json.Unmarshal(body, &doc) == nil && len(doc) == 1 && doc["version"] != nil &&
+					json.Unmarshal(body, &ver) == nil && strings.TrimSpace(ver.Version) != "" {
+					return true
+				}
+			}
+			if status == http.StatusUnauthorized || status == http.StatusForbidden {
+				return strings.Contains(bodyStr, "vllm") || strings.Contains(strings.ToLower(headers.Get("Www-Authenticate")), "vllm")
+			}
+			return false
+		},
+	}
+}
+
+// QdrantDefinition returns the fingerprint definition for Qdrant vector databases.
+func QdrantDefinition() Definition {
+	return Definition{
+		Surface:     SurfaceQdrant,
+		DefaultPort: 6333,
+		ProbePaths:  []string{"/", "/collections"},
+		Match: func(status int, headers http.Header, body []byte) bool {
+			if strings.Contains(strings.ToLower(headers.Get("Server")), "qdrant") {
+				return true
+			}
+			bodyStr := strings.ToLower(string(body))
+			if status == http.StatusOK {
+				var root struct {
+					Title string `json:"title"`
+				}
+				if json.Unmarshal(body, &root) == nil && strings.Contains(strings.ToLower(root.Title), "qdrant") {
+					return true
+				}
+				var cols struct {
+					Result *struct {
+						Collections []json.RawMessage `json:"collections"`
+					} `json:"result"`
+				}
+				if json.Unmarshal(body, &cols) == nil && cols.Result != nil && cols.Result.Collections != nil {
+					return true
+				}
+			}
+			if status == http.StatusUnauthorized || status == http.StatusForbidden {
+				return strings.Contains(bodyStr, "qdrant") || strings.Contains(strings.ToLower(headers.Get("Www-Authenticate")), "qdrant")
+			}
+			return false
+		},
+	}
 }
 
 // ProbeResult holds the result of probing a target against a fingerprint definition.

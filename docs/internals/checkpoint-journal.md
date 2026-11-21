@@ -60,9 +60,14 @@ enforces the following bounds across all records:
 
 1. **URL Sanitization**: Target and source URLs have userinfo credentials, query strings, and fragments
    stripped via `SanitizeTarget` and `SanitizeURL`.
-2. **Secret Redaction**: Any property or detail map key matching sensitive patterns (`authorization`,
-   `cookie`, `api_key`, `api-key`, `apikey`, `password`, `passwd`, `secret`, `bearer`, `credential`,
-   `token`, `auth`, `private_key`, `client_secret`) has its value masked with `"[REDACTED]"`.
+2. **Secret Redaction**: Any property or detail map key matching `auth`, ending in `token`, or
+   containing sensitive substrings (`authorization`, `cookie`, `api_key`, `api-key`, `apikey`,
+   `passw`, `secret`, `bearer`, `credential`, `private_key`, `client_secret`) has its value
+   masked with `"[REDACTED]"`. The validated secret-presence classification properties
+   (`has_exposed_secret`, `secret_types`, `secret_last_confirmed`) are accepted only in their
+   canonical shapes (`true`, known detector names, UTC RFC3339 timestamp) and omitted otherwise.
+   Free-text strings also strip URL credentials/queries, `Bearer`/`Basic` credentials, and inline
+   secret assignments.
 3. **String Bounding**: String values exceeding `DefaultMaxStringSize` (4096 bytes) are truncated to 4096 bytes
    with the suffix `"…[truncated]"`.
 4. **Entry Size Bound**: Serialized JSON lines exceeding `DefaultMaxEntryBytes` (1 MB) are rejected with

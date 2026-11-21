@@ -325,8 +325,8 @@ func TestMCPDefinitionMatch(t *testing.T) {
 
 func TestBuiltinDefinitions(t *testing.T) {
 	defs := discovery.BuiltinDefinitions()
-	if len(defs) != 3 {
-		t.Fatalf("expected 3 builtin definitions, got %d", len(defs))
+	if len(defs) != 6 {
+		t.Fatalf("expected 6 builtin definitions, got %d", len(defs))
 	}
 
 	seen := make(map[discovery.Surface]bool)
@@ -343,7 +343,10 @@ func TestBuiltinDefinitions(t *testing.T) {
 		}
 	}
 
-	for _, s := range []discovery.Surface{discovery.SurfaceJupyter, discovery.SurfaceOllama, discovery.SurfaceMCP} {
+	for _, s := range []discovery.Surface{
+		discovery.SurfaceJupyter, discovery.SurfaceOllama, discovery.SurfaceMCP,
+		discovery.SurfaceA2A, discovery.SurfaceVLLM, discovery.SurfaceQdrant,
+	} {
 		if !seen[s] {
 			t.Errorf("expected surface %s in builtin definitions", s)
 		}
@@ -426,5 +429,104 @@ func TestProbeReturnsContextErrorOnCancellation(t *testing.T) {
 	res, err := discovery.Probe(ctx, nil, srv.URL, discovery.OllamaDefinition())
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled (result %+v)", err, res)
+	}
+}
+
+func TestA2AVLLMQdrantDefinitionsMatch(t *testing.T) {
+	tests := []struct {
+		name      string
+		def       discovery.Definition
+		path      string
+		handler   http.HandlerFunc
+		wantMatch bool
+	}{
+		{
+			name: "a2a agent card json",
+			def:  discovery.A2ADefinition(),
+			path: "/.well-known/agent-card.json",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(`{"name":"Agent","skills":[{"id":"s1"}]}`))
+			},
+			wantMatch: true,
+		},
+		{
+			name: "a2a generic json not matched",
+			def:  discovery.A2ADefinition(),
+			path: "/.well-known/agent-card.json",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(`{"name":"GenericApp"}`))
+			},
+			wantMatch: false,
+		},
+		{
+			name: "vllm models owned_by vllm",
+			def:  discovery.VLLMDefinition(),
+			path: "/v1/models",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"llama3","owned_by":"vllm"}]}`))
+			},
+			wantMatch: true,
+		},
+		{
+			name: "vllm version json",
+			def:  discovery.VLLMDefinition(),
+			path: "/version",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(`{"version":"0.6.4"}`))
+			},
+			wantMatch: true,
+		},
+		{
+			name: "vllm rejects generic openai models",
+			def:  discovery.VLLMDefinition(),
+			path: "/v1/models",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"gpt-4o","owned_by":"openai"}]}`))
+			},
+			wantMatch: false,
+		},
+		{
+			name: "qdrant root banner",
+			def:  discovery.QdrantDefinition(),
+			path: "/",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(`{"title":"qdrant - vector search engine","version":"1.12.5"}`))
+			},
+			wantMatch: true,
+		},
+		{
+			name: "qdrant collections json",
+			def:  discovery.QdrantDefinition(),
+			path: "/collections",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(`{"result":{"collections":[]},"status":"ok"}`))
+			},
+			wantMatch: true,
+		},
+		{
+			name: "qdrant rejects generic html",
+			def:  discovery.QdrantDefinition(),
+			path: "/",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(`<html>welcome</html>`))
+			},
+			wantMatch: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(tc.handler)
+			defer srv.Close()
+			def := tc.def
+			def.ProbePaths = []string{tc.path}
+			res, err := discovery.Probe(context.Background(), srv.Client(), srv.URL, def)
+			if err != nil {
+				t.Fatalf("Probe failed: %v", err)
+			}
+			if res.Matched != tc.wantMatch {
+				t.Fatalf("got matched=%v, want=%v", res.Matched, tc.wantMatch)
+			}
+		})
 	}
 }

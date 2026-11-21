@@ -1,13 +1,13 @@
 # LLMHound graph model
 
-> **Status: implemented core + D3 content tier + D4 secret detection, specified
+> **Status: implemented core + D3 content tier + D4 secret detection + M2b cohort 1 (A2A, vLLM, Qdrant), specified
 > remaining extensions.** Companion to the
 > [design](01-design.md). The graph, identity, mapping-file attachment, flat
 > access properties, shared property contract, default-on bounded content tier
 > (`internal/content`), high-precision secret detection (`internal/secrets`),
-> emitter, shipped saved queries, and the Jupyter, MCP, and
-> Ollama collectors are implemented and tested. Remaining metadata properties,
-> path-qualification rules, and two-step upload are
+> emitter, shipped saved queries, and the Jupyter, MCP, Ollama, A2A, vLLM, and
+> Qdrant collectors are implemented and tested. Remaining metadata properties,
+> path-qualification rules, remaining M2b/M2c surfaces, and two-step upload are
 > specified here but not built; the [Implementation status](#implementation-status)
 > table lists exactly which. CE behavior is recorded in
 > [05-ce-compatibility.md](05-ce-compatibility.md).
@@ -79,8 +79,8 @@ endpoint, not its child tools, skills, or resources.
 - **`AIService`** is an extra label carried by **every concrete service kind**
   (`MCPServer`, `A2AAgent`, all AI-service kinds, M2c kinds). It is not carried
   by child nodes, `NetworkEndpoint`, or existing nodes, and never owns
-  identity. If M0 shows multi-label is unsupported, saved queries are generated
-  with explicit kind lists.
+  identity. M0 Q2 and R2 confirmed multi-label support in CE 9.7.1, so saved
+  queries filter on `LLMHound_AIService`.
 - **`NetworkEndpoint`** is the fallback for a target with no mapping entry. It
   is not necessarily an authoritative machine (it may be a proxy or shared
   address). It is the hand-off point: the normalizer attributes it later.
@@ -249,14 +249,14 @@ work named in the [roadmap](06-roadmap.md):
 | Group | Properties |
 |---|---|
 | Endpoint *(built)* | `endpoint` (canonical URL), `endpoint_scheme`, `endpoint_host`, `endpoint_port`, `endpoint_base_path` (omitted for `/`) |
-| Product | `product`, `vendor` *(built)*; `software_version`, `software_version_raw`, `api_version`, `protocol_version` (built where the surface reports them). Specified, not built: `build_id`, `commit`, `image_digest`, and `*_source` / `*_basis` labels on each |
-| Auth *(built)* | `auth_observed` (`anonymous`/`denied`/`mixed`/`unknown`, `observed`), `anon_operations` (sorted array of succeeded `check_id`s only). `auth_advertised` (`none`/`required`/`mixed`, always `declared`, with `auth_advertised_basis`) is supported by the builder but **no collector sets it yet**: the only declared-auth evidence today (MCP protected-resource metadata) appears when the server denies access, which emits no node. Jupyter also keeps the surface-specific `auth_required` |
-| Execution surface *(built)* | `exec_surface` (sorted array: `code_kernel`, `terminal`, `job_submit`, `code_eval`, `workflow_exec`, `tool_invocation`, `model_mutation`; only positively identified surfaces are listed, never `unknown`), `exec_surface_basis` (`observed`/`declared`/`inferred`). Emitted today: Jupyter `code_kernel` and Ollama `model_mutation` (both `inferred` from product identity, nothing executed), MCP `tool_invocation` (`declared`, when the server advertises a tools capability). It says a surface exists, not that anything was run |
-| Dependencies | `backend_refs` (sanitized array), `store_refs` (sanitized array), `backend_refs_basis` |
-| Inventory | `model_count`, `tool_count`, `resource_count`, `collection_count` (as applicable) |
+| Product | `product`, `vendor` *(built)*; `software_version`, `software_version_raw`, `api_version`, `protocol_version`, `build_id`, `commit` (built where the surface reports them; `build_id` and `commit` supported by `graph.ServiceFacts`, `commit` emitted by Qdrant). Specified, not built: `image_digest`, and `*_source` / `*_basis` labels on each |
+| Auth *(built)* | `auth_observed` (`anonymous`/`denied`/`mixed`/`unknown`, `observed`), `anon_operations` (sorted array of succeeded `check_id`s only). `auth_advertised` (`none`/`required`/`mixed`, always `declared`, with `auth_advertised_basis`) is built in `graph.ServiceFacts` and emitted by A2A from agent-card security declarations. Jupyter also keeps the surface-specific `auth_required` |
+| Execution surface *(built)* | `exec_surface` (sorted array: `code_kernel`, `terminal`, `job_submit`, `code_eval`, `workflow_exec`, `tool_invocation`, `model_mutation`; only positively identified surfaces are listed, never `unknown`), `exec_surface_basis` (`observed`/`declared`/`inferred`). Emitted today: Jupyter `code_kernel` and Ollama `model_mutation` (both `inferred` from product identity, nothing executed), MCP and A2A `tool_invocation` (`declared`, when tools or skills/interfaces are advertised). It says a surface exists, not that anything was run |
+| Dependencies *(built)* | `backend_refs` (sanitized array), `store_refs` (sanitized array), `backend_refs_basis` (supported by `graph.ServiceFacts`; `backend_refs` emitted by A2A from declared agent/interface URLs) |
+| Inventory *(built)* | `model_count`, `tool_count`, `resource_count`, `collection_count`, `skill_count` (supported by `graph.ServiceFacts`; emitted by vLLM, Qdrant, and A2A) |
 | Content *(built)* | `system_prompt_present`, `config_collected`, `content_bytes`, `content_truncated`, `has_exposed_secret` (`true` or unset), `secret_last_confirmed`, `secret_types` (sorted array of detector names); bodies and secret values never appear in the graph, see [Content and secrets](#content-and-secrets) |
 | TLS *(built)* | `tls_verification` (`ok`/`failed`/`insecure_override`/`n_a`; `n_a` for plain `http`, absent when no handshake was observed), `tls_failure_reason` (bounded; kept under `insecure_override` when the certificate would not have verified), `tls_leaf_sha256` (lower-case hex), `tls_issuer`, `tls_not_after`, `tls_negotiated_version` |
-| Provenance | `vantage_key`, `scan_id`, `coverage`, `observed_at` *(built)*; specified, not built: `schema_version`, `first_observed`, `coverage_reason`, `mapping_source` |
+| Provenance | `vantage_key`, `scan_id`, `evidence_id`, `coverage`, `observed_at` *(built)*; specified, not built: `schema_version`, `first_observed`, `coverage_reason`, `mapping_source` |
 
 Child resources carry the subset that applies (`anon_operations`, `*_basis`,
 `last_observed`, `scan_id`, plus resource-specific fields such as `digest`,
@@ -420,24 +420,24 @@ backlog, in the order the [roadmap](06-roadmap.md) schedules it.
 |---|---|
 | Scoped identity, canonical endpoints, kind mapping (`LLMHound_<Kind>`), all-non-traversable edges | `internal/graph` |
 | Mapping-file attachment to an existing native node of any kind; `NetworkEndpoint` fallback; nil resolver is an empty mapping | `internal/correlate` |
-| Shared service property contract (`graph.ServiceFacts`: endpoint, access, execution surface, content summary, TLS) | `internal/graph/serviceprops.go`, all three collectors |
+| Shared service property contract (`graph.ServiceFacts`: endpoint, access, `auth_advertised`, `exec_surface`, `build_id`/`commit`, dependencies, inventory counts, content summary, TLS) | `internal/graph/serviceprops.go`, all collectors |
 | Anonymous access as flat properties (`auth_observed`, `anon_operations`, `vantage_key`) derived from operation evidence | `internal/graph/access.go`, collectors |
-| Default-on, bounded content tier (`content.*` config, binary exclusion, 0600 `.content.jsonl` isolation) across Ollama, Jupyter, and MCP | `internal/content`, `internal/config`, collectors, `internal/scanner` |
+| Default-on, bounded content tier (`content.*` config, binary exclusion, 0600 `.content.jsonl` isolation) across Ollama, Jupyter, MCP, A2A, and Qdrant | `internal/content`, `internal/config`, collectors, `internal/scanner` |
 | High-precision secret detection over content bodies (`private_key` parse-verified PEM, `github_token` CRC32-verified, `aws_access_key` id+secret pair), `[secret:<type>]` redaction, `detected_exposures` sidecar details | `internal/secrets`, `internal/content`, collectors, `internal/scanner` |
 | Base payload (`source_kind`) and sourceless linking payload; evidence sidecar | `internal/emitter`, `internal/evidence` |
 | Checkpoint journal and deterministic replay | `internal/checkpoint` |
-| Jupyter, MCP, and Ollama collectors; discovery; `plan` and `scan` | `internal/collectors`, `internal/discovery`, `internal/scanner` |
+| Jupyter, MCP, Ollama, A2A, vLLM, and Qdrant collectors; discovery; `plan` and `scan` | `internal/collectors`, `internal/discovery`, `internal/scanner` |
 | Shipped BloodHound CE saved queries (`P1`, `P2`, `P4`, `P6`) and generator | `internal/savedsearch`, `extension/saved_searches/`, `tools/gensearches` |
 
 **Specified, not yet built**
 
 | Area | Specified behavior |
 |---|---|
-| Remaining property contract | The rows of the [property contract](#property-contract) not marked *(built)*: dependencies, inventory counts, `auth_advertised` evidence, version provenance labels |
+| Remaining property contract | The fields of the [property contract](#property-contract) not yet populated: `image_digest`, `*_source`/`*_basis` per-field version provenance labels, `schema_version`, `first_observed`, `coverage_reason` |
 | Path qualification | Rule-gated, opt-in `CanExecuteOn` edges (M2d); `EdgeKind.IsTraversable()` is always false today |
 | Upload | Two-step upload with an existence pre-flight (M3); `upload` is a not-implemented stub, though the emitter already splits base and linking payloads |
 | Mapping provenance | `mapping_source` on attachment edges |
-| Surfaces | A2A, vLLM, LiteLLM, Qdrant, MLflow, Open WebUI, LangServe (M2b); long tail (M2c) |
+| Surfaces | LiteLLM, MLflow, Open WebUI, LangServe (remaining M2b); long tail (M2c) |
 
 ## Implementation acceptance checks
 

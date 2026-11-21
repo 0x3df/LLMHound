@@ -2,359 +2,365 @@
 
 > **Status: revised draft.** Companion to the
 > [design plan](../plans/2026-09-29-llmhound-design.md). Nothing is implemented
-> yet. Names below are proposed; the OpenGraph adapter and extension schema
-> must be validated against the exact target BloodHound release.
+> yet. Names are proposed; the extension schema must be validated against the
+> exact target BloodHound release ([M0](ce-compatibility.md)).
 
-LLMHound collects AI-infrastructure observations for BloodHound and downstream
-inventory enrichment through anonymous, bounded, read-only collection.
-The planned extension/source identifier and
-`source_kind` remain `LLMHound`; node and edge kinds use clean logical names.
+This is the **canonical home** for node/edge kinds, identity, attachment to
+existing nodes, the flat property contract, and the bar for traversable edges.
+Other docs link here instead of restating these rules.
+
+LLMHound adds AI-infrastructure facts to a BloodHound graph that SharpHound,
+AzureHound, and similar collectors already built. The product question is
+tier-0 pathing: *from this asset, what is the shortest path to tier 0, and
+which paths cross hosts running AI services?* LLMHound supplies the AI-service
+side of that join. A separate normalization program owns attribution and
+cleanup.
 
 ## Naming contract
 
-- **Kinds:** use `OllamaInstance`, `MCPServer`, `ObservedAt`, and similar names
-  below without a blanket collector prefix. The M0 spike records whether the
-  target CE requires any qualification in [ce-compatibility.md](ce-compatibility.md).
-- **Display names:** describe the instance, for example
-  `Ollama · ai-server-01:11434`, without a collector prefix.
-- **Ownership:** retain `LLMHound` in extension/source metadata. Cleanup must
-  use validated source ownership, never a kind-name prefix.
-- **Adapter mapping:** verify whether the target OpenGraph schema isolates kinds
-  by extension or uses a global kind namespace. Do not assume generic names
-  are collision-free (the observed-target kind is `NetworkEndpoint`, not
-  `Host`, for this reason) or reuse another extension's kind merely
-  because its spelling matches. Apply minimal qualification only where needed
-  for schema requirements or collisions, and document the mapping centrally.
-  Schema definitions, emitted payloads, and saved queries must use that mapping.
-- **Identity:** the versioned identity tuple includes the stable source identifier,
-  deployment scope, and logical kind. Adapter qualification and display-name
-  changes do not change object IDs. Source identity prevents cross-collector
-  collisions without putting collector branding in every kind.
-
-These are proposed logical names, not a claim that every unqualified name is
-accepted by the target BloodHound release. Adapter tests must cover collisions
-and consistent kind mapping before declaring support.
+- **Kinds:** clean logical names (`OllamaInstance`, `MCPServer`, `ObservedAt`)
+  with no blanket collector prefix. M0 records whether the target CE requires
+  qualification; the logical → emitted mapping is documented centrally and used
+  by the schema, payloads, and saved queries. `NetworkEndpoint` (not `Host`)
+  avoids a likely collision.
+- **Display names:** describe the instance, e.g. `Ollama · ai-server-01:11434`.
+- **Ownership:** extension/source metadata carries `LLMHound` and `source_kind`
+  `LLMHound`. Never rely on kind-name prefixes.
+- **Identity:** adapter qualification and display-name changes never change
+  object IDs.
 
 ## At a glance
 
-All arrows below represent **non-traversable evidence or topology**, scoped
-to the recorded collection vantage and operation.
-
 ```mermaid
 graph TD
-    V[Collection vantage] -. UnauthenticatedAccess .-> W[Open WebUI endpoint]
-    V -. UnauthenticatedAccess .-> M[MCP endpoint]
-    V -. PublicAccess .-> R[MCP resource]
-    M -. ProvidesResource .-> R
-    M -. ProvidesTool .-> T[MCP tool]
-    W -. UsesBackend .-> O[Ollama endpoint]
+    W[Open WebUI] -. UsesBackend .-> O[Ollama]
     O -. ProvidesModel .-> AI[Served model]
-    W -. ObservedAt .-> C[Existing AD Computer]
+    M[MCP server] -. ProvidesTool .-> T[MCP tool]
+    W -. ObservedAt .-> C[Existing BloodHound node<br/>Computer, AZVM, ...]
     M -. ObservedAt .-> C
-    O -. ObservedAt .-> N[NetworkEndpoint<br/>uncorrelated target]
-    AD[Existing AD attack paths] --> C
+    O -. ObservedAt .-> N[NetworkEndpoint<br/>unmapped target]
+    AD[Existing AD / Azure attack paths] --> C
 ```
 
-Correlated targets attach to the `Computer` nodes already in BloodHound, so
-AI services appear on machines that existing AD attack paths reach.
-Correlation is neither an access grant nor a traversable attack transition.
+Services attach to the nodes the existing attack-path graph already reaches.
+By default nothing LLMHound emits is traversable; the AD/Azure edges supply the
+paths and LLMHound supplies the target set and context. The only exception is
+the opt-in [path qualification](#path-qualification-traversable-edges) rules.
 
 ## Nodes
 
-| Group               | Kinds                                                                                                                                      |
-| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| Observation context | `CollectionVantage`                                                                                                                        |
-| Observed targets    | existing AD `Computer` (correlated, not emitted), `NetworkEndpoint` (fallback)                                                             |
-| MCP                 | `MCPServer`, `MCPTool`, `MCPResource`, `MCPPrompt`                                                                                         |
-| A2A                 | `A2AAgent`, `A2ASkill`                                                                                                                     |
-| AI services         | `OllamaInstance`, `VLLMInstance`, `LiteLLMGateway`, `QdrantInstance`, `MLflowServer`, `JupyterServer`, `OpenWebUIInstance`, `LangServeApp` |
-| AI services (M2c)   | `OpenAICompatibleEndpoint`, `RayDashboard`, `LangflowInstance`, `FlowiseInstance`, `ChromaInstance`                                        |
-| Served models       | `AIModel`                                                                                                                                  |
-| Typed resources     | `VectorCollection`, `WorkspaceFile`, `ModelArtifact`, `ArtifactStore`                                                                      |
-| Umbrella label      | `AIService`                                                                                                                                |
+| Group | Kinds |
+|---|---|
+| Observed targets | existing BloodHound node (any kind; not emitted); `NetworkEndpoint` (fallback for unmapped targets) |
+| MCP | `MCPServer`, `MCPTool`, `MCPResource`, `MCPPrompt` |
+| A2A | `A2AAgent`, `A2ASkill` |
+| AI services | `OllamaInstance`, `VLLMInstance`, `LiteLLMGateway`, `QdrantInstance`, `MLflowServer`, `JupyterServer`, `OpenWebUIInstance`, `LangServeApp` |
+| AI services (M2c) | `OpenAICompatibleEndpoint`, `RayDashboard`, `LangflowInstance`, `FlowiseInstance`, `ChromaInstance` |
+| Served models | `AIModel` |
+| Typed resources | `VectorCollection`, `WorkspaceFile`, `ModelArtifact`, `ArtifactStore` |
+| Umbrella label | `AIService` |
 
-In the edge tables, **service** means an MCP server, A2A agent, or AI-service
+In edge tables, **service** means an MCP server, A2A agent, or AI-service
 endpoint, not its child tools, skills, or resources.
 
-### Observation context and targets
+- **`AIService`** is an extra label carried by **every concrete service kind**
+  (`MCPServer`, `A2AAgent`, all AI-service kinds, M2c kinds). It is not carried
+  by child nodes, `NetworkEndpoint`, or existing nodes, and never owns
+  identity. If M0 shows multi-label is unsupported, saved queries are generated
+  with explicit kind lists.
+- **`NetworkEndpoint`** is the fallback for a target with no mapping entry. It
+  is not necessarily an authoritative machine (it may be a proxy or shared
+  address). It is the hand-off point: the normalizer attributes it later.
+  IP and FQDN endpoints are never auto-merged.
+- **`MCPServer`** is a fingerprinted network MCP endpoint; tools, resources,
+  and prompts become child nodes. **`A2AAgent`** is an agent advertised by an
+  agent card; advertisement is not evidence of invocation.
+- **`OpenAICompatibleEndpoint`** (M2c) is the honest default when no specific
+  product can be proven.
+- **Service kinds** each represent a fingerprinted endpoint, not a guaranteed
+  unique process or installation.
+- An advertised backend URL alone does not establish product or availability.
+  Keep it as a sanitized reference until independently fingerprinted; only
+  then emit `UsesBackend`. Never scan a backend merely because it was
+  advertised.
+- **`AIModel`** is scoped to its serving service; record digests when
+  available (a tag is mutable). **`VectorCollection`** is a Qdrant (or Chroma)
+  collection; point and document samples go to the content file, not the graph. **`WorkspaceFile`** is a Jupyter
+  entry from the contents API; listing is not reading. **`ModelArtifact`** is a
+  registered MLflow model version. **`ArtifactStore`** is a reported storage
+  root, scoped to the reporting service; bucket names and paths do not prove
+  access or global uniqueness.
 
-- **`CollectionVantage`** identifies a configured scanner/network
-  context. Its stable key is operator-supplied and scoped to the deployment;
-  scan IDs and timestamps are not its identity. Different network contexts
-  must not share a vantage key. It is not an attacker principal.
-- **`Computer`** (existing AD node, not emitted by LLMHound) is the
-  preferred `ObservedAt` target when correlation succeeds; see
-  [Computer correlation](#computer-correlation).
-- **`NetworkEndpoint`** is the fallback for an observed IP or FQDN target
-  that did not correlate. It is not necessarily an authoritative machine and
-  may identify a proxy, load balancer, or shared address. Retain the original
-  target, normalized hostname, resolved addresses, and observation time
-  without claiming that DNS resolution proves identity.
-- IP and FQDN `NetworkEndpoint` nodes are not automatically merged with each
-  other; ambiguous candidates remain unresolved.
+## Identity
 
-### Services
+SHA-256 over an unambiguously serialized, versioned tuple. Every identity
+includes the source identifier, deployment scope (stable configuration, not a
+secret or per-scan ID), and logical kind.
 
-- **`MCPServer`** represents a fingerprinted network MCP endpoint.
-  Enumerated tools, resources, and prompts become their respective child nodes.
-- **`A2AAgent`** represents an agent advertised by an agent card;
-  advertised skills become `A2ASkill` nodes. Advertisement is not
-  evidence of successful invocation.
-- **`OpenAICompatibleEndpoint`** (M2c) represents an endpoint that exposes an
-  OpenAI-compatible API shape when no specific product (vLLM, LiteLLM,
-  llama.cpp, TGI, …) can be proven. It is the honest default, not a guess.
-- **AI service kinds** each represent a fingerprinted service endpoint, not a
-  guaranteed unique process or installation. Multiple endpoints may eventually
-  be correlated to one deployment without rewriting observation identity.
-- **`AIService`** is a proposed extra label for concrete AI-service
-  nodes, not a separate node or identity component. Validate multi-kind support
-  in the target adapter; queries must not depend on unverified support.
-- An advertised backend URL alone does not establish its product or availability.
-  Keep it as a sanitized dependency reference until independently fingerprinted;
-  only then emit a typed service-to-service `UsesBackend` edge. Never scan a
-  backend merely because it was advertised; normal target authorization applies.
+| Node | Additional identity fields |
+|---|---|
+| NetworkEndpoint | Normalized target type and target value |
+| Service | Canonical endpoint: scheme, hostname/IP, effective port, base path |
+| Child resource/model | Owning service ID and exact stable resource key |
 
-### Models and resources
+Resource keys: collection name, model name, MCP resource URI/tool name,
+workspace path, registered model name and version. Preserve case where the
+protocol is case-sensitive; normalize DNS case and IP representation; define and
+test default-port and base-path handling. Do not collapse distinct virtual
+hosts or path-mounted services. Credentials, fragments, query strings, display
+names, versions, timestamps, and descriptions never enter identity; endpoints
+distinguishable only by excluded secret/query material need an explicit
+configured instance key.
 
-- **`AIModel`** is a model served by a runtime, scoped to that service.
-  Record a digest when available; a mutable model tag is not immutable content.
-- **`VectorCollection`** is a Qdrant collection. Individual point
-  references, if collected, remain bounded properties rather than nodes in v1.
-- **`WorkspaceFile`** is a Jupyter notebook/file reported by the contents
-  API. Listing a path is distinct from successfully reading its content.
-- **`ModelArtifact`** is a registered MLflow model version.
-- **`ArtifactStore`** is a reported storage root. Bucket names and
-  filesystem paths do not establish access or global uniqueness; v1 scopes these
-  nodes to the reporting service. Shared-store resolution belongs downstream.
+Repeated observations keep their ID. That does not prove an IP-backed
+installation stayed the same. Run IDs and observation times are provenance,
+never identity. One **vantage** (the configured `vantage_key`, e.g. the scanner
+VM's network context) applies per deployment scope; scan from a materially
+different network context under a different scope.
 
-## Identity and correlation contract
+## Attachment to existing nodes
 
-Use SHA-256 over an unambiguously serialized, versioned identity tuple. Every
-identity includes the source identifier, deployment/tenant scope, and concrete
-logical node kind. Scope is
-stable configuration, not a secret or a per-scan UUID.
+LLMHound does not attribute targets itself. Attribution is an input:
 
-| Node                 | Additional identity fields                                                 |
-| -------------------- | -------------------------------------------------------------------------- |
-| Collection vantage   | Configured stable vantage key                                              |
-| NetworkEndpoint      | Normalized target type and target value                                    |
-| Service              | Canonical endpoint: scheme, hostname/IP, effective port, service base path |
-| Child resource/model | Owning service ID and exact stable resource key                            |
-
-Resource keys include collection name, model name, MCP resource URI/tool name,
-workspace path, or registered model name and version. Preserve case where the
-protocol is case-sensitive. Normalize DNS case and IP representation; define
-and test default-port and base-path handling. Do not collapse distinct virtual
-hosts or path-mounted services. Credentials, fragments, request query strings,
-display names, versions, timestamps, and descriptions do not enter endpoint
-identity. Endpoints distinguishable only by excluded secret/query material need
-an explicit non-secret configured instance key, not a lossy silent merge.
-
-Repeated observations of the same identity retain its ID. This does not prove
-that an IP-backed installation stayed the same over time. Preserve temporal
-observations rather than treating endpoint identity as a permanent machine ID.
-
-## Computer correlation
-
-LLMHound extends an existing BloodHound buildout: observed targets dedup
-against AD `Computer` nodes rather than creating a parallel host graph.
-
-| Precedence | Source | Matches on | Notes |
-|---|---|---|---|
-| 1 | Operator mapping file | target → Computer objectid/SID | Exact; the only IP-only path besides reverse DNS |
-| 2 | AD domain-suffix FQDN | Computer `name`/`dNSHostName` | Only for FQDNs inside configured suffixes; requires M0-confirmed property-matched edge endpoints |
-| 3 | CE API lookup (M3) | exact objectid resolved pre-scan | Optional; needs a read-only CE token |
-| — | Reverse DNS (opt-in) | PTR → FQDN, then rule 2 | Off by default; recorded as a weaker method |
-
-- A correlated target emits `ObservedAt` (service → `Computer`) with
-  `match_method`, `match_value`, and `confidence` edge properties. No
-  `NetworkEndpoint` node is created for it.
-- No match, suffix mismatch, or several candidate Computers → fallback
-  `NetworkEndpoint`; ambiguous candidates and the reason are written to the
-  evidence sidecar.
-- Correlation is an **edge to an existing node, not an identity merge**.
+- **Asset mapping file** (supplied by the normalization program): target (IP,
+  FQDN, or `host:port`) → BloodHound `objectid` **and node kind**. The kind may
+  be anything already in the graph: AD `Computer`, `AZVM`, an Entra device, and
+  so on.
+- A mapped target gets `ObservedAt` (service → existing node) carrying
+  `match_method = mapping_file`, `match_value`, and `mapping_source`
+  (a mapping-file revision or ID supplied with the file). No `NetworkEndpoint`
+  is created.
+- An unmapped target gets `ObservedAt` → `NetworkEndpoint`, plus the reason in
+  the evidence sidecar. A target mapped to several objectids is treated as
+  unmapped, with the candidates recorded; LLMHound never picks one.
+- Attachment is **an edge to an existing node, not an identity merge**.
   Service objectids never depend on it, native BloodHound IDs are never
-  overwritten, and LLMHound cleanup never removes or modifies `Computer` nodes.
-- A rescan that newly correlates a target attaches to the Computer; the old
-  `NetworkEndpoint` is left for the ingest lifecycle policy to retire.
-
-## External asset references
-
-Allow source-qualified external asset references supplied by the ingest pipeline
-(e.g. source deployment plus Axonius asset ID, BloodHound node ID, AD SID, or
-cloud instance ID). Record mapping method, time, and confidence separately.
-LLMHound does not discover these identifiers unless an authorized source exposes
-them. FQDN/name matches are candidates, not unconditional identity merges.
-Never overwrite native BloodHound identifiers with LLMHound hashes.
+  overwritten, and LLMHound never emits or modifies nodes of native kinds.
+- No suffix matching, reverse DNS, or CE lookup in LLMHound; those belong to
+  the normalizer.
 
 ## Edges
 
-### Topology (non-traversable)
+All edges are non-traversable unless emitted by an enabled
+[path qualification](#path-qualification-traversable-edges) rule.
 
-| Edge               | Source → target          | Meaning                                                                                 |
-| ------------------ | ------------------------ | --------------------------------------------------------------------------------------- |
-| `ObservedAt`       | service → Computer / NetworkEndpoint | Fingerprinted endpoint was observed through this target (correlated Computer or fallback) |
-| `RunsOn`           | service → Computer / NetworkEndpoint | Reserved for supported runtime placement; listening at an address alone is insufficient |
-| `ProvidesTool`     | MCPServer → MCPTool      | Tool enumerated, not executed                                                           |
-| `ProvidesResource` | MCPServer → MCPResource  | Resource enumerated, not necessarily read                                               |
-| `ProvidesPrompt`   | MCPServer → MCPPrompt    | Prompt enumerated                                                                       |
-| `ProvidesModel`    | service → AIModel        | Model advertised by the runtime; inference not implied                                  |
-| `AdvertisesSkill`  | A2AAgent → A2ASkill      | Skill advertised, not invoked                                                           |
-| `UsesBackend`      | service → service        | Explicit dependency reported by the source, not proof of backend access                 |
-| `Contains`         | service → typed resource | Collection, workspace, model artifact, or reported artifact store association           |
+| Edge | Source → target | Meaning |
+|---|---|---|
+| `ObservedAt` | service → existing node / NetworkEndpoint | Fingerprinted endpoint was observed through this target |
+| `RunsOn` | service → existing node / NetworkEndpoint | Reserved for supported runtime placement; listening at an address alone is insufficient |
+| `ProvidesTool` | MCPServer → MCPTool | Tool enumerated, not executed |
+| `ProvidesResource` | MCPServer → MCPResource | Resource enumerated, not necessarily read |
+| `ProvidesPrompt` | MCPServer → MCPPrompt | Prompt enumerated |
+| `ProvidesModel` | service → AIModel | Model advertised by the runtime; inference not implied |
+| `AdvertisesSkill` | A2AAgent → A2ASkill | Skill advertised, not invoked |
+| `UsesBackend` | service → service | Dependency reported by the source, not proof of backend access |
+| `Contains` | service → typed resource | Collection, workspace, model artifact, or artifact store association |
 
-### Access observations (also non-traversable in v1)
+Anonymous access is **not an edge**. It is recorded as flat properties
+(`anon_operations`, `auth_observed`) on the service or resource, scoped by
+`vantage_key` and `last_observed`. This keeps access queryable with plain
+property filters and avoids edge-multiplicity assumptions.
 
-| Edge                    | Source → target                 | Meaning                                                                          |
-| ----------------------- | ------------------------------- | -------------------------------------------------------------------------------- |
-| `UnauthenticatedAccess` | CollectionVantage → service     | A specific enumeration operation succeeded without credentials from this vantage |
-| `PublicAccess`          | CollectionVantage → MCPResource | A specific resource read succeeded without credentials from this vantage         |
+## Property contract
 
-`PublicAccess` means anonymous access from the recorded vantage, **not internet
-exposure**. A denied control read is not required to record a successful anonymous
-read. Neither edge represents arbitrary API use, code execution, or control of
-the service. Preserve operation-level evidence; an HTTP 200 login page is not
-successful enumeration. Different operations may have different access outcomes.
+Properties are flat and queryable; they are driven by the
+[saved queries](saved-queries.md) and by the tier-0 pathing questions. Bounded
+structured evidence that graph properties cannot represent goes to the
+`.evidence.jsonl` sidecar, referenced by `evidence_ids`.
 
-The earlier host-to-service access edge is intentionally replaced: the collector
-observed scanner access, not access originating from the hosting machine.
-The graph still supports exposure and inventory queries without enabling these
-edges in attack-path search.
+**Min-max principle:** within the anonymous, allowlisted, read-only policy,
+collect every metadata field that helps answer one of: *what is it* (identity,
+version), *can an attacker reach and use it* (auth, exposure, execution
+surface), *what does it touch* (backends, stores, models, credentials
+referenced), or *who/what is it attached to*. Prefer a flat property over
+sidecar-only storage when a query would filter on it. Label every value as
+`observed`, `declared` (advertised by the service), or `inferred` (derived by a
+documented rule). Unknown stays unknown. **Positive claims are
+precision-first:** a boolean or classification is set only on deterministic
+evidence; anything ambiguous stays unknown or unset, never guessed, and an
+unknown or unset value never implies absence.
 
-Topology and identity mappings remain non-traversable regardless of the
-metadata attached to their endpoints.
+Service properties (logical names; final serialization is fixed in M1 from the
+M0 answers):
 
-## Evidence and enrichment contract
+| Group | Properties |
+|---|---|
+| Endpoint | `scheme`, `host`, `port`, `base_path`, `endpoint` (canonical) |
+| Product | `product`, `vendor`, `software_version_raw`, `software_version`, `build_id`, `commit`, `image_digest`, `api_version`, `protocol_version`, each with `*_source` and `*_basis` |
+| Auth | `auth_advertised` (`none`/`required`/`mixed`/`unknown`, `declared`), `auth_observed` (`anonymous`/`denied`/`mixed`/`unknown`, `observed`), `anon_operations` (array of succeeded `check_id`s only) |
+| Execution surface | `exec_surface` (array: `code_kernel`, `terminal`, `job_submit`, `code_eval`, `workflow_exec`, `tool_invocation`, `model_mutation`, `unknown`; only positively identified surfaces are listed), `exec_surface_basis` (`observed`/`declared`/`inferred`) |
+| Dependencies | `backend_refs` (sanitized array), `store_refs` (sanitized array), `backend_refs_basis` |
+| Inventory | `model_count`, `tool_count`, `resource_count`, `collection_count` (as applicable) |
+| Content | `system_prompt_present`, `config_collected`, `content_bytes`, `content_truncated`, `has_exposed_secret` (`true` or unset), `secret_types` (array); bodies and secret values never appear in the graph, see [Content and secrets](#content-and-secrets) |
+| TLS | `tls_verification` (`ok`/`failed`/`insecure_override`/`n_a`), `tls_failure_reason`, `tls_leaf_sha256`, `tls_issuer`, `tls_not_after` |
+| Provenance | `source`, `schema_version`, `scan_id`, `vantage_key`, `first_observed`, `last_observed`, `coverage`, `coverage_reason`, `mapping_source` |
 
-These are logical fields; the adapter must define schema-supported serialization
-rather than assuming arbitrary nested properties work in OpenGraph. Graph
-properties stay flat and queryable (driven by the
-[saved queries](saved-queries.md)). Bounded structured evidence that graph
-properties cannot represent goes to the `.evidence.jsonl` sidecar emitted with
-each payload; graph entries reference it by stable evidence ID.
+Child resources carry the subset that applies (`anon_operations`, `*_basis`,
+`last_observed`, `scan_id`, plus resource-specific fields such as `digest`,
+`size_bytes`, `dimensions`, `stage`). MCP tools additionally carry
+`description_excerpt`, `input_schema_summary`, `annotations`, and
+`capability_hint` (array: `shell`, `filesystem`, `network`, `database`,
+`browser`, `secrets`, `code`) with `capability_hint_basis = declared`.
+`capability_hint` is a heuristic over untrusted descriptions, never evidence of
+behavior.
 
-| Field group         | Required meaning                                                                                                   |
-| ------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| Provenance          | Schema version, deployment scope, scan ID, collector/version, evidence ID, source and vantage                      |
-| Timing              | Observation time in UTC; first/last seen when maintained by a stateful owner                                       |
-| Endpoint            | Canonical scheme/host/port/base path plus observed address and sanitized original target                           |
-| Fingerprint         | Product/vendor, reported version when available, raw non-secret version text, identification method and confidence |
-| Access              | Operation, target, anonymous authentication context, success/denied/unknown outcome, bounded supporting evidence   |
-| Dependencies        | Reported backend/storage references, reporting source, and whether independently observed                          |
-| Correlation         | Computer match method/value/confidence, or fallback reason and ambiguous candidates                                |
-| External references | Source-qualified asset IDs and mapping provenance when supplied                                                    |
-| Coverage            | Collection surface, outcome, truncation limits, and failure reason where applicable                                |
+Tool, prompt, and descriptor text is attacker-controlled. Bound its length,
+strip control characters, and treat it as untrusted by any consumer, including
+downstream LLM tooling.
 
-Missing version information is **unknown**, not a guessed version. Record
-conflicting fingerprints rather than silently selecting whichever observation
-arrived last. Every collector must attempt documented version discovery and
-record its outcome; successful version discovery is not guaranteed.
-
-### Expanded metadata contract
-
-The [collector capability matrix](collector-capabilities.md) defines required
-checks, default metadata collection, and optional sensitive reads for every
-surface. Enrichment stays on existing nodes and evidence records; it does not
-require new node kinds for every header, version, or check.
-
-- **Component versions:** preserve `product`, `vendor`, `software_version_raw`,
-  optional normalized `software_version`, `build_id`, `commit`, and `image_digest`
-  when explicitly reported. Store `api_version` and `protocol_version` separately.
-  Each value retains its component/endpoint, source field/operation, confidence,
-  and observation time. A proxy banner is not a backend version.
-- **Capabilities:** MCP tools retain bounded descriptions, input schemas, and
-  advertised annotations; resources retain URI schemes/templates; A2A skills
-  retain advertised descriptions and security requirements. Label these values
-  as declarations, not observed behavior. Bound nested schemas and descriptions.
-- **Models/artifacts:** retain reported model family, format, quantization, size,
-  digest, alias, upstream artifact/repository reference, and registry lifecycle
-  metadata. Keep reported alias-to-backend mappings separate from verified
-  identity. Software versions, registry versions, and model digests are distinct.
-- **Deployment/dependencies:** preserve explicitly reported instance/deployment
-  identifiers and backend/provider/storage references, with provenance and
-  independent-observation status. Sanitize references without following them.
-- **TLS/endpoints:** retain leaf certificate fingerprint, issuer, subject/SANs,
-  validity, verification result/reason, negotiated TLS version when available,
-  and authorized redirect observations. Record an insecure override separately;
-  it is not successful verification. Certificate sharing never merges assets.
-
-These fields are optional values with explicit availability, not a requirement to
-invent metadata a product does not expose. Logical field serialization follows
-the schema-supported evidence contract above.
+Missing version data is **unknown**. Record conflicting fingerprints rather
+than silently keeping the latest. Component, API, protocol, registry, and model
+versions stay distinct; a proxy banner is not a backend version.
 
 ### Per-check results
 
-Each configured check records `check_id`, target, scan ID, vantage, operation,
-sanitized source, observation time, outcome, reason, and evidence references.
-Outcomes are `success`, `denied`, `unsupported`, `failed`, or `skipped`, as defined
-in the capability matrix. Keep them separate from enumeration coverage: a
-successful listing can still be truncated. A 404 alone is not proof of an
-unsupported feature, and missing optional version data can coexist with a
-successful metadata response.
+Each check records `check_id`, target, scan ID, vantage key, operation,
+sanitized source, UTC time, outcome (`success`, `denied`, `unsupported`,
+`failed`, `skipped`), reason, and evidence references; definitions and the 404
+rule are in the [capability matrix](collector-capabilities.md#per-check-result-contract).
+Negative and unknown results live in the sidecar, not in positive properties.
 
-Retain operation-specific access outcomes rather than overwriting one global
-anonymous-access flag. Negative/unknown results belong in evidence records,
-not positive access edges. Preserve sufficient metadata to compare versions,
-backend references, model digests, and inventories across compatible scan scopes
-and vantages without treating failed collection as disappearance. (A comparison
-tool itself is deferred; v1 only retains the data.)
+### Coverage
 
-Use allowlisted metadata and bounded evidence summaries. Strip credentials,
-authorization headers, URL userinfo, signed query parameters, and other secrets.
-Do not retain full response bodies by default. Sensitive prompts, configuration,
-and workspace contents need explicit collection/retention controls; metadata
-should remain useful without them. These safeguards apply to checkpoints and
-logs as well as exported payloads.
+Per collection surface and operation, never a claim the host was fully
+assessed: `complete`, `partial` (some operations failed), `truncated` (a bound
+stopped enumeration), `failed` (could not enumerate; discovery failures create
+no fingerprinted service). Check outcome and coverage are independent.
 
-### Coverage and lifecycle
+### Content and secrets
 
-Coverage is per collection surface and operation, not a blanket claim that the
-service or host has been completely assessed:
+The **content tier** is existing content a service returns through an
+allowlisted, read-only, anonymous operation: system prompts, modelfiles and
+templates, configuration, notebook and file bodies, flow definitions, job
+metadata, MCP resource bodies, small text artifacts, and bounded vector
+point/document samples. It is collected **by default when one allowlisted
+anonymous read returns it** (no crawling, no multi-step extraction) and can be
+disabled globally or per surface in `llmhound.yaml`.
 
-- `complete`: the configured collection surface was fully enumerated.
-- `partial`: some operations failed; successful observations remain valid.
-- `truncated`: a configured size/page bound stopped enumeration; retain any
-  additional errors and limit details separately.
-- `failed`: the attempted surface could not be enumerated, including an
-  unreachable endpoint. Discovery failures do not create fingerprinted services.
+- **Bounds:** per-item, per-resource, and per-service byte and item caps
+  (defaults: 256 KiB per item, 10 items per resource, 5 MiB per service, 5
+  sample points per collection). Hitting a bound records `truncated`.
+- **Never collected:** model weights and other binary blobs, embeddings, full
+  database dumps, or anything requiring a mutating or workload-initiating call.
+- **Where it goes:** content bodies are written only to a restricted
+  `.content.jsonl` (file mode 0600), never into the OpenGraph payload or the
+  shareable evidence sidecar. The graph carries only flags, sizes, and hashes
+  (`system_prompt_present`, `config_collected`, `content_bytes`,
+  `content_truncated`, `has_exposed_secret`, `secret_types`).
+- **Secrets are a boolean, never a value.** A matched secret is recorded as
+  presence only: type and location (path/field/line) in the evidence sidecar,
+  and `has_exposed_secret = true` plus `secret_types` on the graph node. The raw
+  value is discarded at detection time. It is never written to the payload,
+  sidecar, `.content.jsonl` (the span is replaced by `[secret:<type>]`),
+  checkpoints, or logs, and there is no secrets file.
+- **Precision over recall.** A false positive is worse than a miss in a large
+  environment, so only **high-precision detectors** may set the flag. A
+  detector qualifies only if a match is structurally verifiable without
+  contacting any service: a parsable PEM private-key block; a token format with
+  a defined prefix and an embedded checksum that validates (for example vendor
+  tokens with CRC fields); a structurally valid JWT (decodable header and
+  payload with required claims) that is not an example; a cloud access-key pair
+  matching the documented format together with its paired secret in the same
+  object; a connection string whose scheme is documented and whose userinfo is
+  non-empty and not a placeholder. **No** entropy, keyword, or "looks like a
+  key" heuristics. Known placeholders and documentation examples
+  (`changeme`, `xxxx`, `<your-key>`, vendor-published sample keys, `EXAMPLE`
+  suffixes, all-same-character values) never match. Each detector ships with a
+  fixture corpus of true positives and look-alike negatives, and a detector
+  that cannot meet a zero-false-positive corpus does not ship.
+- **Absence is not a claim.** `has_exposed_secret` is only ever `true` or
+  unset. Unset means "no high-precision match", not "no secret present".
+  Queries must never treat unset as clean.
+- **Boundary:** LLMHound reads what a service serves anonymously. It does not
+  guess, brute-force, or try default credentials, and it never uses,
+  validates, or sends a found credential to any service. Using a credential is
+  credentialed enumeration (M4) and needs its own authorization.
+- **Graph properties stay clean regardless:** credentials, authorization
+  headers, URL userinfo, and signed query parameters are stripped from every
+  structured property (`backend_refs`, endpoints, and so on).
+- The content file needs documented retention, deletion, and access controls
+  (prompts and configuration can still be sensitive). Do not ship it through
+  the ingest pipeline that feeds BloodHound.
 
-Rescans must not turn old success into fresh success. Keep the last successful
-observation separate from the latest attempt and its outcome. Absence from a
-partial/failed scan is not deletion or remediation. A complete listing can retire
-missing children only within that listing's scope. Freshness/expiry and stale-edge
-removal require an explicit ingest reconciliation policy, validated against CE;
-a new upload must not be assumed to remove old data automatically.
+## Path qualification (traversable edges)
 
-## Source ownership
+Default: nothing LLMHound emits is traversable, because a listening AI service
+is not an attack transition. An edge may become traversable **only** through a
+named rule that clears every criterion below. Rules ship disabled and are
+enabled per rule in `llmhound.yaml`.
 
-Removing collector-owned data must not delete native AD/Azure nodes or unrelated
-source data. External integrations own the lifecycle of their own records.
+| # | Criterion |
+|---|---|
+| 1 | **Capability class from a closed list.** v1 rules may claim only **code execution on the host**. File read and secret disclosure are reserved classes that would need their own edge kinds and a separate decision. Not "tool exists", "model served", or "port open" |
+| 2 | **Positive evidence:** at least one observed anonymous success of a read-only check whose success is, per documented product semantics, only possible when the capability is open (e.g. auth is disabled). Advertisements, tool descriptions, and version banners alone never qualify. LLMHound never executes the capability to prove it |
+| 3 | **Documented rule:** a rule ID and version, the product and version range it holds for, the official documentation cited, and the check IDs it depends on. Unknown or out-of-range versions do not qualify |
+| 4 | **Verified attachment:** the end node is an existing node from the mapping file. Never a `NetworkEndpoint` |
+| 5 | **Explicit start population:** the edge starts at operator-configured `assumed_reach_principals` (e.g. Domain Users or Authenticated Users). Network reachability is observed from the scan vantage only; the edge records `reach_basis = scanner_vantage` so consumers can see the assumption |
+| 6 | **Provenance:** edge carries `rule_id`, `rule_version`, `basis` (`inferred`), `confidence`, `operations`, `evidence_ids`, and `exec_identity = unknown` unless observed |
+
+Reserved edge kind: `CanExecuteOn` (principal group → existing node), emitted
+only by a rule. The service remains the evidence node; the edge is the
+transition. Execution identity is not guessed: an edge to the host means "code
+execution on this host as the service's account", which may not be privileged.
+
+**Candidate rules** (unvalidated; each needs official documentation, a
+product/version range, and fixtures before it exists): Jupyter with
+authentication disabled; Ray dashboard with anonymous job-submission API;
+Langflow with unauthenticated/auto-login access on affected versions.
+
+**Do not qualify:** advertised MCP/A2A tools or skills, anonymous model
+listing, vector-store or registry inventory, any state based on a login page, a
+TCP probe, a version banner, or a shared certificate. Qualification never
+depends on FQDN matching or `RunsOn`.
+
+Rules live in `extension/rules/` as data with their own tests. A rule that
+cannot be validated against the pinned CE (traversability honored by
+pathfinding, M0 question 4) does not ship.
+
+## Source ownership and lifecycle
+
+LLMHound tags everything with `source_kind` `LLMHound`, stamps accurate
+observation times, scan ID, and coverage, and never claims removal: a failed,
+partial, or truncated scan is not evidence a service or child disappeared.
+Attribution, reconciliation, staleness, and cleanup belong to the
+normalization program. LLMHound never emits or modifies native-kind nodes.
+Resume retains original observation timestamps.
 
 ## Implementation acceptance checks
 
-- Golden identity tests cover scope separation, case-sensitive resource keys,
-  virtual hosts, path-mounted services, repeat scans, and IP/FQDN ambiguity.
-- Anonymous-read and enumeration fixtures preserve operation and vantage;
-  login pages, denied operations, and advertised tools do not become capabilities.
-- Reverse-proxy observations emit `ObservedAt`, not unsupported `RunsOn`.
-- Correlation fixtures cover mapping-file match, AD-suffix match, suffix
-  mismatch, ambiguous candidates, IP-only without opt-in, and a rescan that
-  newly correlates; service IDs never change and cleanup never touches `Computer`.
-- Unknown versions and conflicting observations survive emission honestly;
-  component, API/protocol, and model versions remain distinct.
-- Capability-matrix fixtures preserve per-check outcomes, declared metadata,
-  model provenance, TLS verification/override distinctions, and scoped redirects.
-- Secret redaction, size limits, and unauthorized backend-following tests cover
-  exports, logs, and checkpoints.
-- Lifecycle fixtures cover failed rescans, complete versus partial listings,
-  stale observations, and source-isolated cleanup.
-- Against a pinned CE release, validate payload/schema, kinds and property types,
-  edge endpoint resolution, non-traversability, repeat ingest, and cleanup.
-  Demonstrate AI services attached to existing AD Computers while retaining
-  non-traversable semantics.
+- Identity goldens: scope separation, case-sensitive resource keys, virtual
+  hosts, path-mounted services, repeat scans, IP/FQDN ambiguity.
+- Attachment: mapped target (any node kind), unmapped target, target mapped to
+  several objectids, service IDs unchanged by mapping, native kinds never
+  emitted.
+- Access properties: `anon_operations` contains only successes; denied and
+  unknown outcomes appear only in the sidecar; login pages, advertised tools,
+  and TCP probes never create access claims.
+- `ObservedAt` does not imply `RunsOn`.
+- Property contract: every property used by a saved query is flat, typed, and
+  labeled `observed`/`declared`/`inferred`.
+- Version honesty: unknown versions and conflicting observations survive
+  emission; component, API/protocol, and model versions stay distinct.
+- Capability-matrix fixtures preserve per-check outcomes, TLS verification vs
+  override, and scoped redirects.
+- Content tier: bounds enforced and truncation recorded; bodies appear only in
+  `.content.jsonl`; model weights and embeddings are never fetched; no
+  credential is ever sent to any service.
+- Secret detection: every detector has a true-positive corpus and a
+  look-alike negative corpus with zero false positives (placeholders, vendor
+  sample keys, malformed tokens, high-entropy non-secrets); a planted secret
+  sets `has_exposed_secret` and its value appears nowhere (payload, sidecar,
+  content file, logs, checkpoints); unset is never emitted as `false`.
+- Size limits and no-backend-following hold across exports, logs, and
+  checkpoints.
+- Path qualification: with all rules disabled, every emitted edge is
+  non-traversable; each enabled rule fails closed on unknown version, missing
+  evidence, or unmapped target, and emits all required provenance.
+- Pinned CE: payload/schema, kinds, property types (incl. arrays), edge
+  endpoint resolution, non-traversable vs rule-enabled behavior in pathfinding,
+  and repeat ingest.
 
 ## Reserved for future milestones
 
 - Credential-driven enumeration and credential-to-resource access evidence (M4).
-
 - Per-kind property reference and description pages (M5).

@@ -25,8 +25,11 @@ is not a security boundary or a guarantee that Git/editor tools hide it.
   information even when the description claims otherwise.
 - **Inference requests:** generation, embedding, and other model execution can
   incur cost, consume resources, retain submitted data, or trigger backend work.
-- **Host-compromise conclusions:** deriving control or pivot paths requires
-  evidence beyond service inventory and anonymous API reads.
+- **Host-compromise conclusions beyond the qualification rules:** the active
+  design already allows narrow, opt-in rules (M2d, see the
+  [path-qualification bar](../../reference/graph-model.md#path-qualification-traversable-edges)).
+  Anything broader, or any conclusion that needs evidence beyond service
+  inventory and anonymous read-only checks, stays parked.
 
 ## Context worth retaining if revisited
 

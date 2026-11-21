@@ -1,29 +1,37 @@
 # LLMHound
 
-**Map the attack surface of AI infrastructure into BloodHound with OpenGraph.**
+**Add AI infrastructure to your BloodHound attack paths with OpenGraph.**
 
 LLMHound is a BloodHound [OpenGraph](https://bloodhound.specterops.io/opengraph/overview)
 collector for LLM and agentic AI infrastructure: MCP servers, A2A agents, LLM
 gateways, inference servers, vector stores, model registries, notebooks, and
-AI UIs. It runs on a central collection server, scans your network remotely,
-and extends your existing BloodHound graph: AI services attach to the Active
-Directory `Computer` nodes you already have, so you can see which machines on
-your existing attack paths are running AI services and what those services
-expose anonymously.
+AI UIs. It runs on a central collection server after SharpHound, AzureHound,
+and your other collectors, scans your network remotely, and attaches what it
+finds to the hosts already in your graph.
 
-v1 edges are **non-traversable**. BloodHound pathfinding does not traverse
-into LLMHound nodes. v1 adds inventory and scoped access evidence joined onto
-AD Computers; it does not claim new attack transitions.
+The question it helps answer is **"from this asset, what's the shortest attack
+path to tier 0?"**, and, specifically:
+
+- Which hosts running AI or MCP services sit on an attack path?
+- What is the shortest path from a given asset to an AI host?
+- Which AI hosts are close to tier 0, or anonymously reachable with an
+  execution-capable surface?
+
+LLMHound supplies the AI-service side of that join and the context around it.
+It does not attribute assets or clean up stale data; your normalization
+program does that, and LLMHound consumes its asset mapping. By default nothing
+LLMHound emits is traversable: your existing AD and Azure edges provide the
+paths. Opt-in rules may emit traversable edges only for cases that clear a
+documented evidence bar (see [path qualification](docs/reference/graph-model.md#path-qualification-traversable-edges)).
 
 ```
-targets → network scan → OpenGraph payload + evidence sidecar → AI services on your AD Computers
+asset mapping + targets → network scan → OpenGraph payload + evidence sidecar → AI services on your existing nodes
 ```
 
 > [!NOTE]
 > **Status: revised design draft.** Nothing is implemented yet. The design is
 > [`docs/plans/2026-09-29-llmhound-design.md`](docs/plans/2026-09-29-llmhound-design.md);
-> see [Roadmap](#roadmap) for what ships when. Commands and flags below are
-> planned and may change.
+> see [Roadmap](#roadmap). Commands and flags below are planned and may change.
 
 ## Contents
 
@@ -39,36 +47,37 @@ targets → network scan → OpenGraph payload + evidence sidecar → AI service
 ## What it finds
 
 v1 collection is **anonymous, bounded, and read-only**: LLMHound sends no
-credentials to scanned services and checks only allowlisted metadata operations.
-Sensitive existing resource content is collected only with explicit opt-in,
-size limits, and redaction. The [collector capability matrix](docs/reference/collector-capabilities.md)
-defines each surface's checks and evidence contract; endpoint availability
-varies by product, version, and deployment, so collection is not guaranteed.
+credentials and uses only allowlisted, read-only operations. Within that
+policy it collects as much path-relevant context as it can: identity and
+version, advertised and observed authentication, execution-capable surfaces,
+backend and storage references, inventory, and TLS. Each value is labeled
+`observed`, `declared`, or `inferred`, and unknown stays unknown. It also reads
+existing content a service hands out anonymously in a single allowlisted read
+(system prompts, configuration, notebook and flow bodies, bounded vector
+samples), within size caps. Exposed secrets are reported only as a presence
+flag, never a value, and only when a high-precision detector is certain;
+otherwise the field stays unset. Content bodies go to a separate restricted
+file, never into the graph. LLMHound never guesses, tests, or uses credentials.
+The [capability matrix](docs/reference/collector-capabilities.md)
+defines each surface's checks; availability varies by product, version, and
+deployment, so collection is not guaranteed.
 
 | Surface        | What v1 collects                                                                                                  |
 | -------------- | ----------------------------------------------------------------------------------------------------------------- |
-| **MCP**        | Server identity/capabilities, protocol metadata, tool schemas, resource descriptors/templates, prompt descriptors |
+| **MCP**        | Server identity/capabilities, protocol metadata, tool schemas and capability hints, resource and prompt descriptors |
 | **A2A**        | Agent-card identity, skills, capabilities, interfaces, and advertised authentication requirements                 |
-| **Ollama**     | Served-model metadata, digests, and advertised model provenance                                                   |
+| **Ollama**     | Served-model metadata, digests, advertised model provenance, and modelfiles/system prompts                        |
 | **vLLM**       | Server fingerprint, served-model metadata, and advertised deployment details                                      |
-| **LiteLLM**    | Gateway fingerprint, model catalog, and redacted deployment/backend references                                    |
-| **Qdrant**     | Vector-collection metadata, point counts, and schema context                                                      |
-| **MLflow**     | Experiment and registered-model metadata, model provenance, and artifact-store references                         |
-| **Jupyter**    | Authentication posture, session metadata, and workspace listings (not file contents)                              |
-| **Open WebUI** | Instance fingerprint and advertised backend references                                                            |
+| **LiteLLM**    | Gateway fingerprint, model catalog, redacted backend references, and configuration                                |
+| **Qdrant**     | Vector-collection metadata, point counts, schema context, and bounded payload samples                             |
+| **MLflow**     | Experiment and registered-model metadata, model provenance, and artifact-store references                        |
+| **Jupyter**    | Authentication posture, session metadata, kernel/terminal exposure, workspace listings, and bounded file bodies   |
+| **Open WebUI** | Instance fingerprint, advertised backend references, and configuration                                            |
 | **LangServe**  | App fingerprint, advertised runnable inventory, and input/output schema metadata                                  |
 
 Planned after the core ten (M2c): a generic **OpenAI-compatible** endpoint kind
-for servers such as llama.cpp, TGI, LM Studio, LocalAI, and SGLang when the
-product cannot be proven, plus **Ray dashboard**, **Langflow**, **Flowise**, and
-**ChromaDB**.
-
-Across all surfaces, the plan includes product version/build evidence,
-per-operation anonymous-access outcomes, deployment/backend references, TLS
-metadata. Every collector must attempt
-applicable allowlisted version checks and report unknown honestly; product
-versions stay distinct from protocol, API, and model versions. Advertised
-references and model provenance retain their sources, not assumed verification.
+(llama.cpp, TGI, LM Studio, LocalAI, SGLang when the product cannot be proven),
+**Ray dashboard**, **Langflow**, **Flowise**, and **ChromaDB**.
 
 LLMHound is network-only. It does not read local files, agent configs, or
 keychains on the machine it runs on or on any target.
@@ -77,58 +86,47 @@ keychains on the machine it runs on or on any target.
 
 1. **Targets.** CIDR ranges and/or a targets file of IPs and FQDNs,
    deduplicated.
-2. **Discovery.** Bounded-concurrency TCP probes against known AI-service
-   ports, then HTTP path fingerprinting to confirm what each service is.
-   Fingerprints are data-driven definitions you can extend.
-3. **Enumeration.** A read-only collector per surface. Each one records how
-   far it got as a coverage outcome: `complete`, `partial`, `failed`, or
-   `truncated` (stopped at a configured page or size bound). Separately, each
-   check records `success`, `denied`, `unsupported`, `failed`, or `skipped`,
-   with a reason. `unsupported` requires evidence; HTTP 404 alone is ambiguous.
-4. **Correlation.** Each target is matched to an existing AD `Computer`
-   (mapping file, configured AD domain suffixes, or a CE API lookup). An
-   unmatched target becomes a `NetworkEndpoint` node.
-5. **Emission.** One OpenGraph payload (JSON, or a ZIP stream for large
-   scans) plus an `.evidence.jsonl` sidecar with per-check results. Deterministic IDs include tenant/deployment scope; service IDs
-   include concrete kind and canonical scheme/host/port/base path. Rescans
-   retain identity within that scope.
-6. **Upload.** Register the extension schema, upload the payload, and import
-   saved queries through the BloodHound CE API. Or skip this step and let
-   your existing ingest pipeline pick up the file.
+2. **Discovery.** Bounded TCP probes against known AI-service ports, then HTTP
+   path fingerprinting. Fingerprints are data-driven definitions you can extend.
+3. **Enumeration.** A read-only collector per surface. Each records coverage
+   (`complete`, `partial`, `failed`, `truncated`) and, per check, an outcome
+   (`success`, `denied`, `unsupported`, `failed`, `skipped`) with a reason.
+4. **Attachment.** Each target is looked up in the asset mapping supplied by
+   your normalization program and attached to the existing BloodHound node
+   (Computer, Azure VM, and so on) by objectid. An unmapped target becomes a
+   `NetworkEndpoint` for the normalizer to attribute later.
+5. **Classification.** Authentication posture, execution surface, and
+   dependencies are recorded as flat, queryable properties.
+6. **Emission.** One OpenGraph payload (JSON, or a ZIP stream for large scans)
+   plus an `.evidence.jsonl` sidecar. Deterministic IDs include deployment
+   scope; rescans retain identity.
+7. **Upload.** Register the schema, upload the payload, and import saved
+   queries through the BloodHound CE API, or let your existing ingest pick up
+   the files.
 
 ## BloodHound integration
 
 Targets **BloodHound CE with PostgreSQL**. Support requires validation of the
-exact CE version, OpenGraph schema, and API capabilities; a version number
-alone is not a compatibility guarantee.
+exact CE version, OpenGraph schema, and API capabilities.
 
-- **Extension schema.** `extension/schema.json` uses clean node and edge
-  names such as `OllamaInstance` and `ProvidesModel`. Any required collision
-  qualification is an adapter concern, validated against the target CE schema.
-  All v1 edges are non-traversable.
-- **Attached to your AD Computers.** `ObservedAt` links a service to the
-  existing AD `Computer` it was correlated to, or to a fallback
-  `NetworkEndpoint`. Correlation is an edge, not an identity merge. LLMHound
-  never overwrites native BloodHound IDs, and cleanup never touches
-  `Computer` nodes. `RunsOn` is reserved for proven runtime placement; a
-  matching FQDN is not enough for either an identity merge or runtime placement.
-- **Scoped access evidence.** A configurable, stable
-  `CollectionVantage` identifies scanner/network context.
-  `UnauthenticatedAccess` links vantage → service;
-  `PublicAccess` links vantage → resource for an observed anonymous
-  read, without requiring a denied control.
-- **Clean removal.** All data is tagged with `source_kind` `LLMHound`, so you
-  can bulk-delete it from CE database management (subject to M0/M3
-  validation).
-- **Starter queries.** Saved Cypher searches in
-  `extension/saved_searches/`, in SpecterOps Query Library format; see the
+- **Attached to your existing nodes.** `ObservedAt` links a service to the node
+  it was mapped to. Attachment is an edge, not an identity merge; LLMHound never
+  overwrites native BloodHound IDs or emits native node kinds.
+- **Access as properties.** Anonymous access, authentication posture, and
+  execution surface are properties on the service, so they are filterable in
+  any query, including your existing tier-0 queries.
+- **Traversability.** Off by default. Opt-in rules may add `CanExecuteOn`
+  edges only where documented product semantics plus observed anonymous
+  evidence qualify. See the bar in the graph model.
+- **Provenance.** Everything is tagged `source_kind` `LLMHound` with scan ID,
+  vantage key, and observation time. Reconciliation and cleanup belong to your
+  normalizer.
+- **Starter queries.** Saved Cypher searches in `extension/saved_searches/`,
+  led by the tier-0 pathing questions; see the
   [planned list](docs/reference/saved-queries.md).
 
-Access evidence is scoped to the operation, target, collection vantage, and
-observation time; one successful check does not establish service-wide access.
-
-The full node and edge model, including identity rules and coverage
-properties, is in [`docs/reference/graph-model.md`](docs/reference/graph-model.md).
+The node and edge model, identity, and property contract are in
+[`docs/reference/graph-model.md`](docs/reference/graph-model.md).
 
 ## Quick start (planned)
 
@@ -136,43 +134,42 @@ properties, is in [`docs/reference/graph-model.md`](docs/reference/graph-model.m
 # Review what a scan would do (targets × checks), without touching targets
 llmhound plan --config llmhound.yaml
 
-# Scan; write an OpenGraph payload plus an .evidence.jsonl sidecar
+# Scan; write an OpenGraph payload, an .evidence.jsonl sidecar, and a restricted .content.jsonl
 llmhound scan --config llmhound.yaml \
-    --cidr 10.0.0.0/8 \
-    --targets-file known-ai-hosts.txt \
-    --output llmhound-2026-09-29.json
+    --cidr 10.20.30.0/24 \
+    --asset-mapping normalizer-assets.json \
+    --output llmhound-2026-11-20.json
 
 # Register the extension schema, upload the payload, import saved queries
 llmhound upload \
     --server https://bloodhound.corp.example \
     --token-file ~/.config/llmhound/bh-token \
-    --payload llmhound-2026-09-29.json
+    --payload llmhound-2026-11-20.json
 ```
 
-`llmhound.yaml` holds the deployment scope, collection vantage, targets and
-exclusions, rate/size bounds, sensitive-content opt-ins, TLS mode, User-Agent,
-and Computer-correlation settings. Flags override it.
+`llmhound.yaml` holds the deployment scope, vantage key, targets and
+exclusions, asset-mapping path, rate/size bounds, content settings and
+secret-detector toggles, TLS mode, User-Agent, and any enabled
+path-qualification rules. Flags override it.
 
-TLS certificate verification is on by default. Record available certificate,
-negotiated TLS, and verification metadata without bypassing a verification
-failure. Only explicit `--insecure` permits unverified collection and must be
-recorded in the evidence. Redirects are followed only within authorized target
-scope and collection bounds.
+TLS certificate verification is on by default. Verification metadata is
+recorded without bypassing a failure; only explicit `--insecure` permits
+unverified collection, and that is recorded in the evidence. Redirects are
+followed only within authorized target scope.
 
 ## Operational model
 
-LLMHound is built to run unattended on a dedicated scanner VM, on a
-cron or systemd schedule, feeding an automated BloodHound ingest pipeline:
+LLMHound is built to run unattended on a dedicated scanner VM, on a cron or
+systemd schedule, after your AD and Azure collection:
 
 - **Rate-limited.** Configurable concurrency, per-host rate limits, and
   connect/response timeouts.
 - **Identifiable.** Requests carry a configurable
-  `LLMHound/<version> (+contact)` User-Agent so defenders can attribute them.
+  `LLMHound/<version> (+contact)` User-Agent.
 - **Resumable.** Completed work is journaled; an interrupted scan picks up
-  where it stopped.
-- **Loss-tolerant.** An unreachable target or a failing collector degrades
-  only that surface. An ingest-valid payload is always written, even when
-  part of the scan fails.
+  where it stopped, retaining original observation times.
+- **Loss-tolerant.** A failing target or collector degrades only that surface.
+  An ingest-valid payload is always written.
 
 ## Responsible use
 
@@ -180,29 +177,34 @@ LLMHound actively probes and enumerates network services. Only run it against
 networks and systems you own or are explicitly authorized to assess. Collected
 metadata (model catalogs, workspace file names, backend references) can be
 sensitive; minimize and redact retained payloads, set retention limits, and
-restrict access. Reading sensitive existing content such as system prompts,
-configuration, or workspace files requires explicit opt-in. Advertised dependency URLs are evidence,
-not permission to fetch arbitrary URLs.
+restrict access. The content file (`.content.jsonl`) can hold system
+prompts, configuration, and file bodies: keep it out of the BloodHound ingest
+path, restrict access, and set retention limits. Secret values are never
+stored. Workspace listings and the whole content tier
+can be disabled in configuration. Advertised dependency URLs are evidence, not
+permission to fetch arbitrary URLs. Tool and prompt descriptions come from the
+scanned service: treat them as untrusted input, including in any LLM tooling
+downstream of the graph.
 
 ## Roadmap
 
-| Milestone         | Scope                                                                                                                                                  |
-| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **M0**            | BloodHound CE compatibility spike against a pinned version: kind naming, property types, non-traversable edges, cleanup, edges to existing `Computer` |
-| **M1**            | CLI skeleton, `llmhound.yaml`, graph model, OpenGraph emitter + evidence sidecar, extension schema; golden, identity, correlation, and semantics tests |
-| **M2a**           | Discovery, checkpoint journal, `llmhound plan`, and the MCP, Ollama, and Jupyter collectors end-to-end                                              |
-| **M2b**           | A2A, vLLM, LiteLLM, Qdrant, MLflow, Open WebUI, LangServe collectors under the [capability matrix](docs/reference/collector-capabilities.md)          |
-| **M2c**           | Generic OpenAI-compatible endpoint, Ray dashboard, Langflow, Flowise, ChromaDB                                                                         |
-| **M3**            | Resume, BloodHound CE API upload, saved queries, CE-API Computer lookup; adapter validation against an exact CE version/schema                       |
-| **M4** _(future)_ | Credential-driven enumeration and access evidence                                                                                                      |
-| **M5** _(future)_ | Node/edge description docs and an OpenGraph community library listing                                                                                  |
+| Milestone         | Scope                                                                                                                                           |
+| ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| **M0**            | CE compatibility spike (runs first): array properties, traversable vs non-traversable behavior, attachment by objectid, tier-0 semantics, query performance |
+| **M1**            | CLI skeleton, `llmhound.yaml`, graph model, mapping-file attachment, emitter + sidecar, content file and secret-detector framework, property contract, extension schema; golden, identity, and attachment tests |
+| **M2a**           | Discovery, checkpoint journal, `llmhound plan`, the MCP, Ollama, and Jupyter collectors end-to-end, and the first secret detectors                 |
+| **M2b**           | A2A, vLLM, LiteLLM, Qdrant, MLflow, Open WebUI, LangServe collectors under the [capability matrix](docs/reference/collector-capabilities.md)   |
+| **M2c**           | Generic OpenAI-compatible endpoint, Ray dashboard, Langflow, Flowise, ChromaDB                                                                  |
+| **M2d**           | Path-qualification rules: opt-in traversable edges for cases that clear the evidence bar                                                        |
+| **M3**            | Resume, BloodHound CE API upload, saved queries; adapter validation against an exact CE version/schema                                         |
+| **M4** _(future)_ | Credential-driven enumeration and richer evidence                                                                                               |
+| **M5** _(future)_ | Node/edge description docs and an OpenGraph community library listing (secondary goal)                                                          |
 
 ## Licensing
 
 LLMHound is original code written from scratch. Reference projects
 (AgentHound, ShareHound, OpenHound, Netwrix AIHound) informed its behavior
 only; no code is derived from them. See the
-[provenance table](docs/plans/2026-09-29-llmhound-design.md#provenance-and-licensing-posture)
-in the design doc.
+[provenance table](docs/plans/2026-09-29-llmhound-design.md#provenance-and-licensing-posture).
 
 LLMHound is licensed under Apache-2.0 (`LICENSE` ships with M1).

@@ -1,6 +1,7 @@
 # Starter saved queries
 
-> **Status: planned.** These queries ship in `extension/saved_searches/` in
+> **Status: P1, P2, P4 and P6 are built and validated** (`extension/saved_searches/`, generated;
+> `lab/scripts/run-d2-checks.sh`). The rest are planned. These queries ship in `extension/saved_searches/` in
 > SpecterOps Query Library format. Their shapes were validated on CE 9.7.1
 > ([R2](05-ce-compatibility.md#follow-up-answers-for-the-tier-0-redesign-r1r9));
 > running them against sample data is [D2](06-roadmap.md). Kind and property names follow the
@@ -33,6 +34,10 @@
   traversable, i.e. when a [path-qualification](02-graph-model.md#path-qualification-traversable-edges)
   rule is enabled. The lab fixture has no `AdminTo`, so do not hard-code any
   specific AD edge.
+- **Shipped form.** The shipped files differ from the readable examples below: no
+  `NOT h:NetworkEndpoint` host filter is needed because the `ObservedAt` pattern predicate
+  and an unlabeled `shortestPath` endpoint work for any native host kind, and P2's start is
+  the `<START_OBJECTID>` placeholder. See `extension/saved_searches/README.md`.
 - **Query shapes that work on CE 9.7.1.** (R2) `shortestPath` endpoints must be
   inline in the pattern with the filter in a trailing `WHERE`; endpoints bound by
   an earlier `MATCH` fail with HTTP 500. To require a service on the target host,

@@ -9,7 +9,7 @@ Domain Users ─GenericAll→ LAB-WIN-01 ─HasSession→ M0-ADM ─MemberOf→ 
 
 - `LOWPRIV@LAB.LOCAL` is a Domain Users member with no other rights (the "low-privilege start").
 - `LAB-WIN-01` is where the AI service attaches (two hops from tier 0).
-- `LAB-WIN-02` has no edges (an AI host that is on no path).
+- `LAB-WIN-02` is a member of Domain Users, so it reaches LAB-WIN-01 through the same `GenericAll`; it has no other edges.
 
 Why a DACL edge and not `AdminTo`: CE 9.7.1 turns SharpHound `LocalGroups` data into the
 structural `MemberOfLocalGroup`/`LocalToComputer` edges, which are *not* traversable, and did not

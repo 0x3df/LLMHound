@@ -422,6 +422,9 @@ ambiguous matches (Q6).
   (canceled) and a job can sit in status `6` (ingesting) with an idle pipeline. 3,000
   sourceless edges onto one Computer took 60 s in one run and 320 s in another. The M3
   client must poll with a timeout, verify the result, and retry.
+- **Saved-query import rejects duplicate names** (HTTP 400, `duplicate name for saved query`),
+  and a graph reset does not remove saved queries. An installer deletes prior `LLMHound*`
+  queries first.
 - **Aggregates return no nodes.** `RETURN count(s)` yields a successful response with zero
   nodes, so counts must be read from the response data, not the node map.
 

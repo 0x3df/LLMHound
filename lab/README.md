@@ -90,13 +90,15 @@ lab/
 │   │   └── negative/                    # payloads expected to be rejected
 │   ├── ad/ingest/                       # synthetic SharpHound v6 AD data (LAB.LOCAL)
 │   ├── ad/paths/                        # attack-path scenario for R1–R9
-│   └── azure/                           # AzureHound-format VM
+│   ├── azure/                           # AzureHound-format VM
+│   └── d2/                              # fake Ollama for the end-to-end D2 run
 └── scripts/
     ├── lib.sh                  # API helpers (login, cypher, upload jobs, evidence)
     ├── lab-up.sh / lab-down.sh # lifecycle; teardown is project-scoped
     ├── validate-fixtures.sh    # offline structural validation of all fixtures
     ├── run-m0-checks.sh        # the repeatable M0 check suite (Q1–Q10)
-    └── run-r-checks.sh         # tier-0 follow-ups R1–R9 (real schema, attack-path fixtures)
+    ├── run-r-checks.sh         # tier-0 follow-ups R1–R9 (real schema, attack-path fixtures)
+    └── run-d2-checks.sh        # shipped saved searches on real emitted payloads
 ```
 
 ## Notes

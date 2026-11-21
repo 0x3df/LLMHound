@@ -1,0 +1,5 @@
+{
+  "name": "LLMHound P6: unattributed AI services",
+  "description": "Hand-off list for the normalization program: services whose target was not in the asset mapping.",
+  "query": "MATCH (s:LLMHound_AIService)-[:LLMHound_ObservedAt]->(n:LLMHound_NetworkEndpoint)\nRETURN s, n\nLIMIT 1000"
+}

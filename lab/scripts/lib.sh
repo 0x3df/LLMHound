@@ -259,7 +259,7 @@ upload_out() {
 
     # Ingest is asynchronous; poll to a terminal job status.
     local waited=0 jst
-    while [ "$waited" -lt 300 ]; do
+    while [ "$waited" -lt "${UPLOAD_WAIT:-300}" ]; do
         jst=$(call GET /api/v2/file-upload | jq -r --arg id "$jid" '
             first(.data[] | select(.id == ($id | tonumber))).status // "gone"')
         case "$jst" in 2|3|8|gone) break ;; esac

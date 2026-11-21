@@ -48,10 +48,7 @@ func newRootCommand() *cobra.Command {
 	flags.BoolVar(&overrides.OptIns.Prompts, "prompts", false, "Reserved sensitive prompt-content opt-in")
 	flags.BoolVar(&overrides.OptIns.ConfigurationContent, "configuration-content", false, "Reserved sensitive configuration-content opt-in")
 	flags.BoolVar(&overrides.OptIns.WorkspaceContent, "workspace-content", false, "Reserved sensitive workspace-content opt-in")
-	flags.StringVar(&overrides.Correlation.MappingFile, "mapping-file", "", "Reserved target-to-Computer mapping file (not read)")
-	flags.StringSliceVar(&overrides.Correlation.ADDomainSuffixes, "ad-domain-suffix", nil, "Reserved exact AD DNS suffixes; repeat or comma-separate")
-	flags.BoolVar(&overrides.Correlation.ReverseDNS, "reverse-dns", false, "Reserved reverse-DNS opt-in (no DNS performed in M1)")
-	flags.BoolVar(&overrides.Correlation.CELookup, "ce-lookup", false, "Reserved CE lookup opt-in (no CE calls in M1)")
+	flags.StringVar(&overrides.Correlation.MappingFile, "mapping-file", "", "Asset mapping file from the normalizer: target to existing BloodHound objectid and kind")
 
 	var prepared []string
 	var effectiveConfig config.Config

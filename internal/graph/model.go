@@ -32,25 +32,18 @@ func (n Node) Kinds() []Kind {
 	return []Kind{n.identity.kind}
 }
 
-type MatchBy string
-
-const (
-	MatchByID       MatchBy = "id"
-	MatchByProperty MatchBy = "property"
-)
-
-// Reference is either a source-owned endpoint or an existing native Computer.
-// Native constructors require existence already verified by the caller; they
-// do not prove presence in CE and must not be used with unchecked mappings.
+// Reference is either a source-owned endpoint or an existing native node of
+// any kind already in the BloodHound graph (Computer, AZVM, ...). Native
+// references are matched by objectid only. Constructors require that existence
+// was asserted by the caller (the normalizer's asset mapping); they do not
+// prove presence in CE, and the upload pre-flight re-verifies it.
 type Reference struct {
 	identity   Identity
 	nativeID   string
-	matchBy    MatchBy
-	property   string
-	matchValue string
+	nativeKind Kind
 }
 
-func (i Identity) Reference() Reference { return Reference{identity: i, matchBy: MatchByID} }
+func (i Identity) Reference() Reference { return Reference{identity: i} }
 func (r Reference) ID() string {
 	if r.IsNative() {
 		return r.nativeID
@@ -59,38 +52,41 @@ func (r Reference) ID() string {
 }
 func (r Reference) Kind() Kind {
 	if r.IsNative() {
-		return Computer
+		return r.nativeKind
 	}
 	return r.identity.kind
 }
-func (r Reference) Scope() string      { return r.identity.scope }
-func (r Reference) OwnerID() string    { return r.identity.ownerID }
-func (r Reference) IsNative() bool     { return r.nativeID != "" }
-func (r Reference) MatchBy() MatchBy   { return r.matchBy }
-func (r Reference) Property() string   { return r.property }
-func (r Reference) MatchValue() string { return r.matchValue }
+func (r Reference) Scope() string   { return r.identity.scope }
+func (r Reference) OwnerID() string { return r.identity.ownerID }
+func (r Reference) IsNative() bool  { return r.nativeID != "" }
 
-// ExistingComputerByID preserves the verified native objectid verbatim.
-func ExistingComputerByID(objectID string) (Reference, error) {
+// ExistingNodeByID preserves the native objectid verbatim and records the
+// native kind (for example "Computer" or "AZVM"). A source-owned kind, the
+// umbrella label, or a malformed kind name is rejected.
+func ExistingNodeByID(kind Kind, objectID string) (Reference, error) {
 	if !validStableText(objectID) {
-		return Reference{}, errors.New("existing Computer requires an exact verified native ID")
+		return Reference{}, errors.New("existing node requires an exact native objectid")
 	}
-	return Reference{nativeID: objectID, matchBy: MatchByID}, nil
+	if !validNativeKind(kind) {
+		return Reference{}, errors.New("existing node requires a native kind that LLMHound does not own")
+	}
+	return Reference{nativeID: objectID, nativeKind: kind}, nil
 }
 
-// ExistingComputerByName uses only M0's verified, exact upper-case name matcher.
-// objectID records the unique existing Computer whose name was verified.
-func ExistingComputerByName(objectID, name string) (Reference, error) {
-	r, err := ExistingComputerByID(objectID)
-	if err != nil {
-		return Reference{}, err
+func validNativeKind(kind Kind) bool {
+	k := string(kind)
+	if k == "" || k[0] < 'A' || (k[0] > 'Z' && k[0] < 'a') || k[0] > 'z' {
+		return false
 	}
-	target, err := ParseTarget(name)
-	if err != nil || target.typ != DNSTarget || name != strings.ToUpper(target.value) {
-		return Reference{}, errors.New("Computer name matcher requires canonical upper-case DNS name")
+	for _, c := range k {
+		if (c < 'A' || c > 'Z') && (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '_' {
+			return false
+		}
 	}
-	r.matchBy, r.property, r.matchValue = MatchByProperty, "name", name
-	return r, nil
+	if kind.IsService() || kind.IsResource() || kind == NetworkEndpoint || kind == AIService {
+		return false
+	}
+	return !strings.HasPrefix(strings.ToLower(k), strings.ToLower(SourceKind))
 }
 
 // Correlation records a decision, not an identity merge. Candidate IDs stay in
@@ -110,13 +106,12 @@ func cloneCorrelation(c Correlation) Correlation {
 
 // Edge never carries a configurable traversal flag. SourceKind is deliberately
 // empty on native-touching edges: M0 Q5 requires a separate sourceless linking
-// payload to avoid tagging/deleting existing AD Computers during cleanup.
+// payload to avoid tagging and deleting existing native nodes on source cleanup.
 type Edge struct {
 	kind        EdgeKind
 	start       Reference
 	end         Reference
 	observation Observation
-	access      *AccessEvidence
 	correlation *Correlation
 }
 
@@ -131,12 +126,6 @@ func (e Edge) SourceKind() string {
 		return ""
 	}
 	return SourceKind
-}
-func (e Edge) AccessEvidence() (AccessEvidence, bool) {
-	if e.access == nil {
-		return AccessEvidence{}, false
-	}
-	return *e.access, true
 }
 func (e Edge) Correlation() (Correlation, bool) {
 	if e.correlation == nil {
@@ -160,8 +149,8 @@ func newEdge(kind EdgeKind, start, end Reference, observation Observation) (Edge
 
 // NewObservedAtEdge records endpoint observation, never runtime placement.
 func NewObservedAtEdge(service, target Reference, observation Observation, correlation Correlation) (Edge, error) {
-	if !service.Kind().IsService() || (target.Kind() != Computer && target.Kind() != NetworkEndpoint) {
-		return Edge{}, errors.New("ObservedAt requires service to Computer or NetworkEndpoint")
+	if !service.Kind().IsService() || !(target.IsNative() || target.Kind() == NetworkEndpoint) {
+		return Edge{}, errors.New("ObservedAt requires service to an existing native node or NetworkEndpoint")
 	}
 	if target.IsNative() {
 		if !validStableText(correlation.MatchMethod) || !validStableText(correlation.MatchValue) || !validStableText(correlation.Confidence) || correlation.FallbackReason != "" {
@@ -205,35 +194,4 @@ func NewTopologyEdge(kind EdgeKind, start, end Reference, observation Observatio
 		return Edge{}, errors.New("invalid topology direction, kind or resource owner")
 	}
 	return newEdge(kind, start, end, observation)
-}
-
-// NewAccessEdge accepts only validated anonymous success at the exact target,
-// with operation-level evidence. No denied control request is required.
-func NewAccessEdge(kind EdgeKind, vantage, target Reference, evidence AccessEvidence) (Edge, error) {
-	if vantage.Kind() != CollectionVantage || vantage.identity != evidence.Observation.Vantage || target.ID() != evidence.TargetID {
-		return Edge{}, errors.New("access requires the recorded vantage and exact operation target")
-	}
-	check := CheckResult{Observation: evidence.Observation, CheckID: evidence.CheckID, Operation: evidence.Operation, TargetID: evidence.TargetID, Outcome: evidence.Outcome, Reason: evidence.Reason}
-	if err := check.Validate(vantage.Scope()); err != nil {
-		return Edge{}, err
-	}
-	if !evidence.Anonymous || evidence.Outcome != OutcomeSuccess {
-		return Edge{}, errors.New("positive access edge requires validated anonymous success")
-	}
-	valid := kind == UnauthenticatedAccess && target.Kind().IsService() && evidence.OperationKind == EnumerationOperation
-	if kind == PublicAccess && evidence.OperationKind == ResourceReadOperation {
-		switch target.Kind() {
-		case MCPResource, WorkspaceFile, ModelArtifact, ArtifactStore, VectorCollection:
-			valid = true
-		}
-	}
-	if !valid {
-		return Edge{}, errors.New("access kind requires the correct target and metadata/read operation")
-	}
-	e, err := newEdge(kind, vantage, target, evidence.Observation)
-	if err != nil {
-		return Edge{}, err
-	}
-	e.access = &evidence
-	return e, nil
 }

@@ -41,7 +41,7 @@ func TestServiceIdentityGoldenAndSeparation(t *testing.T) {
 	}
 }
 
-func TestResourceAndVantageIdentities(t *testing.T) {
+func TestResourceIdentities(t *testing.T) {
 	owner := service(t, "scope", graph.MCPServer, "https://example.com/mcp")
 	otherOwner := service(t, "scope", graph.MCPServer, "https://example.com/other")
 	a, err := graph.NewResourceIdentity("scope", graph.MCPResource, owner, "resource://Case/key")
@@ -54,22 +54,6 @@ func TestResourceAndVantageIdentities(t *testing.T) {
 	e, _ := graph.NewResourceIdentity("scope", graph.MCPTool, owner, "resource://Case/key")
 	if a != b || a.ID() == c.ID() || a.ID() == d.ID() || a.ID() == e.ID() || a.OwnerID() != owner.ID() {
 		t.Fatal("resource key/ownership identity incorrect")
-	}
-	v, err := graph.NewVantageIdentity("scope", "scanner/network-a")
-	if err != nil {
-		t.Fatal(err)
-	}
-	v2, _ := graph.NewVantageIdentity("scope", "scanner/network-a")
-	v3, _ := graph.NewVantageIdentity("scope", "scanner/network-b")
-	v4, _ := graph.NewVantageIdentity("other-scope", "scanner/network-a")
-	if v != v2 || v.ID() == v3.ID() || v.ID() == v4.ID() {
-		t.Fatal("vantage is not scoped/stable")
-	}
-	// Unambiguous tuple encoding, not delimiter concatenation.
-	x, _ := graph.NewVantageIdentity("a|b", "c")
-	y, _ := graph.NewVantageIdentity("a", "b|c")
-	if x.ID() == y.ID() {
-		t.Fatal("ambiguous tuple")
 	}
 }
 
@@ -116,9 +100,6 @@ func TestInvalidIdentityInputs(t *testing.T) {
 			t.Fatal("accepted invalid resource")
 		}
 	}
-	if _, err := graph.NewVantageIdentity("scope", ""); err == nil {
-		t.Fatal("accepted empty vantage")
-	}
 	if _, err := graph.NewNetworkEndpointIdentity("scope", graph.Target{}); err == nil {
 		t.Fatal("accepted empty target")
 	}
@@ -135,8 +116,11 @@ func TestKindMappingAndNonTraversability(t *testing.T) {
 			t.Fatalf("%s emitted %s", kind, got)
 		}
 	}
-	if got, err := graph.Computer.Emitted(); err != nil || got != "Computer" {
-		t.Fatal("native kind qualified")
+	// Native kinds are only ever edge endpoints; LLMHound never emits them.
+	for _, native := range []graph.Kind{graph.Computer, "AZVM"} {
+		if _, err := native.Emitted(); err == nil {
+			t.Fatalf("native kind %q has an emitted LLMHound name", native)
+		}
 	}
 	if _, err := graph.Kind("unknown").Emitted(); err == nil {
 		t.Fatal("unknown kind accepted")

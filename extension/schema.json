@@ -9,23 +9,15 @@
     {
       "name": "LLMHound_NetworkEndpoint",
       "display_name": "Network Endpoint",
-      "description": "Fallback node for an observed IP or FQDN target that did not correlate to an existing AD Computer.",
+      "description": "Fallback node for an observed IP or FQDN target that the asset mapping did not attach to an existing BloodHound node. The normalization program attributes it later.",
       "is_display_kind": true,
       "icon": "server",
       "color": "#64748B"
     },
     {
-      "name": "LLMHound_CollectionVantage",
-      "display_name": "Collection Vantage",
-      "description": "Configured scanner or network context from which observations were made. Not an attacker principal.",
-      "is_display_kind": true,
-      "icon": "network-wired",
-      "color": "#6366F1"
-    },
-    {
       "name": "LLMHound_AIService",
       "display_name": "AI Service",
-      "description": "Umbrella label carried by concrete AI service nodes; does not own identity.",
+      "description": "Umbrella label carried by every concrete service node (MCP server, A2A agent, AI service); does not own identity.",
       "is_display_kind": false
     },
     {
@@ -206,7 +198,7 @@
   "relationship_kinds": [
     {
       "name": "LLMHound_ObservedAt",
-      "description": "Fingerprinted service was observed through this target (correlated Computer or fallback NetworkEndpoint).",
+      "description": "Fingerprinted service was observed through this target: an existing BloodHound node named by the asset mapping, or a fallback NetworkEndpoint.",
       "is_traversable": false
     },
     {
@@ -247,16 +239,6 @@
     {
       "name": "LLMHound_Contains",
       "description": "Collection, workspace file, model artifact, or reported artifact store association.",
-      "is_traversable": false
-    },
-    {
-      "name": "LLMHound_UnauthenticatedAccess",
-      "description": "A specific enumeration operation succeeded without credentials from the recorded vantage.",
-      "is_traversable": false
-    },
-    {
-      "name": "LLMHound_PublicAccess",
-      "description": "A specific sensitive resource read succeeded without credentials from the recorded vantage.",
       "is_traversable": false
     }
   ]

@@ -108,7 +108,7 @@ func TestSemantics_M0_Q5_SourceSegregation(t *testing.T) {
 	srvNode, _ := graph.NewNode(srvID, obs)
 	item, _ := emitter.NewNodeItem(srvNode, map[string]any{"name": "OLLAMA-1"})
 
-	compRef, _ := graph.ExistingComputerByID("S-1-5-21-1103")
+	compRef, _ := graph.ExistingNodeByID(graph.Computer, "S-1-5-21-1103")
 	linkingEdge, _ := graph.NewObservedAtEdge(srvID.Reference(), compRef, obs, graph.Correlation{
 		MatchMethod: "mapping",
 		MatchValue:  "S-1-5-21-1103",
@@ -145,51 +145,37 @@ func TestSemantics_M0_Q5_SourceSegregation(t *testing.T) {
 	}
 }
 
-// TestSemantics_M0_Q6_PropertyMatchComputer verifies AD-suffix property matcher format.
-func TestSemantics_M0_Q6_PropertyMatchComputer(t *testing.T) {
+// TestSemantics_M0_Q6_NativeNodesMatchByIDOnly verifies that every native kind
+// (not only Computer) is matched by objectid. M0 Q6 showed property matching
+// silently drops zero or ambiguous matches, so LLMHound never emits it.
+func TestSemantics_M0_Q6_NativeNodesMatchByIDOnly(t *testing.T) {
 	obs := helperObservation(t)
 	ep, _ := graph.ParseEndpoint("http://127.0.0.1:11434", "")
 	srvID, _ := graph.NewServiceIdentity("lab", graph.OllamaInstance, ep)
 
-	compRef, err := graph.ExistingComputerByName("S-1-5-21-1103", "LAB-WIN-01.LAB.LOCAL")
-	if err != nil {
-		t.Fatalf("ExistingComputerByName: %v", err)
-	}
-
-	edge, err := graph.NewObservedAtEdge(srvID.Reference(), compRef, obs, graph.Correlation{
-		MatchMethod: "ad_suffix_name",
-		MatchValue:  "LAB-WIN-01.LAB.LOCAL",
-		Confidence:  "unique_property_match",
-	})
-	if err != nil {
-		t.Fatalf("NewObservedAtEdge: %v", err)
-	}
-
-	p, err := emitter.BuildLinkingPayload([]graph.Edge{edge})
-	if err != nil {
-		t.Fatalf("BuildLinkingPayload: %v", err)
-	}
-
-	if len(p.Graph.Edges) != 1 {
-		t.Fatalf("expected 1 edge, got %d", len(p.Graph.Edges))
-	}
-
-	end := p.Graph.Edges[0].End
-	if end.MatchBy != "property" {
-		t.Errorf("expected match_by property, got: %s", end.MatchBy)
-	}
-	if end.Kind != "Computer" {
-		t.Errorf("expected kind Computer, got: %s", end.Kind)
-	}
-	if end.Value != "" {
-		t.Errorf("expected empty value on property match, got: %s", end.Value)
-	}
-	if len(end.PropertyMatchers) != 1 {
-		t.Fatalf("expected 1 property matcher, got %d", len(end.PropertyMatchers))
-	}
-	matcher := end.PropertyMatchers[0]
-	if matcher.Key != "name" || matcher.Operator != "equals" || matcher.Value != "LAB-WIN-01.LAB.LOCAL" {
-		t.Errorf("unexpected matcher: %+v", matcher)
+	for _, native := range []struct {
+		kind graph.Kind
+		id   string
+	}{{graph.Computer, "S-1-5-21-1103"}, {"AZVM", "AZURE-VM-1"}} {
+		ref, err := graph.ExistingNodeByID(native.kind, native.id)
+		if err != nil {
+			t.Fatalf("ExistingNodeByID(%s): %v", native.kind, err)
+		}
+		edge, err := graph.NewObservedAtEdge(srvID.Reference(), ref, obs, graph.Correlation{MatchMethod: "mapping", MatchValue: "host.lab.local", Confidence: "asserted"})
+		if err != nil {
+			t.Fatalf("NewObservedAtEdge: %v", err)
+		}
+		p, err := emitter.BuildLinkingPayload([]graph.Edge{edge})
+		if err != nil {
+			t.Fatalf("BuildLinkingPayload: %v", err)
+		}
+		raw, err := json.Marshal(p.Graph.Edges[0].End)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(raw) != `{"match_by":"id","value":"`+native.id+`"}` {
+			t.Errorf("%s endpoint must be an id match only, got %s", native.kind, raw)
+		}
 	}
 }
 
@@ -199,9 +185,9 @@ func TestSemantics_M0_Q7_IDMatchComputer(t *testing.T) {
 	ep, _ := graph.ParseEndpoint("http://127.0.0.1:11434", "")
 	srvID, _ := graph.NewServiceIdentity("lab", graph.OllamaInstance, ep)
 
-	compRef, err := graph.ExistingComputerByID("S-1-5-21-1104")
+	compRef, err := graph.ExistingNodeByID(graph.Computer, "S-1-5-21-1104")
 	if err != nil {
-		t.Fatalf("ExistingComputerByID: %v", err)
+		t.Fatalf("ExistingNodeByID: %v", err)
 	}
 
 	edge, err := graph.NewObservedAtEdge(srvID.Reference(), compRef, obs, graph.Correlation{

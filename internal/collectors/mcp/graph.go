@@ -68,7 +68,7 @@ func extractCapabilities(caps *mcpsdk.ServerCapabilities) []string {
 	return out
 }
 
-func buildServerNode(srvID graph.Identity, ep graph.Endpoint, obs graph.Observation, initResult *mcpsdk.InitializeResult, tlsObs *tlsObservation) (emitter.NodeItem, error) {
+func buildServerNode(srvID graph.Identity, ep graph.Endpoint, obs graph.Observation, initResult *mcpsdk.InitializeResult, tlsObs *tlsObservation, access graph.Access) (emitter.NodeItem, error) {
 	node, err := graph.NewNode(srvID, obs)
 	if err != nil {
 		return emitter.NodeItem{}, fmt.Errorf("create MCPServer node: %w", err)
@@ -83,6 +83,10 @@ func buildServerNode(srvID graph.Identity, ep graph.Endpoint, obs graph.Observat
 		"endpoint_port":      int(ep.Port()),
 		"endpoint_scheme":    ep.Scheme(),
 		"endpoint_base_path": ep.BasePath(),
+		"vantage_key":        obs.VantageKey,
+	}
+	for k, v := range access.Properties() {
+		props[k] = v
 	}
 
 	if initResult != nil {
@@ -404,99 +408,37 @@ func buildPromptNodesAndEdges(scope string, srvID graph.Identity, obs graph.Obse
 	return nodes, edges, nil
 }
 
-func buildAccessEdge(vantageID, srvID graph.Identity, obs graph.Observation, checkID, op, reason string) (graph.Edge, error) {
-	accEv := graph.AccessEvidence{
-		Observation:   obs,
-		CheckID:       checkID,
-		Operation:     op,
-		TargetID:      srvID.ID(),
-		Outcome:       graph.OutcomeSuccess,
-		Reason:        reason,
-		Anonymous:     true,
-		OperationKind: graph.EnumerationOperation,
-	}
-
-	return graph.NewAccessEdge(graph.UnauthenticatedAccess, vantageID.Reference(), srvID.Reference(), accEv)
-}
-
 func buildCorrelationEdgeAndFallback(
 	scope string,
 	targetHost string,
 	srvID graph.Identity,
 	obs graph.Observation,
 	correlator *correlate.Resolver,
-	computers []correlate.Computer,
 ) (graph.Edge, *emitter.NodeItem, correlate.Evidence, error) {
-	if correlator != nil {
-		corrRes, err := correlator.Resolve(scope, targetHost, computers)
-		if err != nil {
-			return graph.Edge{}, nil, correlate.Evidence{}, fmt.Errorf("resolve Computer correlation: %w", err)
-		}
-		edge, err := corrRes.ObservedAt(srvID, obs)
+	corrRes, err := correlator.Resolve(scope, targetHost)
+	if err != nil {
+		return graph.Edge{}, nil, correlate.Evidence{}, fmt.Errorf("resolve correlation: %w", err)
+	}
+	edge, err := corrRes.ObservedAt(srvID, obs)
+	if err != nil {
+		return graph.Edge{}, nil, corrRes.Evidence(), err
+	}
+
+	var fallbackItem *emitter.NodeItem
+	if fallbackID, ok := corrRes.FallbackIdentity(); ok {
+		fallbackNode, err := graph.NewNode(fallbackID, obs)
 		if err != nil {
 			return graph.Edge{}, nil, corrRes.Evidence(), err
 		}
-
-		var fallbackItem *emitter.NodeItem
-		if fallbackID, ok := corrRes.FallbackIdentity(); ok {
-			fallbackNode, err := graph.NewNode(fallbackID, obs)
-			if err != nil {
-				return graph.Edge{}, nil, corrRes.Evidence(), err
-			}
-			item, err := emitter.NewNodeItem(fallbackNode, map[string]any{
-				"name":         targetHost,
-				"target_type":  string(corrRes.Evidence().TargetType),
-				"target_value": targetHost,
-			})
-			if err != nil {
-				return graph.Edge{}, nil, corrRes.Evidence(), err
-			}
-			fallbackItem = &item
+		item, err := emitter.NewNodeItem(fallbackNode, map[string]any{
+			"name":         targetHost,
+			"target_type":  string(corrRes.Evidence().TargetType),
+			"target_value": targetHost,
+		})
+		if err != nil {
+			return graph.Edge{}, nil, corrRes.Evidence(), err
 		}
-		return edge, fallbackItem, corrRes.Evidence(), nil
+		fallbackItem = &item
 	}
-
-	// Default fallback to NetworkEndpoint
-	tgt, err := graph.ParseTarget(targetHost)
-	if err != nil {
-		return graph.Edge{}, nil, correlate.Evidence{}, fmt.Errorf("parse target for correlation: %w", err)
-	}
-
-	fallbackID, err := graph.NewNetworkEndpointIdentity(scope, tgt)
-	if err != nil {
-		return graph.Edge{}, nil, correlate.Evidence{}, fmt.Errorf("create fallback NetworkEndpoint identity: %w", err)
-	}
-
-	fallbackNode, err := graph.NewNode(fallbackID, obs)
-	if err != nil {
-		return graph.Edge{}, nil, correlate.Evidence{}, fmt.Errorf("create fallback node: %w", err)
-	}
-
-	fallbackItem, err := emitter.NewNodeItem(fallbackNode, map[string]any{
-		"name":         tgt.Value(),
-		"target_type":  string(tgt.Type()),
-		"target_value": tgt.Value(),
-	})
-	if err != nil {
-		return graph.Edge{}, nil, correlate.Evidence{}, fmt.Errorf("create fallback item: %w", err)
-	}
-
-	corr := graph.Correlation{
-		FallbackReason: correlate.NoADSuffixes,
-		MatchValue:     tgt.Value(),
-	}
-
-	edge, err := graph.NewObservedAtEdge(srvID.Reference(), fallbackID.Reference(), obs, corr)
-	if err != nil {
-		return graph.Edge{}, nil, correlate.Evidence{}, fmt.Errorf("create ObservedAt edge: %w", err)
-	}
-
-	corrEv := correlate.Evidence{
-		OriginalTarget:   targetHost,
-		NormalizedTarget: tgt.Value(),
-		TargetType:       tgt.Type(),
-		Correlation:      corr,
-	}
-
-	return edge, &fallbackItem, corrEv, nil
+	return edge, fallbackItem, corrRes.Evidence(), nil
 }

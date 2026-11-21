@@ -22,7 +22,11 @@ func TestGoldenEmission(t *testing.T) {
 	cfg.Scope = "corp-scope"
 	cfg.VantageKey = "vantage-dc01"
 	cfg.Targets = []string{"ollama.corp.local"}
-	cfg.Correlation.ADDomainSuffixes = []string{"corp.local"}
+	mappingFile := filepath.Join(tempDir, "assets.csv")
+	if err := os.WriteFile(mappingFile, []byte("ollama.corp.local,S-1-5-21-9999-8888-7777-1001,Computer\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Correlation.MappingFile = mappingFile
 
 	prepared, err := targets.Prepare(cfg.TargetInput())
 	if err != nil {
@@ -32,32 +36,21 @@ func TestGoldenEmission(t *testing.T) {
 		t.Fatalf("unexpected prepared targets: %v", prepared)
 	}
 
-	// 2. Correlate target against verified Computer inventory
-	resolver, err := correlate.NewFromConfig(cfg, nil, true)
+	// 2. Attach the target to the existing node the asset mapping names
+	resolver, err := correlate.NewFromConfig(cfg)
 	if err != nil {
 		t.Fatalf("correlate.NewFromConfig: %v", err)
 	}
 
-	verifiedComputers := []correlate.Computer{
-		{
-			ObjectID: "S-1-5-21-9999-8888-7777-1001",
-			Name:     "OLLAMA.CORP.LOCAL",
-		},
-	}
-
-	corrResult, err := resolver.Resolve(cfg.Scope, prepared[0], verifiedComputers)
+	corrResult, err := resolver.Resolve(cfg.Scope, prepared[0])
 	if err != nil {
 		t.Fatalf("resolver.Resolve: %v", err)
 	}
-	if !corrResult.Evidence().Verified {
-		t.Fatalf("expected target to be verified")
+	if !corrResult.Target().IsNative() {
+		t.Fatalf("expected target to attach to the mapped native node")
 	}
 
 	// 3. Build graph observation and identities
-	vantageID, err := cfg.VantageIdentity()
-	if err != nil {
-		t.Fatalf("cfg.VantageIdentity: %v", err)
-	}
 
 	fixedTime := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
 	obs := graph.Observation{
@@ -68,13 +61,9 @@ func TestGoldenEmission(t *testing.T) {
 		Source:           "http://ollama.corp.local:11434/api/tags",
 		Surface:          "ollama",
 		ObservedAt:       fixedTime,
-		Vantage:          vantageID,
+		DeploymentScope:  cfg.Scope,
+		VantageKey:       cfg.VantageKey,
 		Coverage:         graph.CoverageComplete,
-	}
-
-	vantageNode, err := graph.NewNode(vantageID, obs)
-	if err != nil {
-		t.Fatalf("NewNode vantage: %v", err)
 	}
 
 	ep, err := graph.ParseEndpoint("http://ollama.corp.local:11434", "")
@@ -99,22 +88,30 @@ func TestGoldenEmission(t *testing.T) {
 		t.Fatalf("NewNode model: %v", err)
 	}
 
-	vantageItem, err := emitter.NewNodeItem(vantageNode, map[string]any{
-		"name":        "VANTAGE-DC01",
-		"vantage_key": "vantage-dc01",
-	})
-	if err != nil {
-		t.Fatal(err)
+	// Anonymous access is a flat property set on the service, never an edge.
+	accessEvidence := graph.AccessEvidence{
+		Observation:   obs,
+		CheckID:       "ollama_tags_check",
+		Operation:     "ollama_tags",
+		TargetID:      srvID.ID(),
+		Outcome:       graph.OutcomeSuccess,
+		Reason:        "tags listed anonymously",
+		Anonymous:     true,
+		OperationKind: graph.EnumerationOperation,
 	}
-
-	srvItem, err := emitter.NewNodeItem(srvNode, map[string]any{
+	srvProps := map[string]any{
 		"name":             "OLLAMA · ollama.corp.local:11434",
 		"endpoint_host":    "ollama.corp.local",
 		"endpoint_port":    11434,
 		"product":          "Ollama",
 		"vendor":           "Ollama",
 		"software_version": "0.3.12",
-	})
+		"vantage_key":      cfg.VantageKey,
+	}
+	for k, v := range graph.SummarizeAccess([]graph.AccessEvidence{accessEvidence}).Properties() {
+		srvProps[k] = v
+	}
+	srvItem, err := emitter.NewNodeItem(srvNode, srvProps)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,21 +125,6 @@ func TestGoldenEmission(t *testing.T) {
 	}
 
 	// 4. Build edges
-	// Access edge: Vantage -> Service (owned edge)
-	accessEdge, err := graph.NewAccessEdge(graph.UnauthenticatedAccess, vantageID.Reference(), srvID.Reference(), graph.AccessEvidence{
-		Observation:   obs,
-		CheckID:       "ollama_tags_check",
-		Operation:     "ollama_tags",
-		TargetID:      srvID.ID(),
-		Outcome:       graph.OutcomeSuccess,
-		Reason:        "tags listed anonymously",
-		Anonymous:     true,
-		OperationKind: graph.EnumerationOperation,
-	})
-	if err != nil {
-		t.Fatalf("NewAccessEdge: %v", err)
-	}
-
 	// Topology edge: Service -> Model (owned edge)
 	modelEdge, err := graph.NewTopologyEdge(graph.ProvidesModel, srvID.Reference(), modelID.Reference(), obs)
 	if err != nil {
@@ -155,15 +137,14 @@ func TestGoldenEmission(t *testing.T) {
 		t.Fatalf("corrResult.ObservedAt: %v", err)
 	}
 
-	nodes := []emitter.NodeItem{vantageItem, srvItem, modelItem}
-	edges := []graph.Edge{accessEdge, modelEdge, linkingEdge}
+	nodes := []emitter.NodeItem{srvItem, modelItem}
+	edges := []graph.Edge{modelEdge, linkingEdge}
 
 	// 5. Build evidence records
 	corrRec, err := evidence.NewCorrelationRecord(corrResult.Evidence(), obs)
 	if err != nil {
 		t.Fatal(err)
 	}
-	accessEvidence, _ := accessEdge.AccessEvidence()
 	checkRec, err := evidence.NewAccessEvidenceRecord(accessEvidence, map[string]any{
 		"http_status": 200,
 	})

@@ -12,10 +12,6 @@ import (
 
 func helperObservation(t *testing.T) graph.Observation {
 	t.Helper()
-	v, err := graph.NewVantageIdentity("lab", "vantage-test")
-	if err != nil {
-		t.Fatal(err)
-	}
 	return graph.Observation{
 		SchemaVersion:    "1",
 		ScanID:           "scan-001",
@@ -24,7 +20,8 @@ func helperObservation(t *testing.T) graph.Observation {
 		Source:           "http://127.0.0.1:11434",
 		Surface:          "ollama",
 		ObservedAt:       time.Date(2026, 10, 1, 10, 0, 0, 0, time.UTC),
-		Vantage:          v,
+		DeploymentScope:  "lab",
+		VantageKey:       "vantage-test",
 		Coverage:         graph.CoverageComplete,
 	}
 }
@@ -124,7 +121,7 @@ func TestConformance_PayloadRules(t *testing.T) {
 	}
 
 	// Base payload must reject native edges
-	compRef, err := graph.ExistingComputerByID("S-1-5-21-1103")
+	compRef, err := graph.ExistingNodeByID(graph.Computer, "S-1-5-21-1103")
 	if err != nil {
 		t.Fatal(err)
 	}

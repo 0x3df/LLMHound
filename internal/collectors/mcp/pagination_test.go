@@ -39,12 +39,8 @@ func TestBuildCorrelationIPv6Host(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	vantage, err := graph.NewVantageIdentity("scope", "v")
-	if err != nil {
-		t.Fatal(err)
-	}
-	obs := graph.Observation{SchemaVersion: "1", ScanID: "s", CollectorVersion: "t", EvidenceID: "e", Source: ep.String(), Surface: "mcp", ObservedAt: time.Unix(0, 0).UTC(), Vantage: vantage, Coverage: graph.CoverageComplete}
-	if _, _, _, err := buildCorrelationEdgeAndFallback("scope", ep.Host(), srvID, obs, nil, nil); err != nil {
+	obs := graph.Observation{SchemaVersion: "1", ScanID: "s", CollectorVersion: "t", EvidenceID: "e", Source: ep.String(), Surface: "mcp", ObservedAt: time.Unix(0, 0).UTC(), DeploymentScope: "scope", VantageKey: "v", Coverage: graph.CoverageComplete}
+	if _, _, _, err := buildCorrelationEdgeAndFallback("scope", ep.Host(), srvID, obs, nil); err != nil {
 		t.Fatalf("IPv6 host: %v", err)
 	}
 }

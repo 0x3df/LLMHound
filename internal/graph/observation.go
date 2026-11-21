@@ -26,7 +26,8 @@ type Observation struct {
 	Source           string
 	Surface          string
 	ObservedAt       time.Time
-	Vantage          Identity
+	DeploymentScope  string // Stable deployment scope; equals the owning identities' scope.
+	VantageKey       string // Configured scanner/network context key; a property, never a node.
 	Coverage         Coverage
 	CoverageReason   string
 }
@@ -47,8 +48,11 @@ func (o Observation) Validate(scope string) error {
 	if offset != 0 {
 		return errors.New("observation time must be UTC")
 	}
-	if o.Vantage.id == "" || o.Vantage.kind != CollectionVantage || o.Vantage.scope != scope {
-		return errors.New("observation requires a collection vantage in the same scope")
+	if o.DeploymentScope != scope || !validStableText(o.DeploymentScope) {
+		return errors.New("observation requires the deployment scope it was collected in")
+	}
+	if !validStableText(o.VantageKey) {
+		return errors.New("observation requires a configured stable vantage key")
 	}
 	switch o.Coverage {
 	case CoverageComplete:

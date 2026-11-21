@@ -86,7 +86,7 @@ type WriterJournal struct {
 	mu      sync.Mutex
 	w       io.Writer
 	header  Header
-	vantage graph.Identity
+	vantage vantageContext
 	opts    options
 	closed  bool
 	failed  error
@@ -98,11 +98,6 @@ func NewWriter(w io.Writer, header Header, opts ...Option) (*WriterJournal, erro
 		return nil, fmt.Errorf("invalid header: %w", err)
 	}
 
-	vantage, err := graph.NewVantageIdentity(header.DeploymentScope, header.VantageKey)
-	if err != nil {
-		return nil, fmt.Errorf("invalid vantage in header: %w", err)
-	}
-
 	o := defaultOptions()
 	for _, opt := range opts {
 		opt(&o)
@@ -111,7 +106,7 @@ func NewWriter(w io.Writer, header Header, opts ...Option) (*WriterJournal, erro
 	j := &WriterJournal{
 		w:       w,
 		header:  header,
-		vantage: vantage,
+		vantage: vantageOf(header),
 		opts:    o,
 	}
 
@@ -247,7 +242,7 @@ func (j *WriterJournal) validateObservationLocked(obs graph.Observation) error {
 	if err := obs.Validate(j.header.DeploymentScope); err != nil {
 		return err
 	}
-	if obs.Vantage.ID() != j.vantage.ID() {
+	if obs.VantageKey != j.vantage.key {
 		return errors.New("observation vantage does not match journal vantage")
 	}
 	return nil
@@ -279,11 +274,6 @@ func (j *WriterJournal) validateEdgeLocked(edge graph.Edge) error {
 	if err := j.validateObservationLocked(edge.Observation()); err != nil {
 		return fmt.Errorf("edge observation: %w", err)
 	}
-	if acc, ok := edge.AccessEvidence(); ok {
-		if err := j.validateObservationLocked(acc.Observation); err != nil {
-			return fmt.Errorf("edge access observation: %w", err)
-		}
-	}
 	return nil
 }
 
@@ -294,7 +284,7 @@ func (j *WriterJournal) validateEvidenceLocked(rec evidence.Record) error {
 	if rec.DeploymentScope != j.header.DeploymentScope {
 		return errors.New("evidence record scope does not match journal deployment scope")
 	}
-	if rec.VantageKey != "" && rec.VantageKey != j.vantage.ID() {
+	if rec.VantageKey != "" && rec.VantageKey != j.vantage.key {
 		return errors.New("evidence record vantage does not match journal vantage")
 	}
 	return nil
@@ -458,12 +448,6 @@ func OpenFile(path string, opts ...Option) (*FileJournal, error) {
 		return nil, fmt.Errorf("repair journal tail: %w", err)
 	}
 
-	vantage, err := graph.NewVantageIdentity(headerEntry.Header.DeploymentScope, headerEntry.Header.VantageKey)
-	if err != nil {
-		_ = fAppend.Close()
-		return nil, fmt.Errorf("invalid vantage in header: %w", err)
-	}
-
 	o := defaultOptions()
 	for _, opt := range opts {
 		opt(&o)
@@ -472,7 +456,7 @@ func OpenFile(path string, opts ...Option) (*FileJournal, error) {
 	wj := &WriterJournal{
 		w:       fAppend,
 		header:  *headerEntry.Header,
-		vantage: vantage,
+		vantage: vantageOf(*headerEntry.Header),
 		opts:    o,
 	}
 

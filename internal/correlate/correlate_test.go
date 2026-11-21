@@ -9,189 +9,143 @@ import (
 	"github.com/0x3df/LLMHound/internal/graph"
 )
 
-const computerA = "S-1-5-21-123-456-789-1103"
-const computerB = "S-1-5-21-123-456-789-1104"
+const scope = "scope"
 
-func resolver(t *testing.T, cfg correlate.Config) *correlate.Resolver {
+func resolver(t *testing.T, m ...correlate.Mapping) *correlate.Resolver {
 	t.Helper()
-	r, err := correlate.New(cfg)
+	r, err := correlate.New(m)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return r
 }
 
-func resolve(t *testing.T, r *correlate.Resolver, raw string, computers ...correlate.Computer) correlate.Result {
-	t.Helper()
-	result, err := r.Resolve("deployment", raw, computers)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return result
-}
-
-func assertFallback(t *testing.T, r correlate.Result, reason string, candidates ...string) {
-	t.Helper()
-	id, ok := r.FallbackIdentity()
-	if !ok || id.Kind() != graph.NetworkEndpoint || r.Target().IsNative() || r.Target().ID() != id.ID() {
-		t.Fatal("fallback is not a source-owned NetworkEndpoint")
-	}
-	e := r.Evidence()
-	if e.Correlation.FallbackReason != reason || e.Verified || e.Correlation.MatchMethod != "" || e.Correlation.Confidence != "" {
-		t.Fatalf("dishonest fallback: %#v", e)
-	}
-	if !reflect.DeepEqual(e.Correlation.CandidateIDs, candidates) {
-		t.Fatalf("candidates %v want %v", e.Correlation.CandidateIDs, candidates)
-	}
-}
-
-func TestVerifiedMappingPrecedenceAndNativeIDPreservation(t *testing.T) {
-	r := resolver(t, correlate.Config{Mappings: []correlate.Mapping{{Target: "HOST.LAB.LOCAL.", ComputerID: computerB}}, ADSuffixes: []string{"lab.local"}, PropertyMatchSupported: true})
-	result := resolve(t, r, "host.lab.local", correlate.Computer{ObjectID: computerA, Name: "HOST.LAB.LOCAL"}, correlate.Computer{ObjectID: computerB, Name: "OTHER.LAB.LOCAL"})
-	if result.Target().ID() != computerB || result.Target().Kind() != graph.Computer || result.Target().MatchBy() != graph.MatchByID {
-		t.Fatal("mapping did not win or native id rewritten")
-	}
-	if _, fallback := result.FallbackIdentity(); fallback {
-		t.Fatal("correlated Computer created fallback node")
-	}
-	e := result.Evidence()
-	if !e.Verified || e.Correlation.MatchMethod != "mapping" || e.Correlation.MatchValue != "host.lab.local" || e.Correlation.Confidence != "exact" {
-		t.Fatalf("missing mapping provenance: %#v", e)
-	}
-	mixed := resolver(t, correlate.Config{Mappings: []correlate.Mapping{{Target: "192.0.2.1", ComputerID: "Native-MixedCase"}}})
-	if got := resolve(t, mixed, "192.0.2.1", correlate.Computer{ObjectID: "Native-MixedCase"}).Target().ID(); got != "Native-MixedCase" {
-		t.Fatal("rewrote native id")
-	}
-}
-
-func TestUnverifiedOrAmbiguousMappingNeverFallsThrough(t *testing.T) {
-	cfg := correlate.Config{Mappings: []correlate.Mapping{{Target: "host.lab.local", ComputerID: computerB}}, ADSuffixes: []string{"lab.local"}, PropertyMatchSupported: true}
-	known := correlate.Computer{ObjectID: computerA, Name: "HOST.LAB.LOCAL"}
-	assertFallback(t, resolve(t, resolver(t, cfg), "host.lab.local", known), correlate.MappingUnverified, computerB)
-	cfg.Mappings = append(cfg.Mappings, correlate.Mapping{Target: "HOST.LAB.LOCAL.", ComputerID: computerA})
-	assertFallback(t, resolve(t, resolver(t, cfg), "host.lab.local", known), correlate.MappingAmbiguous, computerA, computerB)
-	// Repeated identical mappings/verified records do not invent ambiguity.
-	cfg.Mappings = []correlate.Mapping{{Target: "host.lab.local", ComputerID: computerA}, {Target: "HOST.LAB.LOCAL", ComputerID: computerA}}
-	got := resolve(t, resolver(t, cfg), "host.lab.local", known, known)
-	if got.Target().ID() != computerA {
-		t.Fatal("duplicate identical mapping/record became ambiguous")
-	}
-}
-
-func TestADSuffixPropertyMatchRequiresUniqueVerifiedComputer(t *testing.T) {
-	r := resolver(t, correlate.Config{ADSuffixes: []string{"LAB.LOCAL."}, PropertyMatchSupported: true, ComputerProperty: "name"})
-	known := correlate.Computer{ObjectID: computerA, Name: "HOST.LAB.LOCAL"}
-	result := resolve(t, r, "Host.Lab.Local.", known)
-	ref, evidence := result.Target(), result.Evidence()
-	if ref.ID() != computerA || ref.MatchBy() != graph.MatchByProperty || ref.Property() != "name" || ref.MatchValue() != "HOST.LAB.LOCAL" {
-		t.Fatal("incorrect M0 matcher")
-	}
-	if !evidence.Verified || evidence.Correlation.MatchMethod != "ad_suffix_name" || evidence.Correlation.Confidence != "unique_property_match" || evidence.OriginalTarget != "Host.Lab.Local." || evidence.NormalizedTarget != "host.lab.local" {
-		t.Fatalf("wrong match evidence: %#v", evidence)
-	}
-	assertFallback(t, resolve(t, r, "host.lab.local"), correlate.NameUnresolved)
-	assertFallback(t, resolve(t, r, "host.lab.local", correlate.Computer{ObjectID: computerA, Name: "host.lab.local"}), correlate.NameUnresolved)
-	assertFallback(t, resolve(t, r, "host.lab.local", known, correlate.Computer{ObjectID: computerB, Name: "HOST.LAB.LOCAL"}), correlate.NameAmbiguous, computerA, computerB)
-	// No fan-out and evidence cannot mutate the resolver's original result.
-	ambiguous := resolve(t, r, "host.lab.local", known, correlate.Computer{ObjectID: computerB, Name: "HOST.LAB.LOCAL"})
-	e := ambiguous.Evidence()
-	e.Correlation.CandidateIDs[0] = "changed"
-	if ambiguous.Evidence().Correlation.CandidateIDs[0] != computerA {
-		t.Fatal("mutable evidence alias")
-	}
-}
-
-func TestADSuffixBoundaries(t *testing.T) {
-	r := resolver(t, correlate.Config{ADSuffixes: []string{"lab.local"}, PropertyMatchSupported: true})
-	for _, host := range []string{"lab.local", "notlab.local", "host.notlab.local", "host.lab.local.attacker.example", "hostlab.local", "host.other.local"} {
-		t.Run(host, func(t *testing.T) { assertFallback(t, resolve(t, r, host), correlate.OutsideADSuffix) })
-	}
-	for _, host := range []string{"host.lab.local", "deep.host.lab.local"} {
-		assertFallback(t, resolve(t, r, host), correlate.NameUnresolved)
-	}
-	assertFallback(t, resolve(t, resolver(t, correlate.Config{}), "host.lab.local"), correlate.NoADSuffixes)
-	assertFallback(t, resolve(t, resolver(t, correlate.Config{ADSuffixes: []string{"lab.local"}}), "host.lab.local", correlate.Computer{ObjectID: computerA, Name: "HOST.LAB.LOCAL"}), correlate.PropertyMatchDisabled)
-}
-
-func TestIPOnlyNeverUsesNameMatchOrInventsReverseDNS(t *testing.T) {
-	r := resolver(t, correlate.Config{ADSuffixes: []string{"lab.local"}, PropertyMatchSupported: true})
-	for _, raw := range []string{"192.0.2.1", "[2001:0db8::1]"} {
-		assertFallback(t, resolve(t, r, raw, correlate.Computer{ObjectID: computerA, Name: "HOST.LAB.LOCAL"}), correlate.IPRequiresMapping)
-	}
-	mapped := resolver(t, correlate.Config{Mappings: []correlate.Mapping{{Target: "2001:db8::1", ComputerID: computerA}}})
-	if result := resolve(t, mapped, "[2001:0db8::1]", correlate.Computer{ObjectID: computerA}); !result.Target().IsNative() {
-		t.Fatal("exact mapped IP did not correlate")
-	}
-}
-
-func TestMalformedConfigAndInputs(t *testing.T) {
-	for _, cfg := range []correlate.Config{
-		{Mappings: []correlate.Mapping{{Target: "http://host", ComputerID: computerA}}},
-		{Mappings: []correlate.Mapping{{Target: "host", ComputerID: ""}}},
-		{ADSuffixes: []string{""}}, {ADSuffixes: []string{".lab.local"}}, {ADSuffixes: []string{"192.0.2.1"}},
-		{ComputerProperty: "domain", PropertyMatchSupported: true}, {ComputerProperty: "dNSHostName", PropertyMatchSupported: true},
-	} {
-		if _, err := correlate.New(cfg); err == nil {
-			t.Fatalf("accepted invalid cfg %#v", cfg)
-		}
-	}
-	r := resolver(t, correlate.Config{})
+func TestMappedTargetAttachesToExistingNodeOfAnyKind(t *testing.T) {
+	r := resolver(t,
+		correlate.Mapping{Target: "AI1.Corp.Example.", ObjectID: "S-1-5-21-1-2-3-1103", Kind: graph.Computer},
+		correlate.Mapping{Target: "10.1.2.3", ObjectID: "azure-vm-object-id", Kind: "AZVM"},
+	)
 	for _, tc := range []struct {
-		scope, target string
-		inventory     []correlate.Computer
+		raw, id string
+		kind    graph.Kind
 	}{
-		{"", "host.lab.local", nil}, {"deployment", "", nil}, {"deployment", "https://host.lab.local", nil},
-		{"deployment", "host.lab.local", []correlate.Computer{{ObjectID: ""}}},
-		{"deployment", "host.lab.local", []correlate.Computer{{ObjectID: computerA, Name: "A.LAB.LOCAL"}, {ObjectID: computerA, Name: "B.LAB.LOCAL"}}},
+		{"ai1.corp.example", "S-1-5-21-1-2-3-1103", graph.Computer},
+		{"AI1.CORP.EXAMPLE", "S-1-5-21-1-2-3-1103", graph.Computer}, // DNS case is canonicalized
+		{"10.1.2.3", "azure-vm-object-id", "AZVM"},
 	} {
-		if _, err := r.Resolve(tc.scope, tc.target, tc.inventory); err == nil {
-			t.Fatal("accepted invalid input")
+		res, err := r.Resolve(scope, tc.raw)
+		if err != nil {
+			t.Fatal(err)
 		}
-	}
-	// Config slices are copied; mutation cannot change subsequent resolutions.
-	cfg := correlate.Config{Mappings: []correlate.Mapping{{Target: "host.lab.local", ComputerID: computerA}}}
-	r = resolver(t, cfg)
-	cfg.Mappings[0].ComputerID = computerB
-	if resolve(t, r, "host.lab.local", correlate.Computer{ObjectID: computerA}).Target().ID() != computerA {
-		t.Fatal("resolver retained mutable config")
+		if !res.Target().IsNative() || res.Target().ID() != tc.id || res.Target().Kind() != tc.kind {
+			t.Fatalf("%s attached to %v", tc.raw, res.Target())
+		}
+		if _, hasFallback := res.FallbackIdentity(); hasFallback {
+			t.Fatal("attached target must not also create a NetworkEndpoint")
+		}
+		ev := res.Evidence()
+		if ev.NativeKind != tc.kind || ev.Correlation.MatchMethod != "mapping" || ev.Correlation.FallbackReason != "" {
+			t.Fatalf("evidence %+v", ev)
+		}
 	}
 }
 
-func TestCorrelationAddedOnRescanPreservesServiceAndProvenance(t *testing.T) {
-	ep, _ := graph.ParseEndpoint("https://host.lab.local/mcp", "")
-	service, _ := graph.NewServiceIdentity("deployment", graph.MCPServer, ep)
-	vantage, _ := graph.NewVantageIdentity("deployment", "scanner")
-	obs := graph.Observation{SchemaVersion: "1", ScanID: "original-scan", CollectorVersion: "0.1.0", EvidenceID: "correlation-evidence", Source: "explicit-inventory", Surface: "mcp", ObservedAt: time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC), Vantage: vantage, Coverage: graph.CoveragePartial, CoverageReason: "bounded failed check"}
-	r := resolver(t, correlate.Config{ADSuffixes: []string{"lab.local"}, PropertyMatchSupported: true})
-	first := resolve(t, r, "host.lab.local")
-	before, err := first.ObservedAt(service, obs)
+func TestUnmappedAndAmbiguousTargetsFallBackWithoutGuessing(t *testing.T) {
+	r := resolver(t,
+		correlate.Mapping{Target: "dup.corp.example", ObjectID: "id-a", Kind: graph.Computer},
+		correlate.Mapping{Target: "dup.corp.example", ObjectID: "id-b", Kind: graph.Computer},
+		correlate.Mapping{Target: "same.corp.example", ObjectID: "id-c", Kind: graph.Computer},
+		correlate.Mapping{Target: "same.corp.example", ObjectID: "id-c", Kind: graph.Computer}, // identical duplicate collapses
+	)
+	cases := []struct {
+		raw, reason string
+		candidates  []string
+		attached    bool
+	}{
+		{"unknown.corp.example", correlate.NoMappingEntry, nil, false},
+		{"192.0.2.9", correlate.NoMappingEntry, nil, false},
+		// No suffix, name, or reverse-DNS inference: a sibling of a mapped name is unmapped.
+		{"other.corp.example", correlate.NoMappingEntry, nil, false},
+		{"dup.corp.example", correlate.MappingAmbiguous, []string{"id-a", "id-b"}, false},
+		{"same.corp.example", "", nil, true},
+	}
+	for _, tc := range cases {
+		res, err := r.Resolve(scope, tc.raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.Target().IsNative() != tc.attached {
+			t.Fatalf("%s attached=%v", tc.raw, res.Target().IsNative())
+		}
+		if tc.attached {
+			continue
+		}
+		fb, ok := res.FallbackIdentity()
+		if !ok || fb.Kind() != graph.NetworkEndpoint || fb.Scope() != scope || res.Target().ID() != fb.ID() {
+			t.Fatalf("%s: no scoped NetworkEndpoint fallback", tc.raw)
+		}
+		c := res.Evidence().Correlation
+		if c.FallbackReason != tc.reason || c.MatchMethod != "" || !reflect.DeepEqual(c.CandidateIDs, tc.candidates) {
+			t.Fatalf("%s: correlation %+v", tc.raw, c)
+		}
+	}
+}
+
+func TestFallbackIdentityDoesNotDependOnMapping(t *testing.T) {
+	// Service and endpoint identity never change because a mapping appears later.
+	without := resolver(t)
+	a, _ := without.Resolve(scope, "x.corp.example")
+	b, _ := without.Resolve("other-scope", "x.corp.example")
+	fa, _ := a.FallbackIdentity()
+	fb, _ := b.FallbackIdentity()
+	if fa.ID() == fb.ID() {
+		t.Fatal("fallback identity must be scoped to the deployment")
+	}
+}
+
+func TestNewRejectsInvalidMappings(t *testing.T) {
+	for _, m := range []correlate.Mapping{
+		{Target: "", ObjectID: "id", Kind: graph.Computer},
+		{Target: "http://host/path", ObjectID: "id", Kind: graph.Computer},
+		{Target: "ok.example", ObjectID: "", Kind: graph.Computer},
+		{Target: "ok.example", ObjectID: " id", Kind: graph.Computer},
+		{Target: "ok.example", ObjectID: "id", Kind: ""},
+		{Target: "ok.example", ObjectID: "id", Kind: graph.OllamaInstance},
+		{Target: "ok.example", ObjectID: "id", Kind: "LLMHound_Computer"},
+	} {
+		if _, err := correlate.New([]correlate.Mapping{m}); err == nil {
+			t.Fatalf("accepted %+v", m)
+		}
+	}
+}
+
+func TestResolvedEdgeIsNativeLinkingAndNonTraversable(t *testing.T) {
+	r := resolver(t, correlate.Mapping{Target: "ai1.corp.example", ObjectID: "native-1", Kind: "AZVM"})
+	res, _ := r.Resolve(scope, "ai1.corp.example")
+	ep, err := graph.ParseEndpoint("https://ai1.corp.example/mcp", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	second := resolve(t, r, "host.lab.local", correlate.Computer{ObjectID: computerA, Name: "HOST.LAB.LOCAL"})
-	after, err := second.ObservedAt(service, obs)
+	svc, err := graph.NewServiceIdentity(scope, graph.MCPServer, ep)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if before.Start().ID() != after.Start().ID() || before.Kind() != graph.ObservedAt || after.Kind() != graph.ObservedAt || after.End().ID() != computerA {
-		t.Fatal("rescan merged/changed identity or inferred RunsOn")
+	obs := graph.Observation{SchemaVersion: "1", ScanID: "s", CollectorVersion: "0", EvidenceID: "e", Source: "src", Surface: "mcp", ObservedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), DeploymentScope: scope, VantageKey: "v", Coverage: graph.CoverageComplete}
+	edge, err := res.ObservedAt(svc, obs)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if before.SourceKind() != "LLMHound" || after.SourceKind() != "" || !after.TouchesNative() {
-		t.Fatal("unsafe cleanup ownership")
+	if !edge.TouchesNative() || edge.SourceKind() != "" || edge.IsTraversable() || edge.End().Kind() != "AZVM" {
+		t.Fatal("native attachment must be a sourceless, non-traversable linking edge")
 	}
-	if !reflect.DeepEqual(after.Observation(), obs) || before.IsTraversable() || after.IsTraversable() {
-		t.Fatal("refreshed provenance or traversal semantics")
+	other, _ := graph.NewServiceIdentity("different-scope", graph.MCPServer, ep)
+	if _, err := res.ObservedAt(other, obs); err == nil {
+		t.Fatal("scope mismatch accepted")
 	}
-	decision, ok := after.Correlation()
-	if !ok || decision.MatchValue != "HOST.LAB.LOCAL" {
-		t.Fatal("edge missing decision metadata")
-	}
-	// The earlier fallback remains a valid owned identity; no deletion is inferred.
-	if _, ok := first.FallbackIdentity(); !ok {
-		t.Fatal("previous observation mutated on rescan")
-	}
-	wrongScope, _ := graph.NewServiceIdentity("other", graph.MCPServer, ep)
-	if _, err := second.ObservedAt(wrongScope, obs); err == nil {
-		t.Fatal("native edge escaped deployment scope")
+	// A nil resolver is an empty mapping: the target falls back, never an error.
+	var nilResolver *correlate.Resolver
+	nr, err := nilResolver.Resolve(scope, "x.example")
+	if err != nil || nr.Target().IsNative() || nr.Evidence().Correlation.FallbackReason != correlate.NoMappingEntry {
+		t.Fatal("nil resolver must behave as an empty mapping")
 	}
 }

@@ -10,11 +10,7 @@ import (
 
 func observation(t *testing.T) graph.Observation {
 	t.Helper()
-	v, err := graph.NewVantageIdentity("scope", "scanner-network")
-	if err != nil {
-		t.Fatal(err)
-	}
-	return graph.Observation{SchemaVersion: "1", ScanID: "scan-1", CollectorVersion: "0.1.0", EvidenceID: "evidence-1", Source: "metadata-list", Surface: "mcp-resources", ObservedAt: time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC), Vantage: v, Coverage: graph.CoverageComplete}
+	return graph.Observation{SchemaVersion: "1", ScanID: "scan-1", CollectorVersion: "0.1.0", EvidenceID: "evidence-1", Source: "metadata-list", Surface: "mcp-resources", ObservedAt: time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC), DeploymentScope: "scope", VantageKey: "scanner-network", Coverage: graph.CoverageComplete}
 }
 
 func resource(t *testing.T, kind graph.Kind, owner graph.Identity) graph.Identity {
@@ -47,7 +43,7 @@ func TestOwnedNodesCannotEmitNativeComputers(t *testing.T) {
 	if _, err := graph.NewNode(graph.Identity{}, obs); err == nil {
 		t.Fatal("empty/native identity accepted")
 	}
-	for _, owned := range []graph.Identity{resource(t, graph.MCPResource, id), obs.Vantage} {
+	for _, owned := range []graph.Identity{resource(t, graph.MCPResource, id)} {
 		n, err := graph.NewNode(owned, obs)
 		if err != nil {
 			t.Fatal(err)
@@ -72,42 +68,49 @@ func TestOwnedNodesCannotEmitNativeComputers(t *testing.T) {
 
 func TestNativeReferencesAndLinkingPayloadSafety(t *testing.T) {
 	const nativeID = "S-1-5-21-123-456-789-1103"
-	c, err := graph.ExistingComputerByID(nativeID)
+	c, err := graph.ExistingNodeByID(graph.Computer, nativeID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.ID() != nativeID || c.Kind() != graph.Computer || !c.IsNative() || c.MatchBy() != graph.MatchByID {
-		t.Fatal("native id/ownership changed")
+	if c.ID() != nativeID || c.Kind() != graph.Computer || !c.IsNative() {
+		t.Fatal("native id/kind changed")
 	}
-	mixed, err := graph.ExistingComputerByID("Native-MixedCase")
+	mixed, err := graph.ExistingNodeByID(graph.Computer, "Native-MixedCase")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if mixed.ID() != "Native-MixedCase" {
 		t.Fatal("native ID rewritten")
 	}
-	p, err := graph.ExistingComputerByName(nativeID, "HOST.LAB.LOCAL")
+	// Any native kind already in the graph is attachable, not only Computer.
+	vm, err := graph.ExistingNodeByID("AZVM", "AZURE-VM-OBJECT-ID")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.ID() != nativeID || p.MatchBy() != graph.MatchByProperty || p.Property() != "name" || p.MatchValue() != "HOST.LAB.LOCAL" {
-		t.Fatal("wrong M0 property reference")
+	if vm.Kind() != "AZVM" || !vm.IsNative() || vm.ID() != "AZURE-VM-OBJECT-ID" {
+		t.Fatal("native non-Computer kind lost")
 	}
 	s := service(t, "scope", graph.MCPServer, "https://host.lab.local/mcp")
-	edge, err := graph.NewObservedAtEdge(s.Reference(), c, observation(t), graph.Correlation{MatchMethod: "mapping", MatchValue: "host.lab.local", Confidence: "exact"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if edge.SourceKind() != "" || !edge.TouchesNative() || edge.End().ID() != nativeID || edge.IsTraversable() || edge.Kind() != graph.ObservedAt {
-		t.Fatal("unsafe native linking edge")
+	for _, native := range []graph.Reference{c, vm} {
+		edge, err := graph.NewObservedAtEdge(s.Reference(), native, observation(t), graph.Correlation{MatchMethod: "mapping", MatchValue: "host.lab.local", Confidence: "exact"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if edge.SourceKind() != "" || !edge.TouchesNative() || edge.End().ID() != native.ID() || edge.IsTraversable() || edge.Kind() != graph.ObservedAt {
+			t.Fatal("unsafe native linking edge")
+		}
 	}
 	for _, id := range []string{"", " ", "id\n", " id"} {
-		if _, err := graph.ExistingComputerByID(id); err == nil {
+		if _, err := graph.ExistingNodeByID(graph.Computer, id); err == nil {
 			t.Fatal("invalid native reference")
 		}
 	}
-	if _, err := graph.ExistingComputerByName(nativeID, "host.lab.local"); err == nil {
-		t.Fatal("lowercase matcher would silently fail in CE")
+	// Owned kinds, the umbrella label, the extension namespace, and malformed
+	// kind names can never be native references.
+	for _, kind := range []graph.Kind{"", graph.MCPServer, graph.OllamaInstance, graph.MCPTool, graph.NetworkEndpoint, graph.AIService, "LLMHound_Thing", "llmhound", "Bad Kind", "1Kind", "Kind-Dash"} {
+		if _, err := graph.ExistingNodeByID(kind, nativeID); err == nil {
+			t.Fatalf("native kind %q accepted", kind)
+		}
 	}
 }
 
@@ -168,68 +171,52 @@ func TestTopologyDirectionsAndNoPlacementInference(t *testing.T) {
 	}
 }
 
-func TestAccessIsOperationScopedVantageToTarget(t *testing.T) {
+func TestSummarizeAccessIsOperationScopedAndNeverClaimsAbsence(t *testing.T) {
 	obs := observation(t)
-	s := service(t, "scope", graph.MCPServer, "https://example.com/mcp")
-	r := resource(t, graph.MCPResource, s)
+	ev := func(check string, outcome graph.Outcome, anonymous bool) graph.AccessEvidence {
+		return graph.AccessEvidence{Observation: obs, CheckID: check, Operation: check, TargetID: "T", Outcome: outcome, Reason: "r", Anonymous: anonymous, OperationKind: graph.EnumerationOperation}
+	}
 	for _, tc := range []struct {
-		kind          graph.EdgeKind
-		target        graph.Identity
-		operationKind graph.OperationKind
+		name     string
+		evidence []graph.AccessEvidence
+		ops      []string
+		auth     string
 	}{
-		{graph.UnauthenticatedAccess, s, graph.EnumerationOperation},
-		{graph.PublicAccess, r, graph.ResourceReadOperation},
+		{"none", nil, nil, "unknown"},
+		{"anonymous success only", []graph.AccessEvidence{ev("tools-list", graph.OutcomeSuccess, true), ev("initialize", graph.OutcomeSuccess, true)}, []string{"initialize", "tools-list"}, "anonymous"},
+		{"duplicate check collapses", []graph.AccessEvidence{ev("initialize", graph.OutcomeSuccess, true), ev("initialize", graph.OutcomeSuccess, true)}, []string{"initialize"}, "anonymous"},
+		{"denied only", []graph.AccessEvidence{ev("tools-list", graph.OutcomeDenied, false)}, nil, "denied"},
+		{"mixed", []graph.AccessEvidence{ev("initialize", graph.OutcomeSuccess, true), ev("tools-list", graph.OutcomeDenied, false)}, []string{"initialize"}, "mixed"},
+		{"non-anonymous success is not anonymous access", []graph.AccessEvidence{ev("initialize", graph.OutcomeSuccess, false)}, nil, "unknown"},
+		{"failed/skipped/unsupported say nothing", []graph.AccessEvidence{ev("a", graph.OutcomeFailed, true), ev("b", graph.OutcomeSkipped, true), ev("c", graph.OutcomeUnsupported, true)}, nil, "unknown"},
 	} {
-		evidence := graph.AccessEvidence{Observation: obs, CheckID: "resources-list", Operation: "resources/list", TargetID: tc.target.ID(), Outcome: graph.OutcomeSuccess, Reason: "validated intended response", Anonymous: true, OperationKind: tc.operationKind}
-		e, err := graph.NewAccessEdge(tc.kind, obs.Vantage.Reference(), tc.target.Reference(), evidence)
-		if err != nil {
-			t.Fatal(err)
+		got := graph.SummarizeAccess(tc.evidence)
+		if !reflect.DeepEqual(got.Operations, tc.ops) && !(len(got.Operations) == 0 && len(tc.ops) == 0) {
+			t.Fatalf("%s: operations %v, want %v", tc.name, got.Operations, tc.ops)
 		}
-		if e.Start().Kind() != graph.CollectionVantage || e.End().ID() != tc.target.ID() || e.IsTraversable() {
-			t.Fatal("wrong access direction")
+		if got.AuthObserved != tc.auth {
+			t.Fatalf("%s: auth %q, want %q", tc.name, got.AuthObserved, tc.auth)
 		}
-		got, ok := e.AccessEvidence()
-		if !ok || !reflect.DeepEqual(got, evidence) {
-			t.Fatal("operation provenance lost")
+		props := got.Properties()
+		if props["auth_observed"] != tc.auth {
+			t.Fatalf("%s: auth property %v", tc.name, props["auth_observed"])
 		}
-		if _, err := graph.NewAccessEdge(tc.kind, tc.target.Reference(), obs.Vantage.Reference(), evidence); err == nil {
-			t.Fatal("host/service-origin access accepted")
+		if _, has := props["anon_operations"]; has != (len(tc.ops) > 0) {
+			t.Fatalf("%s: anon_operations presence wrong (empty must be omitted)", tc.name)
 		}
-		if _, err := graph.NewTopologyEdge(tc.kind, obs.Vantage.Reference(), tc.target.Reference(), obs); err == nil {
-			t.Fatal("access without operation evidence")
-		}
-		for _, outcome := range []graph.Outcome{graph.OutcomeDenied, graph.OutcomeUnsupported, graph.OutcomeFailed, graph.OutcomeSkipped, "unknown"} {
-			bad := evidence
-			bad.Outcome = outcome
-			if _, err := graph.NewAccessEdge(tc.kind, obs.Vantage.Reference(), tc.target.Reference(), bad); err == nil {
-				t.Fatal("negative/unknown result became positive access")
-			}
-		}
-		for _, mutate := range []func(*graph.AccessEvidence){
-			func(a *graph.AccessEvidence) { a.Anonymous = false },
-			func(a *graph.AccessEvidence) { a.TargetID = s.ID() + "wrong" },
-			func(a *graph.AccessEvidence) { a.Operation = "" },
-			func(a *graph.AccessEvidence) { a.CheckID = "" },
-			func(a *graph.AccessEvidence) { a.Reason = "" },
-			func(a *graph.AccessEvidence) { a.OperationKind = "tcp-probe" },
-			func(a *graph.AccessEvidence) { a.OperationKind = "advertisement" },
-		} {
-			bad := evidence
-			mutate(&bad)
-			if _, err := graph.NewAccessEdge(tc.kind, obs.Vantage.Reference(), tc.target.Reference(), bad); err == nil {
-				t.Fatal("invalid access evidence accepted")
-			}
-		}
+	}
+	// The returned slice is a copy.
+	got := graph.SummarizeAccess([]graph.AccessEvidence{ev("x", graph.OutcomeSuccess, true)})
+	got.Properties()["anon_operations"].([]string)[0] = "mutated"
+	if got.Operations[0] != "x" {
+		t.Fatal("property slice aliases summary")
 	}
 }
 
 func TestCorrelationEvidenceAndEdgeValidation(t *testing.T) {
 	obs := observation(t)
 	s := service(t, "scope", graph.MCPServer, "https://example.com")
-	c, _ := graph.ExistingComputerByID("native-existing")
-	if _, err := graph.ExistingComputerByName("", "HOST.LAB.LOCAL"); err == nil {
-		t.Fatal("empty native ID accepted")
-	}
+	c, _ := graph.ExistingNodeByID(graph.Computer, "native-existing")
 	fallbackTarget, _ := graph.ParseTarget("example.com")
 	fallback, _ := graph.NewNetworkEndpointIdentity("scope", fallbackTarget)
 	for _, tc := range []struct {
@@ -260,9 +247,6 @@ func TestCorrelationEvidenceAndEdgeValidation(t *testing.T) {
 	original, _ := e.Correlation()
 	if original.CandidateIDs[0] != "candidate-a" {
 		t.Fatal("output correlation slice not copied")
-	}
-	if _, ok := e.AccessEvidence(); ok {
-		t.Fatal("topology has access claim")
 	}
 	if !reflect.DeepEqual(e.Observation(), obs) {
 		t.Fatal("edge provenance changed")
@@ -308,10 +292,10 @@ func TestCoverageAndOriginalProvenance(t *testing.T) {
 		func(o *graph.Observation) { o.SchemaVersion = "unknown" }, func(o *graph.Observation) { o.ScanID = "" },
 		func(o *graph.Observation) { o.CollectorVersion = "" }, func(o *graph.Observation) { o.EvidenceID = "" },
 		func(o *graph.Observation) { o.Source = "" }, func(o *graph.Observation) { o.Surface = "" },
-		func(o *graph.Observation) { o.ObservedAt = time.Time{} }, func(o *graph.Observation) { o.Vantage = graph.Identity{} },
+		func(o *graph.Observation) { o.ObservedAt = time.Time{} }, func(o *graph.Observation) { o.VantageKey = "" },
 		func(o *graph.Observation) { o.Coverage = "unknown" },
 		func(o *graph.Observation) { o.ObservedAt = o.ObservedAt.In(time.FixedZone("offset", 3600)) }, func(o *graph.Observation) { o.Coverage = graph.CoverageFailed },
-		func(o *graph.Observation) { o.Vantage, _ = graph.NewVantageIdentity("other", "scanner") },
+		func(o *graph.Observation) { o.DeploymentScope = "other" },
 	} {
 		bad := obs
 		mutate(&bad)

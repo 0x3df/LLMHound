@@ -3,142 +3,120 @@ package correlate_test
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/0x3df/LLMHound/internal/config"
 	"github.com/0x3df/LLMHound/internal/correlate"
+	"github.com/0x3df/LLMHound/internal/graph"
 )
 
-func TestLoadMappingFile_JSON(t *testing.T) {
-	dir := t.TempDir()
-	arrayPath := filepath.Join(dir, "mappings_array.json")
-	dictPath := filepath.Join(dir, "mappings_dict.json")
-
-	if err := os.WriteFile(arrayPath, []byte(`[
-		{"target": "192.0.2.1", "computer_id": "S-1-5-21-1111-2222-3333-1001"},
-		{"target": "ai.lab.local", "computer_id": "S-1-5-21-1111-2222-3333-1002"}
-	]`), 0600); err != nil {
+func write(t *testing.T, content string) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "map")
+	if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	return p
+}
 
-	if err := os.WriteFile(dictPath, []byte(`{
-		"192.0.2.2": "S-1-5-21-1111-2222-3333-1003"
-	}`), 0600); err != nil {
-		t.Fatal(err)
-	}
-
-	mappings, err := correlate.LoadMappingFile(arrayPath)
-	if err != nil {
-		t.Fatalf("LoadMappingFile array: %v", err)
-	}
-	if len(mappings) != 2 {
-		t.Fatalf("expected 2 mappings, got %d", len(mappings))
-	}
-	if mappings[0].Target != "192.0.2.1" || mappings[0].ComputerID != "S-1-5-21-1111-2222-3333-1001" {
-		t.Errorf("unexpected mapping 0: %+v", mappings[0])
-	}
-
-	mappings, err = correlate.LoadMappingFile(dictPath)
-	if err != nil {
-		t.Fatalf("LoadMappingFile dict: %v", err)
-	}
-	if len(mappings) != 1 {
-		t.Fatalf("expected 1 mapping, got %d", len(mappings))
-	}
-	if mappings[0].Target != "192.0.2.2" {
-		t.Errorf("unexpected mapping: %+v", mappings[0])
+func TestLoadMappingFileFormats(t *testing.T) {
+	for name, tc := range map[string]struct {
+		content string
+		want    []correlate.Mapping
+	}{
+		"json array with kinds": {
+			`[{"target":"Ai1.Corp.Example","object_id":"S-1-5-21-1","kind":"Computer"},{"target":"10.0.0.5","object_id":"vm-1","kind":"AZVM"}]`,
+			[]correlate.Mapping{{Target: "ai1.corp.example", ObjectID: "S-1-5-21-1", Kind: graph.Computer}, {Target: "10.0.0.5", ObjectID: "vm-1", Kind: "AZVM"}},
+		},
+		"json array kind defaults to Computer": {
+			`[{"target":"ai1.corp.example","object_id":"id-1"}]`,
+			[]correlate.Mapping{{Target: "ai1.corp.example", ObjectID: "id-1", Kind: graph.Computer}},
+		},
+		"json dictionary": {
+			`{"ai1.corp.example":"id-1"}`,
+			[]correlate.Mapping{{Target: "ai1.corp.example", ObjectID: "id-1", Kind: graph.Computer}},
+		},
+		"lines with comments and optional kind": {
+			"# normalizer export\nai1.corp.example, id-1\nai2.corp.example id-2 AZVM # inline\n\n",
+			[]correlate.Mapping{{Target: "ai1.corp.example", ObjectID: "id-1", Kind: graph.Computer}, {Target: "ai2.corp.example", ObjectID: "id-2", Kind: "AZVM"}},
+		},
+		"identical duplicates collapse": {
+			"ai1.corp.example,id-1\nAI1.corp.example,id-1\n",
+			[]correlate.Mapping{{Target: "ai1.corp.example", ObjectID: "id-1", Kind: graph.Computer}},
+		},
+	} {
+		got, err := correlate.LoadMappingFile(write(t, tc.content))
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if len(got) != len(tc.want) {
+			t.Fatalf("%s: got %v", name, got)
+		}
+		have := map[correlate.Mapping]bool{}
+		for _, m := range got {
+			have[m] = true
+		}
+		for _, w := range tc.want {
+			if !have[w] {
+				t.Fatalf("%s: missing %+v in %v", name, w, got)
+			}
+		}
 	}
 }
 
-func TestLoadMappingFile_LineDelimited(t *testing.T) {
-	dir := t.TempDir()
-	linesPath := filepath.Join(dir, "mappings.txt")
-	content := `# Line delimited mappings with comments
-192.0.2.10 S-1-5-21-1111-2222-3333-2001
-192.0.2.11, S-1-5-21-1111-2222-3333-2002 # comma separated
-
-ai-01.lab.local S-1-5-21-1111-2222-3333-2003
-`
-	if err := os.WriteFile(linesPath, []byte(content), 0600); err != nil {
-		t.Fatal(err)
+func TestLoadMappingFileRejections(t *testing.T) {
+	for name, content := range map[string]string{
+		"empty":            "   \n",
+		"conflicting id":   "ai1.corp.example,id-1\nai1.corp.example,id-2\n",
+		"conflicting kind": "ai1.corp.example,id-1,Computer\nai1.corp.example,id-1,AZVM\n",
+		"owned kind":       "ai1.corp.example,id-1,OllamaInstance\n",
+		"too many fields":  "a.example,id,Computer,extra\n",
+		"one field":        "a.example\n",
+		"bad target":       "http://a.example,id\n",
+		"bad json shape":   `{"a":1}`,
+		"only comments":    "# nothing\n",
+		"bad object id":    `[{"target":"a.example","object_id":" ","kind":"Computer"}]`,
+	} {
+		if _, err := correlate.LoadMappingFile(write(t, content)); err == nil {
+			t.Fatalf("%s accepted", name)
+		}
 	}
-
-	mappings, err := correlate.LoadMappingFile(linesPath)
-	if err != nil {
-		t.Fatalf("LoadMappingFile line-delimited: %v", err)
-	}
-	if len(mappings) != 3 {
-		t.Fatalf("expected 3 mappings, got %d", len(mappings))
-	}
-	if mappings[1].Target != "192.0.2.11" || mappings[1].ComputerID != "S-1-5-21-1111-2222-3333-2002" {
-		t.Errorf("unexpected mapping 1: %+v", mappings[1])
-	}
-}
-
-func TestLoadMappingFile_Errors(t *testing.T) {
-	dir := t.TempDir()
-	emptyPath := filepath.Join(dir, "empty.txt")
-	if err := os.WriteFile(emptyPath, []byte("  \n# only comments\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-
 	if _, err := correlate.LoadMappingFile(""); err == nil {
-		t.Error("expected error on empty path")
+		t.Fatal("empty path accepted")
 	}
-	if _, err := correlate.LoadMappingFile(emptyPath); err == nil {
-		t.Error("expected error on empty file")
+	if _, err := correlate.LoadMappingFile(t.TempDir()); err == nil {
+		t.Fatal("directory accepted")
 	}
-	if _, err := correlate.LoadMappingFile(filepath.Join(dir, "nonexistent")); err == nil {
-		t.Error("expected error on nonexistent file")
+	if _, err := correlate.LoadMappingFile(filepath.Join(t.TempDir(), "missing")); err == nil {
+		t.Fatal("missing file accepted")
 	}
-
-	badPath := filepath.Join(dir, "bad.txt")
-	if err := os.WriteFile(badPath, []byte("just_one_field\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := correlate.LoadMappingFile(badPath); err == nil {
-		t.Error("expected error on invalid line")
+	big := strings.Repeat("a.example,id\n", (correlate.MaxMappingFileBytes/13)+10)
+	if _, err := correlate.LoadMappingFile(write(t, big)); err == nil {
+		t.Fatal("oversized file accepted")
 	}
 }
 
 func TestNewFromConfig(t *testing.T) {
-	dir := t.TempDir()
-	mapPath := filepath.Join(dir, "map.json")
-	if err := os.WriteFile(mapPath, []byte(`[{"target": "10.0.0.1", "computer_id": "S-1-5-21-100"}]`), 0600); err != nil {
+	// No mapping file: everything falls back to NetworkEndpoint for the normalizer.
+	r, err := correlate.NewFromConfig(config.Config{})
+	if err != nil {
 		t.Fatal(err)
 	}
-
-	cfg := config.Defaults()
-	cfg.Scope = "corp"
-	cfg.VantageKey = "scanner-1"
-	cfg.Correlation.MappingFile = mapPath
-	cfg.Correlation.ADDomainSuffixes = []string{"corp.local"}
-
-	resolver, err := correlate.NewFromConfig(cfg, nil, true)
+	res, err := r.Resolve("scope", "ai1.corp.example")
+	if err != nil || res.Target().IsNative() {
+		t.Fatal("unmapped target attached")
+	}
+	cfg := config.Config{Correlation: config.Correlation{MappingFile: write(t, "ai1.corp.example,id-1,AZVM\n")}}
+	r, err = correlate.NewFromConfig(cfg)
 	if err != nil {
-		t.Fatalf("NewFromConfig: %v", err)
-	}
-
-	verified := []correlate.Computer{
-		{ObjectID: "S-1-5-21-100", Name: "HOST-100.CORP.LOCAL"},
-	}
-
-	res, err := resolver.Resolve("corp", "10.0.0.1", verified)
-	if err != nil {
-		t.Fatalf("Resolve: %v", err)
-	}
-	if !res.Evidence().Verified || res.Target().ID() != "S-1-5-21-100" {
-		t.Errorf("failed to correlate via loaded mapping file: %+v", res)
-	}
-}
-
-func TestLoadMappingFile_RejectsConflictingTarget(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "m.txt")
-	body := "192.0.2.1 S-1-5-21-1111-2222-3333-1001\n192.0.2.1 S-1-5-21-1111-2222-3333-1002\n"
-	if err := os.WriteFile(path, []byte(body), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := correlate.LoadMappingFile(path); err == nil {
-		t.Fatal("expected conflict error")
+	res, _ = r.Resolve("scope", "ai1.corp.example")
+	if !res.Target().IsNative() || res.Target().Kind() != "AZVM" {
+		t.Fatal("configured mapping not applied")
+	}
+	if _, err := correlate.NewFromConfig(config.Config{Correlation: config.Correlation{MappingFile: filepath.Join(t.TempDir(), "nope")}}); err == nil {
+		t.Fatal("missing configured mapping file accepted")
 	}
 }

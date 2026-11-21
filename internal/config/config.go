@@ -14,7 +14,6 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/0x3df/LLMHound/internal/graph"
 	"github.com/0x3df/LLMHound/internal/targets"
 	"gopkg.in/yaml.v3"
 )
@@ -57,12 +56,12 @@ type OptIns struct {
 	WorkspaceContent     bool `yaml:"workspace_content"`
 }
 
-// Correlation holds policy only; this package never reads mappings or looks up hosts.
+// Correlation holds policy only; this package never reads mappings or looks up
+// hosts. Attribution is the normalization program's job: it supplies an asset
+// mapping (target to existing BloodHound objectid and node kind) and LLMHound
+// attaches services to exactly what that mapping asserts.
 type Correlation struct {
-	MappingFile      string   `yaml:"mapping_file"`
-	ADDomainSuffixes []string `yaml:"ad_domain_suffixes"`
-	ReverseDNS       bool     `yaml:"reverse_dns"`
-	CELookup         bool     `yaml:"ce_lookup"`
+	MappingFile string `yaml:"mapping_file"`
 }
 
 func Defaults() Config {
@@ -270,12 +269,6 @@ func Apply(c, flags Config, fields []string) (Config, error) {
 			c.OptIns.WorkspaceContent = flags.OptIns.WorkspaceContent
 		case "mapping-file":
 			c.Correlation.MappingFile = flags.Correlation.MappingFile
-		case "ad-domain-suffix":
-			c.Correlation.ADDomainSuffixes = flags.Correlation.ADDomainSuffixes
-		case "reverse-dns":
-			c.Correlation.ReverseDNS = flags.Correlation.ReverseDNS
-		case "ce-lookup":
-			c.Correlation.CELookup = flags.Correlation.CELookup
 		default:
 			return Config{}, fmt.Errorf("unknown override field %q", field)
 		}
@@ -341,15 +334,6 @@ func (c Config) Validate() error {
 			return fmt.Errorf("user_agent must contain printable ASCII without control characters")
 		}
 	}
-	for _, suffix := range c.Correlation.ADDomainSuffixes {
-		normalized, err := targets.NormalizeHost(suffix)
-		if err != nil {
-			return fmt.Errorf("correlation.ad_domain_suffixes must contain exact ASCII DNS suffixes: %w", err)
-		}
-		if _, err := netip.ParseAddr(normalized); err == nil {
-			return fmt.Errorf("correlation.ad_domain_suffixes cannot contain IP addresses")
-		}
-	}
 	return nil
 }
 
@@ -359,9 +343,4 @@ func (c Config) TargetInput() targets.Input {
 	entries = append(entries, c.Targets...)
 	entries = append(entries, c.CIDRs...)
 	return targets.Input{Entries: entries, Files: c.TargetsFiles, Exclude: c.Exclude, ExcludeFiles: c.ExcludeFiles, MaxTargets: c.Bounds.MaxTargets}
-}
-
-// VantageIdentity returns the source-owned CollectionVantage identity for this config.
-func (c Config) VantageIdentity() (graph.Identity, error) {
-	return graph.NewVantageIdentity(c.Scope, c.VantageKey)
 }

@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -22,13 +23,12 @@ import (
 	"github.com/0x3df/LLMHound/internal/transport"
 )
 
-func helperVantage(t *testing.T, scope, key string) graph.Identity {
+// testVantage is the deployment scope and vantage key a collection runs from.
+type testVantage struct{ scope, key string }
+
+func helperVantage(t *testing.T, scope, key string) testVantage {
 	t.Helper()
-	v, err := graph.NewVantageIdentity(scope, key)
-	if err != nil {
-		t.Fatalf("failed to create vantage identity: %v", err)
-	}
-	return v
+	return testVantage{scope: scope, key: key}
 }
 
 func TestOllama_AnonymousHappyPath(t *testing.T) {
@@ -97,7 +97,7 @@ func TestOllama_AnonymousHappyPath(t *testing.T) {
 	vantage := helperVantage(t, cfg.Scope, cfg.VantageKey)
 	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
 
-	res, err := collector.Collect(ctx, ts.URL, vantage, "scan-001", now, nil, nil)
+	res, err := collector.Collect(ctx, ts.URL, vantage.scope, vantage.key, "scan-001", now, nil)
 	if err != nil {
 		t.Fatalf("unexpected collection error: %v", err)
 	}
@@ -165,17 +165,11 @@ func TestOllama_AnonymousHappyPath(t *testing.T) {
 	}
 
 	// Verify edges
-	var hasAccessEdge bool
 	var providesModelCount int
 	var hasObservedAtEdge bool
 
 	for _, e := range res.Edges {
 		switch e.Kind() {
-		case graph.UnauthenticatedAccess:
-			hasAccessEdge = true
-			if e.Start().ID() != vantage.ID() || e.End().ID() != srvItem.Node.Identity().ID() {
-				t.Errorf("access edge endpoints mismatch")
-			}
 		case graph.ProvidesModel:
 			providesModelCount++
 			if e.Start().ID() != srvItem.Node.Identity().ID() {
@@ -189,8 +183,15 @@ func TestOllama_AnonymousHappyPath(t *testing.T) {
 		}
 	}
 
-	if !hasAccessEdge {
-		t.Errorf("expected UnauthenticatedAccess edge")
+	// Anonymous access is flat properties on the service, never an edge.
+	if srvItem.Properties["auth_observed"] != "anonymous" {
+		t.Errorf("auth_observed = %v, want anonymous", srvItem.Properties["auth_observed"])
+	}
+	if ops, _ := srvItem.Properties["anon_operations"].([]string); !slices.Equal(ops, []string{ollama.CheckTags}) {
+		t.Errorf("anon_operations = %v, want [%s]", srvItem.Properties["anon_operations"], ollama.CheckTags)
+	}
+	if srvItem.Properties["vantage_key"] != "vantage-01" {
+		t.Errorf("vantage_key = %v, want vantage-01", srvItem.Properties["vantage_key"])
 	}
 	if providesModelCount != 2 {
 		t.Errorf("expected 2 ProvidesModel edges, got %d", providesModelCount)
@@ -251,7 +252,7 @@ func TestOllama_VersionFailurePartialCoverage(t *testing.T) {
 	vantage := helperVantage(t, cfg.Scope, cfg.VantageKey)
 	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
 
-	res, err := collector.Collect(ctx, ts.URL, vantage, "scan-001", now, nil, nil)
+	res, err := collector.Collect(ctx, ts.URL, vantage.scope, vantage.key, "scan-001", now, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -275,15 +276,13 @@ func TestOllama_VersionFailurePartialCoverage(t *testing.T) {
 		}
 	}
 
-	// Access edge is still preserved because tags succeeded
-	var hasAccessEdge bool
-	for _, e := range res.Edges {
-		if e.Kind() == graph.UnauthenticatedAccess {
-			hasAccessEdge = true
+	// Anonymous access is still recorded because the tags listing succeeded.
+	for _, n := range res.Nodes {
+		if n.Node.Identity().Kind() == graph.OllamaInstance {
+			if n.Properties["auth_observed"] != "anonymous" {
+				t.Errorf("auth_observed = %v, want anonymous when tags succeeds", n.Properties["auth_observed"])
+			}
 		}
-	}
-	if !hasAccessEdge {
-		t.Errorf("expected UnauthenticatedAccess edge when tags succeeds")
 	}
 }
 
@@ -312,7 +311,7 @@ func TestOllama_TagsDeniedAccess(t *testing.T) {
 	vantage := helperVantage(t, cfg.Scope, cfg.VantageKey)
 	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
 
-	res, err := collector.Collect(ctx, ts.URL, vantage, "scan-001", now, nil, nil)
+	res, err := collector.Collect(ctx, ts.URL, vantage.scope, vantage.key, "scan-001", now, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -324,11 +323,18 @@ func TestOllama_TagsDeniedAccess(t *testing.T) {
 		t.Errorf("expected CoveragePartial, got %s", res.Observation.Coverage)
 	}
 
-	// NO UnauthenticatedAccess edge
-	for _, e := range res.Edges {
-		if e.Kind() == graph.UnauthenticatedAccess {
-			t.Errorf("must NOT emit UnauthenticatedAccess edge when tags check is denied")
+	// A denied listing is an auth boundary, never anonymous access.
+	for _, n := range res.Nodes {
+		if n.Node.Identity().Kind() == graph.OllamaInstance {
+			if n.Properties["auth_observed"] == "anonymous" {
+				t.Errorf("auth_observed = anonymous when the tags check is denied")
+			}
+			if _, has := n.Properties["anon_operations"]; has {
+				t.Errorf("anon_operations present when the tags check is denied: %v", n.Properties["anon_operations"])
+			}
 		}
+	}
+	for _, e := range res.Edges {
 		if e.Kind() == graph.ProvidesModel {
 			t.Errorf("must NOT emit ProvidesModel edges when tags check is denied")
 		}
@@ -371,7 +377,7 @@ func TestOllama_Truncation(t *testing.T) {
 	vantage := helperVantage(t, cfg.Scope, cfg.VantageKey)
 	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
 
-	res, err := collector.Collect(ctx, ts.URL, vantage, "scan-001", now, nil, nil)
+	res, err := collector.Collect(ctx, ts.URL, vantage.scope, vantage.key, "scan-001", now, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -431,7 +437,7 @@ func TestOllama_OptInSensitiveMetadata(t *testing.T) {
 	cfgDefault.VantageKey = "vantage-01"
 
 	collectorDefault := ollama.New(cfgDefault)
-	res, err := collectorDefault.Collect(ctx, ts.URL, vantage, "scan-001", now, nil, nil)
+	res, err := collectorDefault.Collect(ctx, ts.URL, vantage.scope, vantage.key, "scan-001", now, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -457,7 +463,7 @@ func TestOllama_OptInSensitiveMetadata(t *testing.T) {
 	cfgOptIn.OptIns.Prompts = true
 
 	collectorOptIn := ollama.New(cfgOptIn)
-	res, err = collectorOptIn.Collect(ctx, ts.URL, vantage, "scan-002", now, nil, nil)
+	res, err = collectorOptIn.Collect(ctx, ts.URL, vantage.scope, vantage.key, "scan-002", now, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -491,7 +497,7 @@ func TestOllama_TargetUnreachable(t *testing.T) {
 	vantage := helperVantage(t, cfg.Scope, cfg.VantageKey)
 	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
 
-	res, err := collector.Collect(ctx, badURL, vantage, "scan-001", now, nil, nil)
+	res, err := collector.Collect(ctx, badURL, vantage.scope, vantage.key, "scan-001", now, nil)
 	if err != nil {
 		t.Fatalf("unexpected error from Collect: %v", err)
 	}
@@ -526,19 +532,16 @@ func TestOllama_ComputerCorrelation(t *testing.T) {
 	cfg.Scope = "corp-scope"
 	cfg.VantageKey = "vantage-01"
 	cfg.Targets = []string{"ollama.corp.local"}
-	cfg.Correlation.ADDomainSuffixes = []string{"corp.local"}
+	mappingFile := filepath.Join(t.TempDir(), "assets.csv")
+	if err := os.WriteFile(mappingFile, []byte("ollama.corp.local,S-1-5-21-123456789-1001,Computer\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Correlation.MappingFile = mappingFile
 
-	// Set up correlation resolver
-	resolver, err := correlate.NewFromConfig(cfg, nil, true)
+	// Set up correlation resolver from the asset mapping
+	resolver, err := correlate.NewFromConfig(cfg)
 	if err != nil {
 		t.Fatalf("failed to create correlation resolver: %v", err)
-	}
-
-	verifiedComputers := []correlate.Computer{
-		{
-			ObjectID: "S-1-5-21-123456789-1001",
-			Name:     "OLLAMA.CORP.LOCAL",
-		},
 	}
 
 	ctx := context.Background()
@@ -554,7 +557,7 @@ func TestOllama_ComputerCorrelation(t *testing.T) {
 	})
 	collectorVerified := ollama.New(cfg, ollama.WithTransport(customTransport))
 
-	resVerified, err := collectorVerified.Collect(ctx, "http://ollama.corp.local:11434", vantage, "scan-001", now, resolver, verifiedComputers)
+	resVerified, err := collectorVerified.Collect(ctx, "http://ollama.corp.local:11434", vantage.scope, vantage.key, "scan-001", now, resolver)
 	if err != nil {
 		t.Fatalf("unexpected error on verified target: %v", err)
 	}
@@ -570,7 +573,7 @@ func TestOllama_ComputerCorrelation(t *testing.T) {
 	}
 
 	// 2. Test fallback on uncorrelated target (127.0.0.1)
-	resFallback, err := collectorVerified.Collect(ctx, ts.URL, vantage, "scan-002", now, resolver, verifiedComputers)
+	resFallback, err := collectorVerified.Collect(ctx, ts.URL, vantage.scope, vantage.key, "scan-002", now, resolver)
 	if err != nil {
 		t.Fatalf("unexpected error on fallback target: %v", err)
 	}
@@ -641,7 +644,7 @@ func TestOllama_CheckpointJournalAndEmissionRoundtrip(t *testing.T) {
 	ctx := context.Background()
 
 	// 1. Collect to journal
-	res, err := collector.CollectToJournal(ctx, ts.URL, j, nil, nil)
+	res, err := collector.CollectToJournal(ctx, ts.URL, j, nil)
 	if err != nil {
 		t.Fatalf("CollectToJournal failed: %v", err)
 	}
@@ -725,7 +728,7 @@ func TestOllama_HTMLResponseFails(t *testing.T) {
 	vantage := helperVantage(t, cfg.Scope, cfg.VantageKey)
 	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
 
-	res, err := collector.Collect(ctx, ts.URL, vantage, "scan-001", now, nil, nil)
+	res, err := collector.Collect(ctx, ts.URL, vantage.scope, vantage.key, "scan-001", now, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -769,7 +772,7 @@ func TestOllama_TLSVerification(t *testing.T) {
 	cfgStrict.Insecure = false
 
 	collectorStrict := ollama.New(cfgStrict)
-	res, err := collectorStrict.Collect(ctx, ts.URL, vantage, "scan-001", now, nil, nil)
+	res, err := collectorStrict.Collect(ctx, ts.URL, vantage.scope, vantage.key, "scan-001", now, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -801,7 +804,7 @@ func TestOllama_TLSVerification(t *testing.T) {
 	cfgInsecure.Insecure = true
 
 	collectorInsecure := ollama.New(cfgInsecure)
-	resInsecure, err := collectorInsecure.Collect(ctx, ts.URL, vantage, "scan-002", now, nil, nil)
+	resInsecure, err := collectorInsecure.Collect(ctx, ts.URL, vantage.scope, vantage.key, "scan-002", now, nil)
 	if err != nil {
 		t.Fatalf("unexpected error with Insecure=true: %v", err)
 	}
@@ -874,7 +877,7 @@ func TestOllama_ShowRecordsOnlyRedactedProvenance(t *testing.T) {
 
 	vantage := helperVantage(t, cfg.Scope, cfg.VantageKey)
 	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
-	res, err := ollama.New(cfg).Collect(context.Background(), ts.URL, vantage, "scan-001", now, nil, nil)
+	res, err := ollama.New(cfg).Collect(context.Background(), ts.URL, vantage.scope, vantage.key, "scan-001", now, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -941,7 +944,7 @@ func TestOllama_PSAndShowFailuresDowngradeCoverage(t *testing.T) {
 
 	vantage := helperVantage(t, cfg.Scope, cfg.VantageKey)
 	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
-	res, err := ollama.New(cfg).Collect(context.Background(), ts.URL, vantage, "scan-001", now, nil, nil)
+	res, err := ollama.New(cfg).Collect(context.Background(), ts.URL, vantage.scope, vantage.key, "scan-001", now, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -973,7 +976,7 @@ func TestOllama_TruncatedTagsBodyReportedAsTruncation(t *testing.T) {
 
 	vantage := helperVantage(t, cfg.Scope, cfg.VantageKey)
 	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
-	res, err := ollama.New(cfg).Collect(context.Background(), ts.URL, vantage, "scan-001", now, nil, nil)
+	res, err := ollama.New(cfg).Collect(context.Background(), ts.URL, vantage.scope, vantage.key, "scan-001", now, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1010,7 +1013,7 @@ func TestOllama_PSBoundedByMaxItems(t *testing.T) {
 
 	vantage := helperVantage(t, cfg.Scope, cfg.VantageKey)
 	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
-	res, err := ollama.New(cfg).Collect(context.Background(), ts.URL, vantage, "scan-001", now, nil, nil)
+	res, err := ollama.New(cfg).Collect(context.Background(), ts.URL, vantage.scope, vantage.key, "scan-001", now, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1050,7 +1053,7 @@ func TestOllama_ShowTruncatedBodyReportedAsTruncation(t *testing.T) {
 
 	vantage := helperVantage(t, cfg.Scope, cfg.VantageKey)
 	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
-	res, err := ollama.New(cfg).Collect(context.Background(), ts.URL, vantage, "scan-001", now, nil, nil)
+	res, err := ollama.New(cfg).Collect(context.Background(), ts.URL, vantage.scope, vantage.key, "scan-001", now, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1089,7 +1092,7 @@ func TestOllama_PSRedirectEvidenceRecorded(t *testing.T) {
 
 	vantage := helperVantage(t, cfg.Scope, cfg.VantageKey)
 	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
-	res, err := ollama.New(cfg).Collect(context.Background(), ts.URL, vantage, "scan-001", now, nil, nil)
+	res, err := ollama.New(cfg).Collect(context.Background(), ts.URL, vantage.scope, vantage.key, "scan-001", now, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

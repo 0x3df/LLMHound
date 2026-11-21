@@ -33,7 +33,7 @@ func (e *TruncatedEntryError) Unwrap() error {
 // State represents the accumulated state replayed from a checkpoint journal.
 type State struct {
 	header   Header
-	vantage  graph.Identity
+	vantage  vantageContext
 	targets  map[string]TargetRecord
 	results  []Result
 	nodes    []emitter.NodeItem
@@ -45,7 +45,7 @@ type State struct {
 	evidenceMap map[string]int
 }
 
-func newState(header Header, vantage graph.Identity) *State {
+func newState(header Header, vantage vantageContext) *State {
 	return &State{
 		header:      header,
 		vantage:     vantage,
@@ -222,7 +222,7 @@ func ReplayStream(r io.Reader, handler ReplayHandler, opts ...Option) error {
 
 	reader := bufio.NewReader(r)
 	lineNum := 0
-	var vantage graph.Identity
+	var vantage vantageContext
 	var header Header
 	headerSeen := false
 
@@ -272,11 +272,7 @@ func ReplayStream(r io.Reader, handler ReplayHandler, opts ...Option) error {
 				return fmt.Errorf("line %d: invalid header: %w", lineNum, err)
 			}
 			header = *entry.Header
-			v, err := graph.NewVantageIdentity(header.DeploymentScope, header.VantageKey)
-			if err != nil {
-				return fmt.Errorf("line %d: invalid vantage: %w", lineNum, err)
-			}
-			vantage = v
+			vantage = vantageOf(header)
 			headerSeen = true
 
 			if handler.OnHeader != nil {
@@ -383,11 +379,7 @@ func Replay(r io.Reader, opts ...Option) (*State, error) {
 
 	handler := ReplayHandler{
 		OnHeader: func(h Header) error {
-			v, err := graph.NewVantageIdentity(h.DeploymentScope, h.VantageKey)
-			if err != nil {
-				return err
-			}
-			state = newState(h, v)
+			state = newState(h, vantageOf(h))
 			return nil
 		},
 		OnResult: func(res Result) error {

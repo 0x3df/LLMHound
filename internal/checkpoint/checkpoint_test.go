@@ -29,16 +29,18 @@ func sampleHeader() checkpoint.Header {
 	}
 }
 
-func sampleVantage(t *testing.T, scope, key string) graph.Identity {
+// testVantage is the deployment scope and vantage key an observation was made from.
+type testVantage struct{ scope, key string }
+
+// ID returns the configured vantage key, which journals and evidence record.
+func (v testVantage) ID() string { return v.key }
+
+func sampleVantage(t *testing.T, scope, key string) testVantage {
 	t.Helper()
-	v, err := graph.NewVantageIdentity(scope, key)
-	if err != nil {
-		t.Fatalf("create vantage: %v", err)
-	}
-	return v
+	return testVantage{scope: scope, key: key}
 }
 
-func sampleObservation(t *testing.T, vantage graph.Identity, evidenceID string, ts time.Time) graph.Observation {
+func sampleObservation(t *testing.T, vantage testVantage, evidenceID string, ts time.Time) graph.Observation {
 	t.Helper()
 	return graph.Observation{
 		SchemaVersion:    "1",
@@ -48,12 +50,13 @@ func sampleObservation(t *testing.T, vantage graph.Identity, evidenceID string, 
 		Source:           "https://target.corp:11434/api/version",
 		Surface:          "ollama",
 		ObservedAt:       ts.UTC(),
-		Vantage:          vantage,
+		DeploymentScope:  vantage.scope,
+		VantageKey:       vantage.key,
 		Coverage:         graph.CoverageComplete,
 	}
 }
 
-func sampleServiceNode(t *testing.T, scope string, vantage graph.Identity, rawURL string) emitter.NodeItem {
+func sampleServiceNode(t *testing.T, scope string, vantage testVantage, rawURL string) emitter.NodeItem {
 	t.Helper()
 	ep, err := graph.ParseEndpoint(rawURL, "")
 	if err != nil {
@@ -78,7 +81,7 @@ func sampleServiceNode(t *testing.T, scope string, vantage graph.Identity, rawUR
 	return item
 }
 
-func sampleModelNode(t *testing.T, scope string, serviceIdent graph.Identity, vantage graph.Identity, modelName string) emitter.NodeItem {
+func sampleModelNode(t *testing.T, scope string, serviceIdent graph.Identity, vantage testVantage, modelName string) emitter.NodeItem {
 	t.Helper()
 	ident, err := graph.NewResourceIdentity(scope, graph.AIModel, serviceIdent, modelName)
 	if err != nil {
@@ -246,7 +249,8 @@ func TestProvenancePreservation(t *testing.T) {
 		Source:           "https://target.corp:11434/api/tags",
 		Surface:          "ollama",
 		ObservedAt:       historicalTime,
-		Vantage:          vantage,
+		DeploymentScope:  vantage.scope,
+		VantageKey:       vantage.key,
 		Coverage:         graph.CoveragePartial,
 		CoverageReason:   "timed out reading models",
 	}
@@ -321,15 +325,15 @@ func TestDeterministicReplayAndPayloadEquivalence(t *testing.T) {
 		t.Fatalf("create edgeModel2: %v", err)
 	}
 
-	// Correlated edge to native Computer by name (linking edge)
-	compRef, err := graph.ExistingComputerByName("S-1-5-21-12345-1001", "AI-SERVER-01.LAB.LOCAL")
+	// Correlated edge to a native node of a non-Computer kind (linking edge)
+	compRef, err := graph.ExistingNodeByID("AZVM", "S-1-5-21-12345-1001")
 	if err != nil {
 		t.Fatalf("create compRef: %v", err)
 	}
 	edgeObservedAt, err := graph.NewObservedAtEdge(serviceNode.Node.Identity().Reference(), compRef, obs, graph.Correlation{
-		MatchMethod: "ad_suffix_fqdn",
-		MatchValue:  "AI-SERVER-01.LAB.LOCAL",
-		Confidence:  "high",
+		MatchMethod: "mapping",
+		MatchValue:  "ai-server-01.lab.local",
+		Confidence:  "asserted",
 	})
 	if err != nil {
 		t.Fatalf("create edgeObservedAt: %v", err)
@@ -344,22 +348,6 @@ func TestDeterministicReplayAndPayloadEquivalence(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("create edgeFallback: %v", err)
-	}
-
-	// Access evidence edge
-	accEv := graph.AccessEvidence{
-		Observation:   obs,
-		CheckID:       "chk-anon-001",
-		Operation:     "list_models",
-		TargetID:      serviceNode.Node.Identity().ID(),
-		Outcome:       graph.OutcomeSuccess,
-		Reason:        "http 200 without auth",
-		Anonymous:     true,
-		OperationKind: graph.EnumerationOperation,
-	}
-	edgeAccess, err := graph.NewAccessEdge(graph.UnauthenticatedAccess, vantage.Reference(), serviceNode.Node.Identity().Reference(), accEv)
-	if err != nil {
-		t.Fatalf("create edgeAccess: %v", err)
 	}
 
 	// Evidence sidecar records
@@ -426,11 +414,11 @@ func TestDeterministicReplayAndPayloadEquivalence(t *testing.T) {
 		OriginalTarget:   "ai-server-01.lab.local",
 		NormalizedTarget: "ai-server-01.lab.local",
 		TargetType:       graph.DNSTarget,
-		Verified:         true,
+		NativeKind:       "AZVM",
 		Correlation: graph.Correlation{
-			MatchMethod: "ad_suffix_fqdn",
-			MatchValue:  "AI-SERVER-01.LAB.LOCAL",
-			Confidence:  "high",
+			MatchMethod: "mapping",
+			MatchValue:  "ai-server-01.lab.local",
+			Confidence:  "asserted",
 		},
 	}, obsCorr)
 	if err != nil {
@@ -438,7 +426,7 @@ func TestDeterministicReplayAndPayloadEquivalence(t *testing.T) {
 	}
 
 	origNodes := []emitter.NodeItem{serviceNode, modelNode1, modelNode2}
-	origEdges := []graph.Edge{edgeModel1, edgeModel2, edgeObservedAt, edgeFallback, edgeAccess}
+	origEdges := []graph.Edge{edgeModel1, edgeModel2, edgeObservedAt, edgeFallback}
 	origEvidence := []evidence.Record{evCheck, evFingerprint, evTLS, evRedirect, evCorrelation}
 
 	// 2. Write to Journal

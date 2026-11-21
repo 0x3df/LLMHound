@@ -20,7 +20,7 @@ func writeConfig(t *testing.T, data string) string {
 }
 
 func TestLoadDefaultsAndPaths(t *testing.T) {
-	path := writeConfig(t, "scope: tenant\nvantage_key: scanner\ntargets: [AI.Example.Test]\ncidrs: [192.0.2.0/30]\ntargets_files: [hosts.txt]\nexclude_files: [excluded.txt]\nbounds:\n  concurrency: 7\n  connect_timeout: 2s\ninsecure: true\ncorrelation:\n  mapping_file: computers.json\n  ad_domain_suffixes: [corp.example.test]\n")
+	path := writeConfig(t, "scope: tenant\nvantage_key: scanner\ntargets: [AI.Example.Test]\ncidrs: [192.0.2.0/30]\ntargets_files: [hosts.txt]\nexclude_files: [excluded.txt]\nbounds:\n  concurrency: 7\n  connect_timeout: 2s\ninsecure: true\ncorrelation:\n  mapping_file: computers.json\n")
 	got, err := Load(path)
 	if err != nil {
 		t.Fatal(err)
@@ -38,7 +38,7 @@ func TestLoadDefaultsAndPaths(t *testing.T) {
 
 func TestLoadRejectsInvalidYAML(t *testing.T) {
 	for _, data := range []string{
-		"scope: x\nscope: y\n", "unknown: true\n", "bounds: {max_itemz: 3}\n", "scope: null\n", "bounds: null\n", "insecure: null\n", "---\nscope: x\n---\nscope: y\n", "[]\n", "scope: [x]\n", "scope: 123\n", "insecure: yes\n", "bounds: {max_targets: 1.5}\n", "bounds: {concurrency: \"7\"}\n", "scope: &s x\nvantage_key: *s\n", "scope: x\nbounds: {connect_timeout: 7}\n", "scope: x\nbounds: {max_targets: nope}\n", "", strings.Repeat("#", MaxConfigBytes+1),
+		"scope: x\nscope: y\n", "unknown: true\n", "correlation: {ad_domain_suffixes: [corp.example]}\n", "correlation: {reverse_dns: true}\n", "correlation: {ce_lookup: true}\n", "bounds: {max_itemz: 3}\n", "scope: null\n", "bounds: null\n", "insecure: null\n", "---\nscope: x\n---\nscope: y\n", "[]\n", "scope: [x]\n", "scope: 123\n", "insecure: yes\n", "bounds: {max_targets: 1.5}\n", "bounds: {concurrency: \"7\"}\n", "scope: &s x\nvantage_key: *s\n", "scope: x\nbounds: {connect_timeout: 7}\n", "scope: x\nbounds: {max_targets: nope}\n", "", strings.Repeat("#", MaxConfigBytes+1),
 	} {
 		t.Run(data[:min(40, len(data))], func(t *testing.T) {
 			if _, err := Load(writeConfig(t, data)); err == nil {
@@ -98,7 +98,6 @@ func TestValidateBounds(t *testing.T) {
 		"bytes": func(c *Config) { c.Bounds.MaxResponseBytes = 0 }, "bytes-high": func(c *Config) { c.Bounds.MaxResponseBytes = 1 << 30 },
 		"pages": func(c *Config) { c.Bounds.MaxPages = 0 }, "items": func(c *Config) { c.Bounds.MaxItems = -1 }, "redirects": func(c *Config) { c.Bounds.MaxRedirects = -1 },
 		"target-limit": func(c *Config) { c.Bounds.MaxTargets = 65537 }, "user-agent": func(c *Config) { c.UserAgent = "x\r\ny" }, "user-agent-empty": func(c *Config) { c.UserAgent = "" },
-		"suffix": func(c *Config) { c.Correlation.ADDomainSuffixes = []string{"*.example.test"} }, "suffix-ip": func(c *Config) { c.Correlation.ADDomainSuffixes = []string{"192.0.2.1"} },
 		"empty-file": func(c *Config) { c.TargetsFiles = []string{""} }, "empty-mapping": func(c *Config) { c.Correlation.MappingFile = " " },
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -141,21 +140,10 @@ func TestLoadPreservesInvalidBlankPathsForValidation(t *testing.T) {
 }
 
 func TestApplyAllFields(t *testing.T) {
-	flags := Config{Scope: "x", VantageKey: "v", Targets: []string{"a.example.test"}, CIDRs: []string{"192.0.2.0/30"}, TargetsFiles: []string{"a.txt"}, Exclude: []string{"b.example.test"}, ExcludeFiles: []string{"b.txt"}, Bounds: Bounds{Concurrency: 2, PerHostRate: 3, ConnectTimeout: time.Second, ResponseTimeout: 2 * time.Second, MaxResponseBytes: 10, MaxPages: 20, MaxItems: 30, MaxRedirects: 1, MaxTargets: 40}, Insecure: true, UserAgent: "test", OptIns: OptIns{ResourceContent: true, Prompts: true, ConfigurationContent: true, WorkspaceContent: true}, Correlation: Correlation{MappingFile: "m.json", ADDomainSuffixes: []string{"corp.example.test"}, ReverseDNS: true, CELookup: true}}
-	keys := []string{"scope", "vantage", "targets", "cidr", "targets-file", "exclude", "exclude-file", "concurrency", "per-host-rate", "connect-timeout", "response-timeout", "max-response-bytes", "max-pages", "max-items", "max-redirects", "max-targets", "insecure", "user-agent", "resource-content", "prompts", "configuration-content", "workspace-content", "mapping-file", "ad-domain-suffix", "reverse-dns", "ce-lookup"}
+	flags := Config{Scope: "x", VantageKey: "v", Targets: []string{"a.example.test"}, CIDRs: []string{"192.0.2.0/30"}, TargetsFiles: []string{"a.txt"}, Exclude: []string{"b.example.test"}, ExcludeFiles: []string{"b.txt"}, Bounds: Bounds{Concurrency: 2, PerHostRate: 3, ConnectTimeout: time.Second, ResponseTimeout: 2 * time.Second, MaxResponseBytes: 10, MaxPages: 20, MaxItems: 30, MaxRedirects: 1, MaxTargets: 40}, Insecure: true, UserAgent: "test", OptIns: OptIns{ResourceContent: true, Prompts: true, ConfigurationContent: true, WorkspaceContent: true}, Correlation: Correlation{MappingFile: "m.json"}}
+	keys := []string{"scope", "vantage", "targets", "cidr", "targets-file", "exclude", "exclude-file", "concurrency", "per-host-rate", "connect-timeout", "response-timeout", "max-response-bytes", "max-pages", "max-items", "max-redirects", "max-targets", "insecure", "user-agent", "resource-content", "prompts", "configuration-content", "workspace-content", "mapping-file"}
 	got, err := Apply(Defaults(), flags, keys)
 	if err != nil || !reflect.DeepEqual(got, flags) {
 		t.Fatalf("incomplete overrides: %+v %v", got, err)
-	}
-}
-
-func TestVantageIdentity(t *testing.T) {
-	c := Config{Scope: "lab-scope", VantageKey: "vantage-1"}
-	id, err := c.VantageIdentity()
-	if err != nil {
-		t.Fatalf("VantageIdentity: %v", err)
-	}
-	if id.Kind() != "CollectionVantage" || id.Scope() != "lab-scope" {
-		t.Errorf("unexpected identity: %+v", id)
 	}
 }

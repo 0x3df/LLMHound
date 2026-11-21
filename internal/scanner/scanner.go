@@ -66,14 +66,8 @@ func WithDefinitions(defs []discovery.Definition) Option {
 	}
 }
 
-// WithVerifiedComputers provides pre-verified native Computer candidates for correlation.
-func WithVerifiedComputers(computers []correlate.Computer) Option {
-	return func(s *Scanner) {
-		s.verifiedComputers = append([]correlate.Computer(nil), computers...)
-	}
-}
-
-// WithResolver provides an explicit correlation resolver.
+// WithResolver provides an explicit asset-mapping resolver, overriding the
+// configured mapping file.
 func WithResolver(r *correlate.Resolver) Option {
 	return func(s *Scanner) {
 		s.resolver = r
@@ -103,13 +97,12 @@ func WithCollectorVersion(version string) Option {
 
 // Scanner coordinates discovery, collectors, checkpointing, and emission for a scan.
 type Scanner struct {
-	cfg               config.Config
-	definitions       []discovery.Definition
-	verifiedComputers []correlate.Computer
-	resolver          *correlate.Resolver
-	httpClient        *http.Client
-	now               func() time.Time
-	collectorVersion  string
+	cfg              config.Config
+	definitions      []discovery.Definition
+	resolver         *correlate.Resolver
+	httpClient       *http.Client
+	now              func() time.Time
+	collectorVersion string
 }
 
 // New creates and initializes a Scanner instance.
@@ -294,25 +287,12 @@ func (s *Scanner) Scan(ctx context.Context, targets []string, outputDir, prefix 
 		prefix = "llmhound-" + now.Format("20060102-150405")
 	}
 
-	// 1. Resolve correlation resolver if mapping file or AD domain suffixes exist
+	// 1. Resolve the asset-mapping resolver. Without a mapping every target
+	// falls back to a NetworkEndpoint for the normalizer to attribute.
 	resolver := s.resolver
-	if resolver == nil && (s.cfg.Correlation.MappingFile != "" || len(s.cfg.Correlation.ADDomainSuffixes) > 0) {
-		var mappings []correlate.Mapping
-		if s.cfg.Correlation.MappingFile != "" {
-			var err error
-			mappings, err = correlate.LoadMappingFile(s.cfg.Correlation.MappingFile)
-			if err != nil {
-				return nil, fmt.Errorf("load correlation mapping file: %w", err)
-			}
-		}
-		corrCfg := correlate.Config{
-			Mappings:               mappings,
-			ADSuffixes:             s.cfg.Correlation.ADDomainSuffixes,
-			PropertyMatchSupported: true,
-			ComputerProperty:       "name",
-		}
+	if resolver == nil {
 		var err error
-		resolver, err = correlate.New(corrCfg)
+		resolver, err = correlate.NewFromConfig(s.cfg)
 		if err != nil {
 			return nil, fmt.Errorf("initialize correlation resolver: %w", err)
 		}
@@ -336,17 +316,16 @@ func (s *Scanner) Scan(ctx context.Context, targets []string, outputDir, prefix 
 
 	// 3. Initialize collectors
 	jupCfg := jupyter.Config{
-		Scope:             s.cfg.Scope,
-		VantageKey:        s.cfg.VantageKey,
-		ScanID:            scanID,
-		CollectorVersion:  s.collectorVersion,
-		Bounds:            s.cfg.Bounds,
-		Insecure:          s.cfg.Insecure,
-		UserAgent:         s.cfg.UserAgent,
-		Resolver:          resolver,
-		VerifiedComputers: s.verifiedComputers,
-		Now:               s.now,
-		HTTPClient:        s.httpClient,
+		Scope:            s.cfg.Scope,
+		VantageKey:       s.cfg.VantageKey,
+		ScanID:           scanID,
+		CollectorVersion: s.collectorVersion,
+		Bounds:           s.cfg.Bounds,
+		Insecure:         s.cfg.Insecure,
+		UserAgent:        s.cfg.UserAgent,
+		Resolver:         resolver,
+		Now:              s.now,
+		HTTPClient:       s.httpClient,
 	}
 	jupCol, err := jupyter.New(jupCfg)
 	if err != nil {
@@ -361,9 +340,7 @@ func (s *Scanner) Scan(ctx context.Context, targets []string, outputDir, prefix 
 		collectormcp.WithCollectorVersion(s.collectorVersion),
 		collectormcp.WithClock(s.now),
 	}
-	if resolver != nil {
-		mcpOpts = append(mcpOpts, collectormcp.WithCorrelator(resolver, s.verifiedComputers))
-	}
+	mcpOpts = append(mcpOpts, collectormcp.WithCorrelator(resolver))
 	if s.httpClient != nil {
 		mcpOpts = append(mcpOpts, collectormcp.WithHTTPClient(s.httpClient))
 	}
@@ -371,12 +348,6 @@ func (s *Scanner) Scan(ctx context.Context, targets []string, outputDir, prefix 
 	if err != nil {
 		_ = journal.Close()
 		return nil, fmt.Errorf("initialize mcp collector: %w", err)
-	}
-
-	vantage, err := graph.NewVantageIdentity(s.cfg.Scope, s.cfg.VantageKey)
-	if err != nil {
-		_ = journal.Close()
-		return nil, fmt.Errorf("create vantage identity: %w", err)
 	}
 
 	// 5. Worker pool for bounded concurrency
@@ -428,7 +399,7 @@ func (s *Scanner) Scan(ctx context.Context, targets []string, outputDir, prefix 
 					continue
 				}
 				if !probe.Matched {
-					record(unmatchedResult(host, baseURL, def.Surface, probe, vantage, scanID, s.collectorVersion, now))
+					record(unmatchedResult(host, baseURL, def.Surface, probe, s.cfg.Scope, s.cfg.VantageKey, scanID, s.collectorVersion, now))
 					continue
 				}
 
@@ -450,7 +421,7 @@ func (s *Scanner) Scan(ctx context.Context, targets []string, outputDir, prefix 
 					if def.DefaultPort != 11434 {
 						target = baseURL
 					}
-					res, err := ollamaCol.Collect(ctx, target, vantage, scanID, now, resolver, s.verifiedComputers)
+					res, err := ollamaCol.Collect(ctx, target, s.cfg.Scope, s.cfg.VantageKey, scanID, now, resolver)
 					if err != nil {
 						recordFailure(fmt.Errorf("ollama collect %s: %w", host, err))
 						continue
@@ -509,7 +480,7 @@ func (s *Scanner) Scan(ctx context.Context, targets []string, outputDir, prefix 
 	}, nil
 }
 
-func unmatchedResult(host, baseURL string, surface discovery.Surface, probe discovery.ProbeResult, vantage graph.Identity, scanID, collectorVersion string, now time.Time) checkpoint.Result {
+func unmatchedResult(host, baseURL string, surface discovery.Surface, probe discovery.ProbeResult, scope, vantageKey, scanID, collectorVersion string, now time.Time) checkpoint.Result {
 	reason := "target not identified as " + string(surface) + ": " + probe.Reason
 	if !probe.Reachable {
 		reason = "target unreachable: " + probe.Reason
@@ -526,7 +497,8 @@ func unmatchedResult(host, baseURL string, surface discovery.Surface, probe disc
 			Source:           baseURL,
 			Surface:          string(surface),
 			ObservedAt:       now,
-			Vantage:          vantage,
+			DeploymentScope:  scope,
+			VantageKey:       vantageKey,
 			Coverage:         graph.CoverageFailed,
 			CoverageReason:   reason,
 		},

@@ -404,7 +404,7 @@ func TestPreparationMakesNoDNSQueriesOrTargetConnections(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer listener.Close()
-	out, err := execute("targets", "--scope", "tenant", "--vantage", "scanner", "--targets", "127.0.0.1,never-resolve.example.test", "--reverse-dns", "--ce-lookup")
+	out, err := execute("targets", "--scope", "tenant", "--vantage", "scanner", "--targets", "127.0.0.1,never-resolve.example.test")
 	if err != nil || out != "127.0.0.1\nnever-resolve.example.test\n" {
 		t.Fatalf("%q %v", out, err)
 	}
@@ -438,3 +438,13 @@ func TestTargetOutputWriteError(t *testing.T) {
 type failingWriter struct{}
 
 func (failingWriter) Write([]byte) (int, error) { return 0, io.ErrClosedPipe }
+
+func TestRemovedCorrelationFlagsAreRejected(t *testing.T) {
+	// Attribution belongs to the normalizer; these flags no longer exist.
+	for _, flag := range [][]string{{"--ad-domain-suffix", "corp.example"}, {"--reverse-dns"}, {"--ce-lookup"}} {
+		args := append([]string{"targets", "--scope", "tenant", "--vantage", "scanner", "--targets", "127.0.0.1"}, flag...)
+		if _, err := execute(args...); err == nil {
+			t.Fatalf("removed flag %v accepted", flag)
+		}
+	}
+}

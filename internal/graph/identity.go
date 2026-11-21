@@ -81,13 +81,6 @@ func NewResourceIdentity(scope string, kind Kind, owner Identity, key string) (I
 	return id, err
 }
 
-func NewVantageIdentity(scope, key string) (Identity, error) {
-	if !validStableText(key) {
-		return Identity{}, errors.New("vantage requires a configured stable key")
-	}
-	return newIdentity(scope, CollectionVantage, key)
-}
-
 func NewNetworkEndpointIdentity(scope string, target Target) (Identity, error) {
 	if target.value == "" {
 		return Identity{}, errors.New("network endpoint requires a canonical target")

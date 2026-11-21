@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -200,7 +201,7 @@ func TestMCPCollector_StreamableHTTP_Success(t *testing.T) {
 	}
 
 	// Verify edges
-	var hasObservedAt, hasProvidesTool, hasProvidesResource, hasProvidesPrompt, hasUnauthenticatedAccess bool
+	var hasObservedAt, hasProvidesTool, hasProvidesResource, hasProvidesPrompt bool
 	for _, e := range result.Edges {
 		if e.IsTraversable() {
 			t.Errorf("all v1 edges must be non-traversable, edge %s is traversable", e.Kind())
@@ -217,15 +218,6 @@ func TestMCPCollector_StreamableHTTP_Success(t *testing.T) {
 			hasProvidesResource = true
 		case graph.ProvidesPrompt:
 			hasProvidesPrompt = true
-		case graph.UnauthenticatedAccess:
-			hasUnauthenticatedAccess = true
-			if e.End().ID() != srvNode.Node.Identity().ID() {
-				t.Errorf("UnauthenticatedAccess end must be MCPServer")
-			}
-			acc, ok := e.AccessEvidence()
-			if !ok || !acc.Anonymous || acc.Outcome != graph.OutcomeSuccess || acc.OperationKind != graph.EnumerationOperation {
-				t.Errorf("invalid access evidence on UnauthenticatedAccess edge: %+v", acc)
-			}
 		}
 	}
 
@@ -241,8 +233,17 @@ func TestMCPCollector_StreamableHTTP_Success(t *testing.T) {
 	if !hasProvidesPrompt {
 		t.Error("missing ProvidesPrompt edge")
 	}
-	if !hasUnauthenticatedAccess {
-		t.Error("missing UnauthenticatedAccess edge")
+
+	// Anonymous access is recorded as flat properties on the server, never as an edge.
+	if props["auth_observed"] != "anonymous" {
+		t.Errorf("auth_observed = %v, want anonymous", props["auth_observed"])
+	}
+	ops, _ := props["anon_operations"].([]string)
+	if !slices.Contains(ops, collectormcp.CheckIDInitialize) || !slices.Contains(ops, collectormcp.CheckIDToolsList) {
+		t.Errorf("anon_operations %v must include the succeeded initialize and tools-list checks", ops)
+	}
+	if props["vantage_key"] != "test-vantage" {
+		t.Errorf("vantage_key = %v, want test-vantage", props["vantage_key"])
 	}
 
 	// Verify evidence records
@@ -699,21 +700,15 @@ func TestMCPCollector_Correlation_NativeComputer(t *testing.T) {
 	ts := httptest.NewServer(handler)
 	defer ts.Close()
 
-	resolver, err := correlate.New(correlate.Config{
-		Mappings: []correlate.Mapping{
-			{Target: "127.0.0.1", ComputerID: "S-1-5-21-9999-1001"},
-		},
+	resolver, err := correlate.New([]correlate.Mapping{
+		{Target: "127.0.0.1", ObjectID: "S-1-5-21-9999-1001", Kind: graph.Computer},
 	})
 	if err != nil {
 		t.Fatalf("New correlator: %v", err)
 	}
 
-	computers := []correlate.Computer{
-		{ObjectID: "S-1-5-21-9999-1001", Name: "AI-HOST-01.LAB.LOCAL"},
-	}
-
 	cfg := testConfig()
-	collector, err := collectormcp.New(cfg, collectormcp.WithCorrelator(resolver, computers))
+	collector, err := collectormcp.New(cfg, collectormcp.WithCorrelator(resolver))
 	if err != nil {
 		t.Fatalf("New collector: %v", err)
 	}
@@ -806,8 +801,10 @@ func TestMCPCollector_EndToEnd_JournalReplayAndEmission(t *testing.T) {
 	if len(state.Nodes()) < 4 {
 		t.Errorf("expected at least 4 nodes from journal replay, got %d", len(state.Nodes()))
 	}
-	if len(state.Edges()) < 5 {
-		t.Errorf("expected at least 5 edges from journal replay, got %d", len(state.Edges()))
+	// ObservedAt + ProvidesTool + ProvidesResource + ProvidesPrompt; access is a
+	// property, not an edge.
+	if len(state.Edges()) != 4 {
+		t.Errorf("expected exactly 4 edges from journal replay, got %d", len(state.Edges()))
 	}
 	if len(state.Evidence()) < 6 {
 		t.Errorf("expected at least 6 evidence records from journal replay, got %d", len(state.Evidence()))
@@ -891,13 +888,6 @@ func TestMCPCollector_ResourceContentNotFetched(t *testing.T) {
 	}
 	if !foundResource {
 		t.Error("expected resource descriptor to be collected without reading content")
-	}
-
-	// Verify NO PublicAccess edge was emitted
-	for _, e := range result.Edges {
-		if e.Kind() == graph.PublicAccess {
-			t.Errorf("PublicAccess edge must not be emitted without content read")
-		}
 	}
 }
 

@@ -21,19 +21,12 @@ type Metadata struct {
 	SourceKind string `json:"source_kind,omitempty"`
 }
 
-// PropertyMatcher matches an endpoint by a specific property in BloodHound.
-type PropertyMatcher struct {
-	Key      string `json:"key"`
-	Operator string `json:"operator"`
-	Value    string `json:"value"`
-}
-
-// EndpointPayload defines how start or end node is matched in an edge.
+// EndpointPayload defines how an edge endpoint is matched. LLMHound matches
+// existing native nodes and its own nodes by objectid only: M0 showed property
+// matching silently drops zero or ambiguous matches.
 type EndpointPayload struct {
-	MatchBy          string            `json:"match_by"`
-	Value            string            `json:"value,omitempty"`
-	Kind             string            `json:"kind,omitempty"`
-	PropertyMatchers []PropertyMatcher `json:"property_matchers,omitempty"`
+	MatchBy string `json:"match_by"`
+	Value   string `json:"value"`
 }
 
 // NodePayload represents an entity node in an OpenGraph payload.
@@ -196,39 +189,14 @@ func isCompatibleSliceKind(a, b reflect.Kind) bool {
 }
 
 func formatEndpoint(ref graph.Reference) (EndpointPayload, error) {
-	if ref.MatchBy() == graph.MatchByID {
-		id := ref.ID()
-		if id == "" {
-			return EndpointPayload{}, errors.New("id matcher requires nonempty value")
-		}
-		if strings.Contains(id, ":") {
-			return EndpointPayload{}, fmt.Errorf("node id %q cannot contain colons", id)
-		}
-		return EndpointPayload{MatchBy: "id", Value: id}, nil
+	id := ref.ID()
+	if id == "" {
+		return EndpointPayload{}, errors.New("id matcher requires nonempty value")
 	}
-
-	if ref.MatchBy() == graph.MatchByProperty {
-		if ref.Property() == "" || ref.MatchValue() == "" {
-			return EndpointPayload{}, errors.New("property matcher requires key and value")
-		}
-		kind := ""
-		if ref.Kind() == graph.Computer {
-			kind = "Computer"
-		}
-		return EndpointPayload{
-			MatchBy: "property",
-			Kind:    kind,
-			PropertyMatchers: []PropertyMatcher{
-				{
-					Key:      ref.Property(),
-					Operator: "equals",
-					Value:    ref.MatchValue(),
-				},
-			},
-		}, nil
+	if strings.Contains(id, ":") {
+		return EndpointPayload{}, fmt.Errorf("node id %q cannot contain colons", id)
 	}
-
-	return EndpointPayload{}, fmt.Errorf("unsupported match_by: %s", ref.MatchBy())
+	return EndpointPayload{MatchBy: "id", Value: id}, nil
 }
 
 func formatEdge(edge graph.Edge) (EdgePayload, error) {
@@ -265,15 +233,6 @@ func formatEdge(edge graph.Edge) (EdgePayload, error) {
 		}
 		if corr.FallbackReason != "" {
 			props["fallback_reason"] = corr.FallbackReason
-		}
-	}
-
-	if acc, ok := edge.AccessEvidence(); ok {
-		props["operation"] = acc.Operation
-		props["outcome"] = string(acc.Outcome)
-		props["check_id"] = acc.CheckID
-		if acc.Reason != "" {
-			props["reason"] = acc.Reason
 		}
 	}
 

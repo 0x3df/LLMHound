@@ -222,6 +222,14 @@ type IdentityRecord struct {
 	OwnerID string `json:"owner_id,omitempty"`
 }
 
+// vantageContext is the deployment scope and configured vantage key a journal
+// was created for. Every observation and evidence record must match it.
+type vantageContext struct{ scope, key string }
+
+func vantageOf(h Header) vantageContext {
+	return vantageContext{scope: h.DeploymentScope, key: h.VantageKey}
+}
+
 // ObservationRecord serializes graph.Observation with UTC RFC3339 time.
 type ObservationRecord struct {
 	SchemaVersion    string `json:"schema_version"`
@@ -240,9 +248,7 @@ type ObservationRecord struct {
 type ReferenceRecord struct {
 	IsNative   bool            `json:"is_native"`
 	NativeID   string          `json:"native_id,omitempty"`
-	MatchBy    string          `json:"match_by"`
-	Property   string          `json:"property,omitempty"`
-	MatchValue string          `json:"match_value,omitempty"`
+	NativeKind string          `json:"native_kind,omitempty"`
 	Identity   *IdentityRecord `json:"identity,omitempty"`
 }
 
@@ -255,24 +261,11 @@ type NodeRecord struct {
 
 // EdgeRecord serializes graph.Edge.
 type EdgeRecord struct {
-	Kind        string                `json:"kind"`
-	Start       ReferenceRecord       `json:"start"`
-	End         ReferenceRecord       `json:"end"`
-	Observation ObservationRecord     `json:"observation"`
-	Access      *AccessEvidenceRecord `json:"access,omitempty"`
-	Correlation *CorrelationRecord    `json:"correlation,omitempty"`
-}
-
-// AccessEvidenceRecord serializes graph.AccessEvidence.
-type AccessEvidenceRecord struct {
-	CheckID       string            `json:"check_id"`
-	Operation     string            `json:"operation"`
-	TargetID      string            `json:"target_id"`
-	Outcome       string            `json:"outcome"`
-	Reason        string            `json:"reason"`
-	Anonymous     bool              `json:"anonymous"`
-	OperationKind string            `json:"operation_kind"`
-	Observation   ObservationRecord `json:"observation"`
+	Kind        string             `json:"kind"`
+	Start       ReferenceRecord    `json:"start"`
+	End         ReferenceRecord    `json:"end"`
+	Observation ObservationRecord  `json:"observation"`
+	Correlation *CorrelationRecord `json:"correlation,omitempty"`
 }
 
 // CorrelationRecord serializes graph.Correlation.
@@ -295,13 +288,13 @@ func toObservationRecord(obs graph.Observation, maxStringLen int) ObservationRec
 		Source:           SanitizeURL(obs.Source),
 		Surface:          obs.Surface,
 		ObservedAt:       obs.ObservedAt.UTC().Format(time.RFC3339),
-		VantageKey:       obs.Vantage.ID(),
+		VantageKey:       obs.VantageKey,
 		Coverage:         string(obs.Coverage),
 		CoverageReason:   sanitizeText(obs.CoverageReason, maxStringLen),
 	}
 }
 
-func fromObservationRecord(r ObservationRecord, vantage graph.Identity) (graph.Observation, error) {
+func fromObservationRecord(r ObservationRecord, vantage vantageContext) (graph.Observation, error) {
 	if r.SchemaVersion != SchemaVersion {
 		return graph.Observation{}, fmt.Errorf("unsupported observation schema_version %q", r.SchemaVersion)
 	}
@@ -313,7 +306,7 @@ func fromObservationRecord(r ObservationRecord, vantage graph.Identity) (graph.O
 		return graph.Observation{}, errors.New("observed_at must be in UTC")
 	}
 
-	if r.VantageKey != vantage.ID() {
+	if r.VantageKey != vantage.key {
 		return graph.Observation{}, errors.New("observation vantage does not match journal vantage")
 	}
 
@@ -325,11 +318,12 @@ func fromObservationRecord(r ObservationRecord, vantage graph.Identity) (graph.O
 		Source:           r.Source,
 		Surface:          r.Surface,
 		ObservedAt:       t.UTC(),
-		Vantage:          vantage,
+		DeploymentScope:  vantage.scope,
+		VantageKey:       vantage.key,
 		Coverage:         graph.Coverage(r.Coverage),
 		CoverageReason:   r.CoverageReason,
 	}
-	if err := obs.Validate(vantage.Scope()); err != nil {
+	if err := obs.Validate(vantage.scope); err != nil {
 		return graph.Observation{}, fmt.Errorf("validate observation: %w", err)
 	}
 	return obs, nil
@@ -350,13 +344,11 @@ func fromIdentityRecord(r IdentityRecord) (graph.Identity, error) {
 
 func toReferenceRecord(ref graph.Reference) ReferenceRecord {
 	rec := ReferenceRecord{
-		IsNative:   ref.IsNative(),
-		MatchBy:    string(ref.MatchBy()),
-		Property:   ref.Property(),
-		MatchValue: ref.MatchValue(),
+		IsNative: ref.IsNative(),
 	}
 	if ref.IsNative() {
 		rec.NativeID = ref.ID()
+		rec.NativeKind = string(ref.Kind())
 	} else {
 		rec.Identity = &IdentityRecord{
 			ID:      ref.ID(),
@@ -370,10 +362,7 @@ func toReferenceRecord(ref graph.Reference) ReferenceRecord {
 
 func fromReferenceRecord(r ReferenceRecord) (graph.Reference, error) {
 	if r.IsNative {
-		if r.MatchBy == string(graph.MatchByProperty) {
-			return graph.ExistingComputerByName(r.NativeID, r.MatchValue)
-		}
-		return graph.ExistingComputerByID(r.NativeID)
+		return graph.ExistingNodeByID(graph.Kind(r.NativeKind), r.NativeID)
 	}
 	if r.Identity == nil {
 		return graph.Reference{}, errors.New("source-owned reference requires identity")
@@ -396,7 +385,7 @@ func toNodeRecord(item emitter.NodeItem, maxStringLen int) NodeRecord {
 	}
 }
 
-func fromNodeRecord(r NodeRecord, vantage graph.Identity) (emitter.NodeItem, error) {
+func fromNodeRecord(r NodeRecord, vantage vantageContext) (emitter.NodeItem, error) {
 	ident, err := fromIdentityRecord(r.Identity)
 	if err != nil {
 		return emitter.NodeItem{}, fmt.Errorf("restore node identity: %w", err)
@@ -430,23 +419,10 @@ func toEdgeRecord(edge graph.Edge, maxStringLen int) EdgeRecord {
 		}
 	}
 
-	if acc, ok := edge.AccessEvidence(); ok {
-		rec.Access = &AccessEvidenceRecord{
-			CheckID:       acc.CheckID,
-			Operation:     acc.Operation,
-			TargetID:      acc.TargetID,
-			Outcome:       string(acc.Outcome),
-			Reason:        sanitizeText(acc.Reason, maxStringLen),
-			Anonymous:     acc.Anonymous,
-			OperationKind: string(acc.OperationKind),
-			Observation:   toObservationRecord(acc.Observation, maxStringLen),
-		}
-	}
-
 	return rec
 }
 
-func fromEdgeRecord(r EdgeRecord, vantage graph.Identity) (graph.Edge, error) {
+func fromEdgeRecord(r EdgeRecord, vantage vantageContext) (graph.Edge, error) {
 	start, err := fromReferenceRecord(r.Start)
 	if err != nil {
 		return graph.Edge{}, fmt.Errorf("restore edge start: %w", err)
@@ -473,27 +449,6 @@ func fromEdgeRecord(r EdgeRecord, vantage graph.Identity) (graph.Edge, error) {
 			CandidateIDs:   append([]string(nil), r.Correlation.CandidateIDs...),
 		}
 		return graph.NewObservedAtEdge(start, end, obs, corr)
-	}
-
-	if kind == graph.UnauthenticatedAccess || kind == graph.PublicAccess {
-		if r.Access == nil {
-			return graph.Edge{}, fmt.Errorf("%s edge requires access evidence", kind)
-		}
-		accObs, err := fromObservationRecord(r.Access.Observation, vantage)
-		if err != nil {
-			return graph.Edge{}, fmt.Errorf("restore access observation: %w", err)
-		}
-		acc := graph.AccessEvidence{
-			Observation:   accObs,
-			CheckID:       r.Access.CheckID,
-			Operation:     r.Access.Operation,
-			TargetID:      r.Access.TargetID,
-			Outcome:       graph.Outcome(r.Access.Outcome),
-			Reason:        r.Access.Reason,
-			Anonymous:     r.Access.Anonymous,
-			OperationKind: graph.OperationKind(r.Access.OperationKind),
-		}
-		return graph.NewAccessEdge(kind, start, end, acc)
 	}
 
 	return graph.NewTopologyEdge(kind, start, end, obs)
@@ -528,7 +483,7 @@ func toResultRecord(res Result, maxStringLen int) ResultRecord {
 	}
 }
 
-func fromResultRecord(r ResultRecord, vantage graph.Identity) (Result, error) {
+func fromResultRecord(r ResultRecord, vantage vantageContext) (Result, error) {
 	if r.Status != "" && !r.Status.Valid() {
 		return Result{}, fmt.Errorf("undefined result status %q", r.Status)
 	}
@@ -614,7 +569,7 @@ func sanitizeEvidence(ev evidence.Record, maxLen int) evidence.Record {
 }
 
 // validateObservation checks the target record's observation is fully valid for vantage and belongs to the record's surface.
-func (r TargetRecord) validateObservation(vantage graph.Identity) error {
+func (r TargetRecord) validateObservation(vantage vantageContext) error {
 	if r.Observation == nil {
 		return nil
 	}

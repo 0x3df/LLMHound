@@ -162,16 +162,15 @@ func ParseTargetEndpoint(targetStr string) (graph.Endpoint, string, error) {
 func (c *Collector) Collect(
 	ctx context.Context,
 	target string,
-	vantage graph.Identity,
+	scope string,
+	vantageKey string,
 	scanID string,
 	obsTime time.Time,
 	resolver *correlate.Resolver,
-	verifiedComputers []correlate.Computer,
 ) (checkpoint.Result, error) {
-	if vantage.Kind() != graph.CollectionVantage {
-		return checkpoint.Result{}, errors.New("vantage must be CollectionVantage")
+	if strings.TrimSpace(scope) == "" || strings.TrimSpace(vantageKey) == "" {
+		return checkpoint.Result{}, errors.New("collection requires a deployment scope and vantage key")
 	}
-	scope := vantage.Scope()
 
 	ep, targetHost, err := ParseTargetEndpoint(target)
 	if err != nil {
@@ -686,13 +685,32 @@ func (c *Collector) Collect(
 		Source:           sourceURL,
 		Surface:          Surface,
 		ObservedAt:       obsTime.UTC(),
-		Vantage:          vantage,
+		DeploymentScope:  scope,
+		VantageKey:       vantageKey,
 		Coverage:         finalCoverage,
 		CoverageReason:   finalCoverageReason,
 	}
 	if err := obs.Validate(scope); err != nil {
 		return checkpoint.Result{}, fmt.Errorf("validate observation: %w", err)
 	}
+
+	// Anonymous access is recorded as flat service properties, never as edges.
+	// Successes come from the enumeration check; any denied check is an observed
+	// authentication boundary.
+	var accessEvidence []graph.AccessEvidence
+	if accessEv != nil {
+		accessEv.Observation = obs // also backs the evidence-sidecar record below
+		accessEvidence = append(accessEvidence, *accessEv)
+	}
+	for _, cr := range checkResults {
+		if cr.Outcome == graph.OutcomeDenied {
+			accessEvidence = append(accessEvidence, graph.AccessEvidence{
+				Observation: obs, CheckID: cr.CheckID, Operation: cr.Operation, TargetID: srvID.ID(),
+				Outcome: graph.OutcomeDenied, Reason: cr.Reason, OperationKind: graph.EnumerationOperation,
+			})
+		}
+	}
+	access := graph.SummarizeAccess(accessEvidence)
 
 	// 7. Build Graph Nodes
 	var nodes []emitter.NodeItem
@@ -709,6 +727,10 @@ func (c *Collector) Collect(
 		"endpoint_port": int(ep.Port()),
 		"product":       "Ollama",
 		"vendor":        "Ollama",
+		"vantage_key":   vantageKey,
+	}
+	for k, v := range access.Properties() {
+		srvProps[k] = v
 	}
 	if reportedVersion != "" {
 		srvProps["software_version"] = reportedVersion
@@ -825,126 +847,38 @@ func (c *Collector) Collect(
 		}
 	}
 
-	// 8. Build Access Edge (if anonymous tags access succeeded)
-	if accessEv != nil {
-		accessEv.Observation = obs
-		accessEdge, aErr := graph.NewAccessEdge(graph.UnauthenticatedAccess, vantage.Reference(), srvID.Reference(), *accessEv)
-		if aErr == nil {
-			edges = append(edges, accessEdge)
-		}
-	}
-
-	// 9. Computer Correlation
+	// 8. Attachment: an existing native node when the mapping names one,
+	// otherwise a scoped NetworkEndpoint fallback.
 	var evidenceRecords []evidence.Record
-
-	if resolver != nil {
-		corrResult, cErr := resolver.Resolve(scope, targetHost, verifiedComputers)
-		if cErr == nil && corrResult.Evidence().Verified {
-			linkingEdge, lErr := corrResult.ObservedAt(srvID, obs)
-			if lErr == nil {
-				edges = append(edges, linkingEdge)
-			}
-			corrRec, rErr := evidence.NewCorrelationRecord(corrResult.Evidence(), obs)
-			if rErr == nil {
-				evidenceRecords = append(evidenceRecords, corrRec)
-			}
-		} else if cErr == nil {
-			if fbID, ok := corrResult.FallbackIdentity(); ok {
-				netNode, nnErr := graph.NewNode(fbID, obs)
-				if nnErr == nil {
-					netItem, niErr := emitter.NewNodeItem(netNode, map[string]any{
-						"name":         strings.ToUpper(corrResult.Evidence().NormalizedTarget),
-						"target_type":  string(corrResult.Evidence().TargetType),
-						"target_value": corrResult.Evidence().NormalizedTarget,
-					})
-					if niErr == nil {
-						nodes = append(nodes, netItem)
-					}
-				}
-			}
-			obsEdge, oErr := corrResult.ObservedAt(srvID, obs)
-			if oErr == nil {
-				edges = append(edges, obsEdge)
-			}
-			corrRec, rErr := evidence.NewCorrelationRecord(corrResult.Evidence(), obs)
-			if rErr == nil {
-				evidenceRecords = append(evidenceRecords, corrRec)
-			}
-		} else {
-			netTarget, pErr := graph.ParseTarget(targetHost)
-			if pErr == nil {
-				netID, nErr := graph.NewNetworkEndpointIdentity(scope, netTarget)
-				if nErr == nil {
-					netNode, nnErr := graph.NewNode(netID, obs)
-					if nnErr == nil {
-						netItem, niErr := emitter.NewNodeItem(netNode, map[string]any{
-							"name":         strings.ToUpper(targetHost),
-							"target_type":  string(netTarget.Type()),
-							"target_value": netTarget.Value(),
-						})
-						if niErr == nil {
-							nodes = append(nodes, netItem)
-						}
-					}
-					corr := graph.Correlation{
-						FallbackReason: cErr.Error(),
-					}
-					obsEdge, oErr := graph.NewObservedAtEdge(srvID.Reference(), netID.Reference(), obs, corr)
-					if oErr == nil {
-						edges = append(edges, obsEdge)
-					}
-					ev := correlate.Evidence{
-						OriginalTarget:   targetHost,
-						NormalizedTarget: netTarget.Value(),
-						TargetType:       netTarget.Type(),
-						Verified:         false,
-						Correlation:      corr,
-					}
-					corrRec, rErr := evidence.NewCorrelationRecord(ev, obs)
-					if rErr == nil {
-						evidenceRecords = append(evidenceRecords, corrRec)
-					}
-				}
-			}
-		}
-	} else {
-		// Fallback without resolver
-		netTarget, pErr := graph.ParseTarget(targetHost)
-		if pErr == nil {
-			netID, nErr := graph.NewNetworkEndpointIdentity(scope, netTarget)
-			if nErr == nil {
-				netNode, nnErr := graph.NewNode(netID, obs)
-				if nnErr == nil {
-					netItem, niErr := emitter.NewNodeItem(netNode, map[string]any{
-						"name":         strings.ToUpper(targetHost),
-						"target_type":  string(netTarget.Type()),
-						"target_value": netTarget.Value(),
-					})
-					if niErr == nil {
-						nodes = append(nodes, netItem)
-					}
-				}
-				corr := graph.Correlation{
-					FallbackReason: "no correlation resolver configured",
-				}
-				obsEdge, oErr := graph.NewObservedAtEdge(srvID.Reference(), netID.Reference(), obs, corr)
-				if oErr == nil {
-					edges = append(edges, obsEdge)
-				}
-				ev := correlate.Evidence{
-					OriginalTarget:   targetHost,
-					NormalizedTarget: netTarget.Value(),
-					TargetType:       netTarget.Type(),
-					Verified:         false,
-					Correlation:      corr,
-				}
-				corrRec, rErr := evidence.NewCorrelationRecord(ev, obs)
-				if rErr == nil {
-					evidenceRecords = append(evidenceRecords, corrRec)
-				}
-			}
-		}
+	corrResult, cErr := resolver.Resolve(scope, targetHost)
+	if cErr != nil {
+		return checkpoint.Result{}, fmt.Errorf("correlate target: %w", cErr)
 	}
+	if fbID, ok := corrResult.FallbackIdentity(); ok {
+		netNode, err := graph.NewNode(fbID, obs)
+		if err != nil {
+			return checkpoint.Result{}, fmt.Errorf("create fallback node: %w", err)
+		}
+		netItem, err := emitter.NewNodeItem(netNode, map[string]any{
+			"name":         strings.ToUpper(corrResult.Evidence().NormalizedTarget),
+			"target_type":  string(corrResult.Evidence().TargetType),
+			"target_value": corrResult.Evidence().NormalizedTarget,
+		})
+		if err != nil {
+			return checkpoint.Result{}, fmt.Errorf("create fallback node item: %w", err)
+		}
+		nodes = append(nodes, netItem)
+	}
+	observedAt, err := corrResult.ObservedAt(srvID, obs)
+	if err != nil {
+		return checkpoint.Result{}, fmt.Errorf("create ObservedAt edge: %w", err)
+	}
+	edges = append(edges, observedAt)
+	corrRec, err := evidence.NewCorrelationRecord(corrResult.Evidence(), obs)
+	if err != nil {
+		return checkpoint.Result{}, fmt.Errorf("create correlation record: %w", err)
+	}
+	evidenceRecords = append(evidenceRecords, corrRec)
 
 	// 10. Assemble Evidence Sidecar Records
 	for _, cr := range checkResults {
@@ -1030,24 +964,18 @@ func (c *Collector) CollectToJournal(
 	target string,
 	j checkpoint.Journal,
 	resolver *correlate.Resolver,
-	verifiedComputers []correlate.Computer,
 ) (checkpoint.Result, error) {
 	if j == nil {
 		return checkpoint.Result{}, errors.New("nil journal")
 	}
 
 	header := j.Header()
-	vantage, err := graph.NewVantageIdentity(header.DeploymentScope, header.VantageKey)
-	if err != nil {
-		return checkpoint.Result{}, fmt.Errorf("reconstruct vantage identity: %w", err)
-	}
-
 	t, err := time.Parse(time.RFC3339, header.CreatedAt)
 	if err != nil {
 		t = time.Now().UTC()
 	}
 
-	res, err := c.Collect(ctx, target, vantage, header.ScanID, t, resolver, verifiedComputers)
+	res, err := c.Collect(ctx, target, header.DeploymentScope, header.VantageKey, header.ScanID, t, resolver)
 	if err != nil {
 		return checkpoint.Result{}, err
 	}

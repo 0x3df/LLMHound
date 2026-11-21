@@ -8,6 +8,9 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -128,7 +131,6 @@ func TestAnonymousJupyterServer(t *testing.T) {
 	// Verify nodes
 	var srvNode *emitter.NodeItem
 	fileNodes := make(map[string]emitter.NodeItem)
-	var vantageNode *emitter.NodeItem
 	var endpointNode *emitter.NodeItem
 
 	for i := range res.Nodes {
@@ -138,16 +140,11 @@ func TestAnonymousJupyterServer(t *testing.T) {
 			srvNode = n
 		case graph.WorkspaceFile:
 			fileNodes[n.Properties["path"].(string)] = *n
-		case graph.CollectionVantage:
-			vantageNode = n
 		case graph.NetworkEndpoint:
 			endpointNode = n
 		}
 	}
 
-	if vantageNode == nil {
-		t.Fatal("expected CollectionVantage node")
-	}
 	if srvNode == nil {
 		t.Fatal("expected JupyterServer node")
 	}
@@ -173,6 +170,21 @@ func TestAnonymousJupyterServer(t *testing.T) {
 		t.Errorf("got active_sessions %v, want 2", props["active_sessions"])
 	}
 
+	// Anonymous access is flat properties from the enumeration checks, not an edge.
+	if props["auth_observed"] != "anonymous" {
+		t.Errorf("got auth_observed %v, want anonymous", props["auth_observed"])
+	}
+	ops, _ := props["anon_operations"].([]string)
+	if !slices.Contains(ops, jupyter.CheckIDContents) || !slices.Contains(ops, jupyter.CheckIDSessions) {
+		t.Errorf("anon_operations %v must include the contents and sessions checks", ops)
+	}
+	if slices.Contains(ops, jupyter.CheckIDVersion) {
+		t.Errorf("anon_operations %v must not include version metadata", ops)
+	}
+	if props["vantage_key"] != "vantage-dc01" {
+		t.Errorf("got vantage_key %v, want vantage-dc01", props["vantage_key"])
+	}
+
 	// Verify WorkspaceFiles: exactly 2 files (directory skipped)
 	if len(fileNodes) != 2 {
 		t.Fatalf("got %d workspace files, want 2", len(fileNodes))
@@ -189,17 +201,9 @@ func TestAnonymousJupyterServer(t *testing.T) {
 	}
 
 	// Verify Edges
-	var unauthAccessCount, containsCount, observedAtCount int
+	var containsCount, observedAtCount int
 	for _, e := range res.Edges {
 		switch e.Kind() {
-		case graph.UnauthenticatedAccess:
-			unauthAccessCount++
-			if e.Start().ID() != vantageNode.Node.Identity().ID() {
-				t.Errorf("UnauthenticatedAccess start mismatch")
-			}
-			if e.End().ID() != srvNode.Node.Identity().ID() {
-				t.Errorf("UnauthenticatedAccess end mismatch")
-			}
 		case graph.Contains:
 			containsCount++
 			if e.Start().ID() != srvNode.Node.Identity().ID() {
@@ -216,9 +220,6 @@ func TestAnonymousJupyterServer(t *testing.T) {
 		}
 	}
 
-	if unauthAccessCount != 1 {
-		t.Errorf("got %d UnauthenticatedAccess edges, want 1", unauthAccessCount)
-	}
 	if containsCount != 2 {
 		t.Errorf("got %d Contains edges, want 2", containsCount)
 	}
@@ -305,11 +306,14 @@ func TestAuthenticatedJupyterServer(t *testing.T) {
 		t.Errorf("got auth_required %v, want true", srvNode.Properties["auth_required"])
 	}
 
-	// Verify NO UnauthenticatedAccess edge
+	// An authenticated server must not look anonymously accessible.
+	if srvNode.Properties["auth_observed"] == "anonymous" {
+		t.Errorf("auth_observed = anonymous on an authenticated server")
+	}
+	if _, has := srvNode.Properties["anon_operations"]; has {
+		t.Errorf("anon_operations present on an authenticated server: %v", srvNode.Properties["anon_operations"])
+	}
 	for _, e := range res.Edges {
-		if e.Kind() == graph.UnauthenticatedAccess {
-			t.Errorf("should not emit UnauthenticatedAccess edge on authenticated server")
-		}
 		if e.Kind() == graph.Contains {
 			t.Errorf("should not emit Contains edges on authenticated server")
 		}
@@ -373,11 +377,12 @@ func TestPartialAuthenticatedServer(t *testing.T) {
 		t.Errorf("got auth_required %v, want true", srvNode.Properties["auth_required"])
 	}
 
-	// Contents and sessions were denied, so no workspace files and no unauthenticated access
-	for _, e := range res.Edges {
-		if e.Kind() == graph.UnauthenticatedAccess {
-			t.Errorf("should not emit UnauthenticatedAccess edge when workspace/sessions are denied")
-		}
+	// Contents and sessions were denied: an auth boundary, never anonymous access.
+	if srvNode.Properties["auth_observed"] == "anonymous" {
+		t.Errorf("auth_observed = anonymous when workspace/sessions are denied")
+	}
+	if _, has := srvNode.Properties["anon_operations"]; has {
+		t.Errorf("anon_operations present when workspace/sessions are denied: %v", srvNode.Properties["anon_operations"])
 	}
 }
 
@@ -573,25 +578,22 @@ func TestWorkspaceTruncation(t *testing.T) {
 	}
 }
 
-func TestADComputerCorrelation(t *testing.T) {
+func TestMappedTargetAttachesToExistingNode(t *testing.T) {
 	server := httptest.NewServer(mockJupyterHandler(t))
 	defer server.Close()
 
 	cfg := config.Defaults()
 	cfg.Scope = "corp-scope"
 	cfg.VantageKey = "vantage-dc01"
-	cfg.Correlation.ADDomainSuffixes = []string{"corp.local"}
+	mappingFile := filepath.Join(t.TempDir(), "assets.csv")
+	if err := os.WriteFile(mappingFile, []byte("jupyter-srv01.corp.local,S-1-5-21-9999-8888-7777-2002,Computer\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Correlation.MappingFile = mappingFile
 
-	resolver, err := correlate.NewFromConfig(cfg, nil, true)
+	resolver, err := correlate.NewFromConfig(cfg)
 	if err != nil {
 		t.Fatalf("correlate.NewFromConfig: %v", err)
-	}
-
-	verifiedComputers := []correlate.Computer{
-		{
-			ObjectID: "S-1-5-21-9999-8888-7777-2002",
-			Name:     "JUPYTER-SRV01.CORP.LOCAL",
-		},
 	}
 
 	transport := &http.Transport{
@@ -602,20 +604,19 @@ func TestADComputerCorrelation(t *testing.T) {
 	customClient := &http.Client{Transport: transport}
 
 	col, err := jupyter.New(jupyter.Config{
-		Scope:             "corp-scope",
-		VantageKey:        "vantage-dc01",
-		ScanID:            "scan-ad-001",
-		CollectorVersion:  "0.1.0",
-		Now:               testFixedTime,
-		Resolver:          resolver,
-		VerifiedComputers: verifiedComputers,
-		HTTPClient:        customClient,
+		Scope:            "corp-scope",
+		VantageKey:       "vantage-dc01",
+		ScanID:           "scan-ad-001",
+		CollectorVersion: "0.1.0",
+		Now:              testFixedTime,
+		Resolver:         resolver,
+		HTTPClient:       customClient,
 	})
 	if err != nil {
 		t.Fatalf("jupyter.New: %v", err)
 	}
 
-	// Target matches AD domain suffix
+	// The mapping names this target
 	res, err := col.Collect(context.Background(), "http://jupyter-srv01.corp.local:8888")
 	if err != nil {
 		t.Fatalf("Collect failed: %v", err)
@@ -730,7 +731,7 @@ func TestJournalReplayAndEmission(t *testing.T) {
 	}
 
 	// Validate nodes in emitted payload
-	if len(basePayload.Graph.Nodes) < 3 { // Vantage, JupyterServer, at least 1 WorkspaceFile
+	if len(basePayload.Graph.Nodes) < 3 { // JupyterServer, at least 1 WorkspaceFile, fallback NetworkEndpoint
 		t.Errorf("got %d nodes in emitted payload, want at least 3", len(basePayload.Graph.Nodes))
 	}
 }
@@ -1008,7 +1009,6 @@ func TestEndToEndTargetDiscoveryAndEmission(t *testing.T) {
 	}
 
 	expectedKinds := []string{
-		"LLMHound_CollectionVantage",
 		"LLMHound_JupyterServer",
 		"LLMHound_AIService",
 		"LLMHound_WorkspaceFile",
@@ -1025,7 +1025,6 @@ func TestEndToEndTargetDiscoveryAndEmission(t *testing.T) {
 		edgeKindsFound[e.Kind] = true
 	}
 	expectedEdges := []string{
-		"LLMHound_UnauthenticatedAccess",
 		"LLMHound_Contains",
 		"LLMHound_ObservedAt",
 	}

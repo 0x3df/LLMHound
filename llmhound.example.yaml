@@ -1,5 +1,5 @@
-# M1: offline input validation only. No collectors, DNS correlation, or upload.
-# Copy to llmhound.yaml and replace the deployment/vantage keys and inputs.
+# Example configuration. Copy to llmhound.yaml and replace the deployment/vantage
+# keys and inputs. Strict: unknown keys are rejected.
 scope: example-deployment
 vantage_key: scanner-network-a
 
@@ -36,9 +36,8 @@ opt_ins:
   configuration_content: false
   workspace_content: false
 
-# Stored/validated policy only; no mapping reads, DNS, or CE calls in M1.
+# Attribution belongs to the normalization program. Point mapping_file at its
+# asset mapping (target to existing BloodHound objectid and kind). Without one,
+# every service attaches to a NetworkEndpoint for the normalizer to attribute.
 correlation:
   mapping_file: ""
-  ad_domain_suffixes: []
-  reverse_dns: false
-  ce_lookup: false

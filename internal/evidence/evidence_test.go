@@ -14,10 +14,6 @@ import (
 
 func sampleObservation(t *testing.T) graph.Observation {
 	t.Helper()
-	v, err := graph.NewVantageIdentity("corp-scope", "vantage-east")
-	if err != nil {
-		t.Fatal(err)
-	}
 	return graph.Observation{
 		SchemaVersion:    "1",
 		ScanID:           "scan-1234",
@@ -26,7 +22,8 @@ func sampleObservation(t *testing.T) graph.Observation {
 		Source:           "https://ollama.corp.local:11434/api/tags",
 		Surface:          "ollama",
 		ObservedAt:       time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC),
-		Vantage:          v,
+		DeploymentScope:  "corp-scope",
+		VantageKey:       "vantage-east",
 		Coverage:         graph.CoverageComplete,
 	}
 }
@@ -74,11 +71,11 @@ func TestCorrelationRecord(t *testing.T) {
 		OriginalTarget:   "ai.corp.local",
 		NormalizedTarget: "ai.corp.local",
 		TargetType:       graph.DNSTarget,
-		Verified:         true,
+		NativeKind:       graph.Computer,
 		Correlation: graph.Correlation{
-			MatchMethod: "ad_suffix_name",
-			MatchValue:  "AI.CORP.LOCAL",
-			Confidence:  "unique_property_match",
+			MatchMethod: "mapping",
+			MatchValue:  "ai.corp.local",
+			Confidence:  "asserted",
 		},
 	}
 
@@ -94,7 +91,7 @@ func TestCorrelationRecord(t *testing.T) {
 	if rec.RecordType != evidence.RecordCorrelation {
 		t.Errorf("unexpected record_type: %s", rec.RecordType)
 	}
-	if rec.MatchMethod != "ad_suffix_name" || rec.MatchValue != "AI.CORP.LOCAL" {
+	if rec.MatchMethod != "mapping" || rec.MatchValue != "ai.corp.local" || rec.NativeKind != "Computer" {
 		t.Errorf("unexpected correlation fields: %+v", rec)
 	}
 }

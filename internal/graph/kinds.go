@@ -10,9 +10,8 @@ const SourceKind = "LLMHound"
 type Kind string
 
 const (
-	Computer                 Kind = "Computer" // Native AD kind; never source-owned.
+	Computer                 Kind = "Computer" // Common native kind; native kinds are never source-owned.
 	NetworkEndpoint          Kind = "NetworkEndpoint"
-	CollectionVantage        Kind = "CollectionVantage"
 	AIService                Kind = "AIService" // Umbrella label; never an identity owner.
 	MCPServer                Kind = "MCPServer"
 	MCPTool                  Kind = "MCPTool"
@@ -60,7 +59,7 @@ func (k Kind) IsResource() bool {
 
 // NodeKinds returns source-owned schema kinds, including the umbrella label.
 func NodeKinds() []Kind {
-	return []Kind{NetworkEndpoint, CollectionVantage, AIService, MCPServer, MCPTool,
+	return []Kind{NetworkEndpoint, AIService, MCPServer, MCPTool,
 		MCPResource, MCPPrompt, A2AAgent, A2ASkill, OllamaInstance, VLLMInstance,
 		LiteLLMGateway, QdrantInstance, MLflowServer, JupyterServer, OpenWebUIInstance,
 		LangServeApp, OpenAICompatibleEndpoint, RayDashboard, LangflowInstance,
@@ -69,10 +68,7 @@ func NodeKinds() []Kind {
 
 // Emitted applies the CE 9.7.1 namespace contract recorded by M0.
 func (k Kind) Emitted() (string, error) {
-	if k == Computer {
-		return string(k), nil
-	}
-	if k.IsService() || k.IsResource() || k == NetworkEndpoint || k == CollectionVantage || k == AIService {
+	if k.IsService() || k.IsResource() || k == NetworkEndpoint || k == AIService {
 		return SourceKind + "_" + string(k), nil
 	}
 	return "", errors.New("unknown node kind")
@@ -82,22 +78,20 @@ func (k Kind) Emitted() (string, error) {
 type EdgeKind string
 
 const (
-	ObservedAt            EdgeKind = "ObservedAt"
-	RunsOn                EdgeKind = "RunsOn" // Reserved: not inferred from network observations.
-	ProvidesTool          EdgeKind = "ProvidesTool"
-	ProvidesResource      EdgeKind = "ProvidesResource"
-	ProvidesPrompt        EdgeKind = "ProvidesPrompt"
-	ProvidesModel         EdgeKind = "ProvidesModel"
-	AdvertisesSkill       EdgeKind = "AdvertisesSkill"
-	UsesBackend           EdgeKind = "UsesBackend"
-	Contains              EdgeKind = "Contains"
-	UnauthenticatedAccess EdgeKind = "UnauthenticatedAccess"
-	PublicAccess          EdgeKind = "PublicAccess"
+	ObservedAt       EdgeKind = "ObservedAt"
+	RunsOn           EdgeKind = "RunsOn" // Reserved: not inferred from network observations.
+	ProvidesTool     EdgeKind = "ProvidesTool"
+	ProvidesResource EdgeKind = "ProvidesResource"
+	ProvidesPrompt   EdgeKind = "ProvidesPrompt"
+	ProvidesModel    EdgeKind = "ProvidesModel"
+	AdvertisesSkill  EdgeKind = "AdvertisesSkill"
+	UsesBackend      EdgeKind = "UsesBackend"
+	Contains         EdgeKind = "Contains"
 )
 
 func EdgeKinds() []EdgeKind {
 	return []EdgeKind{ObservedAt, RunsOn, ProvidesTool, ProvidesResource, ProvidesPrompt,
-		ProvidesModel, AdvertisesSkill, UsesBackend, Contains, UnauthenticatedAccess, PublicAccess}
+		ProvidesModel, AdvertisesSkill, UsesBackend, Contains}
 }
 
 func (k EdgeKind) Emitted() (string, error) {

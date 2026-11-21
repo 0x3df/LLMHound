@@ -16,8 +16,14 @@ import (
 
 const MaxMappingFileBytes = 1 << 20 // 1 MiB
 
-// LoadMappingFile reads target-to-Computer mapping entries from a JSON or
-// line-delimited file. It enforces bounds, ignores comments, canonicalizes targets,
+// LoadMappingFile reads asset-mapping entries (target to existing BloodHound
+// objectid and kind) from a JSON or line-delimited file. Accepted forms:
+//
+//	[{"target": "ai1.corp.example", "object_id": "S-1-5-21-...", "kind": "Computer"}]
+//	{"ai1.corp.example": "S-1-5-21-..."}            (kind defaults to Computer)
+//	ai1.corp.example,S-1-5-21-...[,AZVM]             (one per line, # comments)
+//
+// The file It enforces bounds, ignores comments, canonicalizes targets,
 // and rejects conflicting entries for the same target.
 func LoadMappingFile(path string) ([]Mapping, error) {
 	if strings.TrimSpace(path) == "" {
@@ -65,16 +71,16 @@ func LoadMappingFile(path string) ([]Mapping, error) {
 }
 
 func rejectConflicts(mappings []Mapping) ([]Mapping, error) {
-	seen := make(map[string]string, len(mappings))
+	seen := make(map[string]Mapping, len(mappings))
 	out := make([]Mapping, 0, len(mappings))
 	for _, m := range mappings {
 		prev, ok := seen[m.Target]
 		if !ok {
-			seen[m.Target] = m.ComputerID
+			seen[m.Target] = m
 			out = append(out, m)
 			continue
 		}
-		if prev != m.ComputerID {
+		if prev != m {
 			return nil, fmt.Errorf("conflicting mapping entries for target %q", m.Target)
 		}
 	}
@@ -82,16 +88,16 @@ func rejectConflicts(mappings []Mapping) ([]Mapping, error) {
 }
 
 func parseJSONMappings(data []byte) ([]Mapping, error) {
-	// Attempt array of objects first: [{"target": "...", "computer_id": "..."}]
 	type jsonEntry struct {
-		Target     string `json:"target"`
-		ComputerID string `json:"computer_id"`
+		Target   string `json:"target"`
+		ObjectID string `json:"object_id"`
+		Kind     string `json:"kind"`
 	}
 	var entries []jsonEntry
 	if err := json.Unmarshal(data, &entries); err == nil && len(entries) > 0 {
 		var mappings []Mapping
 		for _, e := range entries {
-			m, err := validateMappingEntry(e.Target, e.ComputerID)
+			m, err := validateMappingEntry(e.Target, e.ObjectID, e.Kind)
 			if err != nil {
 				return nil, err
 			}
@@ -100,12 +106,11 @@ func parseJSONMappings(data []byte) ([]Mapping, error) {
 		return mappings, nil
 	}
 
-	// Attempt dictionary: {"target": "computer_id"}
 	var dict map[string]string
 	if err := json.Unmarshal(data, &dict); err == nil && len(dict) > 0 {
 		var mappings []Mapping
-		for target, compID := range dict {
-			m, err := validateMappingEntry(target, compID)
+		for target, id := range dict {
+			m, err := validateMappingEntry(target, id, "")
 			if err != nil {
 				return nil, err
 			}
@@ -114,7 +119,7 @@ func parseJSONMappings(data []byte) ([]Mapping, error) {
 		return mappings, nil
 	}
 
-	return nil, errors.New("malformed JSON mapping format: must be array of objects or key-value map")
+	return nil, errors.New("malformed JSON mapping format: must be an array of {target, object_id, kind} objects or a target-to-objectid map")
 }
 
 func parseLineMappings(data []byte) ([]Mapping, error) {
@@ -142,11 +147,14 @@ func parseLineMappings(data []byte) ([]Mapping, error) {
 			parts = strings.Fields(line)
 		}
 
-		if len(parts) != 2 {
-			return nil, fmt.Errorf("line %d: invalid mapping line (expected target and Computer ID)", lineNum)
+		if len(parts) != 2 && len(parts) != 3 {
+			return nil, fmt.Errorf("line %d: invalid mapping line (expected target, objectid[, kind])", lineNum)
 		}
-
-		m, err := validateMappingEntry(parts[0], parts[1])
+		kind := ""
+		if len(parts) == 3 {
+			kind = parts[2]
+		}
+		m, err := validateMappingEntry(parts[0], parts[1], kind)
 		if err != nil {
 			return nil, fmt.Errorf("line %d: %w", lineNum, err)
 		}
@@ -161,31 +169,35 @@ func parseLineMappings(data []byte) ([]Mapping, error) {
 	return mappings, nil
 }
 
-func validateMappingEntry(rawTarget, computerID string) (Mapping, error) {
+// DefaultNativeKind is assumed when an entry does not name a kind.
+const DefaultNativeKind = graph.Computer
+
+func validateMappingEntry(rawTarget, objectID, rawKind string) (Mapping, error) {
 	target, err := graph.ParseTarget(rawTarget)
 	if err != nil {
 		return Mapping{}, fmt.Errorf("invalid mapping target %q: %w", rawTarget, err)
 	}
-	if _, err := graph.ExistingComputerByID(computerID); err != nil {
-		return Mapping{}, fmt.Errorf("invalid Computer ID %q: %w", computerID, err)
+	kind := DefaultNativeKind
+	if strings.TrimSpace(rawKind) != "" {
+		kind = graph.Kind(strings.TrimSpace(rawKind))
 	}
-	return Mapping{Target: target.Value(), ComputerID: computerID}, nil
+	if _, err := graph.ExistingNodeByID(kind, objectID); err != nil {
+		return Mapping{}, fmt.Errorf("invalid mapping for %q (objectid %q, kind %q): %w", rawTarget, objectID, kind, err)
+	}
+	return Mapping{Target: target.Value(), ObjectID: objectID, Kind: kind}, nil
 }
 
-// NewFromConfig builds a correlation Resolver from config.Config. If mappings are not
-// provided but cfg.Correlation.MappingFile is specified, it loads mappings from the file.
-func NewFromConfig(cfg config.Config, mappings []Mapping, propertyMatchSupported bool) (*Resolver, error) {
-	if len(mappings) == 0 && cfg.Correlation.MappingFile != "" {
+// NewFromConfig builds a Resolver from the configured mapping file. With no
+// mapping file every target falls back to a NetworkEndpoint, which is the
+// intended hand-off to the normalizer.
+func NewFromConfig(cfg config.Config) (*Resolver, error) {
+	var mappings []Mapping
+	if cfg.Correlation.MappingFile != "" {
 		loaded, err := LoadMappingFile(cfg.Correlation.MappingFile)
 		if err != nil {
 			return nil, fmt.Errorf("load correlation mapping file: %w", err)
 		}
 		mappings = loaded
 	}
-	return New(Config{
-		Mappings:               mappings,
-		ADSuffixes:             cfg.Correlation.ADDomainSuffixes,
-		PropertyMatchSupported: propertyMatchSupported,
-		ComputerProperty:       "name",
-	})
+	return New(mappings)
 }

@@ -35,11 +35,12 @@ func WithHTTPClient(client *http.Client) Option {
 	}
 }
 
-// WithCorrelator provides Computer correlation resolver and candidate inventory.
-func WithCorrelator(resolver *correlate.Resolver, computers []correlate.Computer) Option {
+// WithCorrelator provides the asset-mapping resolver used to attach the server
+// to an existing BloodHound node. Without one, every target falls back to a
+// NetworkEndpoint.
+func WithCorrelator(resolver *correlate.Resolver) Option {
 	return func(c *Collector) {
 		c.correlator = resolver
-		c.computers = append([]correlate.Computer(nil), computers...)
 	}
 }
 
@@ -76,7 +77,6 @@ type Collector struct {
 	config           config.Config
 	customHTTPClient *http.Client
 	correlator       *correlate.Resolver
-	computers        []correlate.Computer
 	clock            func() time.Time
 	scanID           string
 	evidenceID       string
@@ -106,12 +106,7 @@ func New(cfg config.Config, opts ...Option) (*Collector, error) {
 
 // Collect evaluates an MCP target and returns a Result.
 func (c *Collector) Collect(ctx context.Context, target Target) (*checkpoint.Result, error) {
-	vantageID, err := c.config.VantageIdentity()
-	if err != nil {
-		return nil, fmt.Errorf("vantage identity: %w", err)
-	}
-
-	return c.collectInternal(ctx, target, vantageID, c.config.Scope, c.scanID, c.evidenceID, c.collectorVersion)
+	return c.collectInternal(ctx, target, c.config.VantageKey, c.config.Scope, c.scanID, c.evidenceID, c.collectorVersion)
 }
 
 // CollectTarget evaluates an MCP target and records progress and results into a checkpoint Journal.
@@ -137,11 +132,6 @@ func (c *Collector) CollectTarget(ctx context.Context, target Target, j checkpoi
 		}
 	}
 
-	vantageID, err := graph.NewVantageIdentity(scope, vantageKey)
-	if err != nil {
-		return nil, fmt.Errorf("vantage identity: %w", err)
-	}
-
 	origTarget := target.OriginalTarget
 	if origTarget == "" {
 		origTarget = target.URL
@@ -158,7 +148,7 @@ func (c *Collector) CollectTarget(ctx context.Context, target Target, j checkpoi
 		}
 	}
 
-	res, err := c.collectInternal(ctx, target, vantageID, scope, scanID, c.evidenceID, collectorVersion)
+	res, err := c.collectInternal(ctx, target, vantageKey, scope, scanID, c.evidenceID, collectorVersion)
 	if err != nil {
 		if j != nil {
 			recordErr := j.RecordTarget(checkpoint.TargetRecord{
@@ -187,7 +177,7 @@ func (c *Collector) CollectTarget(ctx context.Context, target Target, j checkpoi
 			Source:           res.Observation.Source,
 			Surface:          res.Observation.Surface,
 			ObservedAt:       res.Observation.ObservedAt.UTC().Format(time.RFC3339),
-			VantageKey:       res.Observation.Vantage.ID(),
+			VantageKey:       res.Observation.VantageKey,
 			Coverage:         string(res.Observation.Coverage),
 			CoverageReason:   res.Observation.CoverageReason,
 		}
@@ -210,7 +200,7 @@ func (c *Collector) CollectTarget(ctx context.Context, target Target, j checkpoi
 func (c *Collector) collectInternal(
 	ctx context.Context,
 	target Target,
-	vantageID graph.Identity,
+	vantageKey string,
 	scope string,
 	scanID string,
 	evidenceID string,
@@ -295,7 +285,8 @@ func (c *Collector) collectInternal(
 			Source:           canonicalURL,
 			Surface:          "mcp",
 			ObservedAt:       obsTime,
-			Vantage:          vantageID,
+			DeploymentScope:  scope,
+			VantageKey:       vantageKey,
 			Coverage:         cov,
 			CoverageReason:   covReason,
 		}
@@ -578,8 +569,28 @@ func (c *Collector) collectInternal(
 	var nodes []emitter.NodeItem
 	var edges []graph.Edge
 
+	// Anonymous access is recorded as flat server properties, never as edges.
+	// No credentials are ever sent, so every successful check is anonymous.
+	var accessEvidence []graph.AccessEvidence
+	for _, ch := range checks {
+		if ch.Outcome != graph.OutcomeSuccess && ch.Outcome != graph.OutcomeDenied {
+			continue
+		}
+		accessEvidence = append(accessEvidence, graph.AccessEvidence{
+			Observation:   finalObs,
+			CheckID:       ch.CheckID,
+			Operation:     ch.Operation,
+			TargetID:      srvID.ID(),
+			Outcome:       ch.Outcome,
+			Reason:        ch.Reason,
+			Anonymous:     ch.Outcome == graph.OutcomeSuccess,
+			OperationKind: graph.EnumerationOperation,
+		})
+	}
+	access := graph.SummarizeAccess(accessEvidence)
+
 	// 1. Server node
-	srvNode, err := buildServerNode(srvID, ep, finalObs, initResult, tlsObs)
+	srvNode, err := buildServerNode(srvID, ep, finalObs, initResult, tlsObs, access)
 	if err != nil {
 		return nil, fmt.Errorf("build MCPServer node: %w", err)
 	}
@@ -609,21 +620,13 @@ func (c *Collector) collectInternal(
 	nodes = append(nodes, promptNodes...)
 	edges = append(edges, promptEdges...)
 
-	// 5. UnauthenticatedAccess edge
-	accessEdge, err := buildAccessEdge(vantageID, srvID, finalObs, CheckIDInitialize, OpInitialize, initSuccessReason)
-	if err != nil {
-		return nil, fmt.Errorf("build UnauthenticatedAccess edge: %w", err)
-	}
-	edges = append(edges, accessEdge)
-
-	// 6. Computer correlation and ObservedAt edge
+	// 5. Attachment: existing native node from the asset mapping, else NetworkEndpoint
 	observedAtEdge, fallbackNode, corrEv, err := buildCorrelationEdgeAndFallback(
 		scope,
 		ep.Host(),
 		srvID,
 		finalObs,
 		c.correlator,
-		c.computers,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("build correlation edge: %w", err)
@@ -633,7 +636,7 @@ func (c *Collector) collectInternal(
 		nodes = append(nodes, *fallbackNode)
 	}
 
-	// 7. Fingerprint input
+	// 6. Fingerprint input
 	var fpInput *evidence.FingerprintInput
 	if initResult != nil && initResult.ServerInfo != nil {
 		fp := evidence.FingerprintInput{

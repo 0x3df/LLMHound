@@ -55,7 +55,7 @@ type Record struct {
 	OriginalTarget   string   `json:"original_target,omitempty"`
 	NormalizedTarget string   `json:"normalized_target,omitempty"`
 	TargetType       string   `json:"target_type,omitempty"`
-	Verified         *bool    `json:"verified,omitempty"`
+	NativeKind       string   `json:"native_kind,omitempty"`
 	MatchMethod      string   `json:"match_method,omitempty"`
 	MatchValue       string   `json:"match_value,omitempty"`
 	Confidence       string   `json:"confidence,omitempty"`
@@ -124,13 +124,13 @@ func baseRecord(obs graph.Observation, typ RecordType) Record {
 	return Record{
 		RecordType:       typ,
 		SchemaVersion:    SchemaVersion,
-		DeploymentScope:  obs.Vantage.Scope(),
+		DeploymentScope:  obs.DeploymentScope,
 		ScanID:           obs.ScanID,
 		CollectorVersion: obs.CollectorVersion,
 		EvidenceID:       obs.EvidenceID,
 		Source:           SanitizeURL(obs.Source),
 		Surface:          obs.Surface,
-		VantageKey:       obs.Vantage.ID(),
+		VantageKey:       obs.VantageKey,
 		ObservedAt:       obs.ObservedAt.UTC().Format(time.RFC3339),
 		Coverage:         string(obs.Coverage),
 		CoverageReason:   obs.CoverageReason,
@@ -139,7 +139,7 @@ func baseRecord(obs graph.Observation, typ RecordType) Record {
 
 // NewCheckResultRecord creates an evidence record from a CheckResult.
 func NewCheckResultRecord(check graph.CheckResult, details map[string]any) (Record, error) {
-	if err := check.Validate(check.Observation.Vantage.Scope()); err != nil {
+	if err := check.Validate(check.Observation.DeploymentScope); err != nil {
 		return Record{}, err
 	}
 	r := baseRecord(check.Observation, RecordCheckResult)
@@ -154,7 +154,7 @@ func NewCheckResultRecord(check graph.CheckResult, details map[string]any) (Reco
 
 // NewAccessEvidenceRecord creates an evidence record from AccessEvidence.
 func NewAccessEvidenceRecord(access graph.AccessEvidence, details map[string]any) (Record, error) {
-	if err := access.Observation.Validate(access.Observation.Vantage.Scope()); err != nil {
+	if err := access.Observation.Validate(access.Observation.DeploymentScope); err != nil {
 		return Record{}, err
 	}
 	r := baseRecord(access.Observation, RecordCheckResult)
@@ -172,15 +172,14 @@ func NewAccessEvidenceRecord(access graph.AccessEvidence, details map[string]any
 
 // NewCorrelationRecord creates an evidence record from a correlation decision.
 func NewCorrelationRecord(ev correlate.Evidence, obs graph.Observation) (Record, error) {
-	if err := obs.Validate(obs.Vantage.Scope()); err != nil {
+	if err := obs.Validate(obs.DeploymentScope); err != nil {
 		return Record{}, err
 	}
 	r := baseRecord(obs, RecordCorrelation)
 	r.OriginalTarget = ev.OriginalTarget
 	r.NormalizedTarget = ev.NormalizedTarget
 	r.TargetType = string(ev.TargetType)
-	verified := ev.Verified
-	r.Verified = &verified
+	r.NativeKind = string(ev.NativeKind)
 	r.MatchMethod = ev.Correlation.MatchMethod
 	r.MatchValue = ev.Correlation.MatchValue
 	r.Confidence = ev.Correlation.Confidence
@@ -208,7 +207,7 @@ type FingerprintInput struct {
 }
 
 func NewFingerprintRecord(input FingerprintInput) (Record, error) {
-	if err := input.Observation.Validate(input.Observation.Vantage.Scope()); err != nil {
+	if err := input.Observation.Validate(input.Observation.DeploymentScope); err != nil {
 		return Record{}, err
 	}
 	r := baseRecord(input.Observation, RecordFingerprint)
@@ -246,7 +245,7 @@ type TLSRecordInput struct {
 }
 
 func NewTLSRecord(input TLSRecordInput) (Record, error) {
-	if err := input.Observation.Validate(input.Observation.Vantage.Scope()); err != nil {
+	if err := input.Observation.Validate(input.Observation.DeploymentScope); err != nil {
 		return Record{}, err
 	}
 	r := baseRecord(input.Observation, RecordTLS)
@@ -278,7 +277,7 @@ type RedirectRecordInput struct {
 }
 
 func NewRedirectRecord(input RedirectRecordInput) (Record, error) {
-	if err := input.Observation.Validate(input.Observation.Vantage.Scope()); err != nil {
+	if err := input.Observation.Validate(input.Observation.DeploymentScope); err != nil {
 		return Record{}, err
 	}
 	r := baseRecord(input.Observation, RecordRedirect)

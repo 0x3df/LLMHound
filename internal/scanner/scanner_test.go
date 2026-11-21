@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/0x3df/LLMHound/internal/config"
-	"github.com/0x3df/LLMHound/internal/correlate"
 	"github.com/0x3df/LLMHound/internal/discovery"
 	"github.com/0x3df/LLMHound/internal/emitter"
 	"github.com/0x3df/LLMHound/internal/evidence"
@@ -349,7 +348,7 @@ func TestScanner_EndToEndScan(t *testing.T) {
 	}
 }
 
-func TestScanner_ComputerCorrelationAndLinkingPayload(t *testing.T) {
+func TestScanner_MappedTargetAttachesToNativeNodeViaLinkingPayload(t *testing.T) {
 	ollamaSrv := setupMockOllama(t)
 	defer ollamaSrv.Close()
 	ollamaPort := parsePort(ollamaSrv.URL)
@@ -365,7 +364,7 @@ func TestScanner_ComputerCorrelationAndLinkingPayload(t *testing.T) {
 
 	tmpDir := t.TempDir()
 	mappingPath := filepath.Join(tmpDir, "mapping.json")
-	mappingJSON := `[{"target": "127.0.0.1", "computer_id": "S-1-5-21-1111111111-2222222222-3333333333-1001"}]`
+	mappingJSON := `[{"target": "127.0.0.1", "object_id": "S-1-5-21-1111111111-2222222222-3333333333-1001", "kind": "AZVM"}]`
 	if err := os.WriteFile(mappingPath, []byte(mappingJSON), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -376,16 +375,8 @@ func TestScanner_ComputerCorrelationAndLinkingPayload(t *testing.T) {
 	cfg.Correlation.MappingFile = mappingPath
 	cfg.Targets = []string{"127.0.0.1"}
 
-	verifiedComputers := []correlate.Computer{
-		{
-			ObjectID: "S-1-5-21-1111111111-2222222222-3333333333-1001",
-			Name:     "CORP-SERVER.CORP.LOCAL",
-		},
-	}
-
 	s, err := scanner.New(cfg,
 		scanner.WithDefinitions(customDefs),
-		scanner.WithVerifiedComputers(verifiedComputers),
 	)
 	if err != nil {
 		t.Fatalf("scanner.New failed: %v", err)
@@ -435,6 +426,16 @@ func TestScanner_ComputerCorrelationAndLinkingPayload(t *testing.T) {
 	}
 	if basePayload.Metadata == nil || basePayload.Metadata.SourceKind != "LLMHound" {
 		t.Errorf("base payload source_kind = %v, want LLMHound", basePayload.Metadata)
+	}
+
+	// 3. An attached target needs no fallback NetworkEndpoint, and no node of the
+	// native kind is ever emitted: the native node already exists in BloodHound.
+	for _, n := range basePayload.Graph.Nodes {
+		for _, k := range n.Kinds {
+			if k == "LLMHound_NetworkEndpoint" || k == "AZVM" || k == "Computer" {
+				t.Errorf("base payload must not emit %s for an attached target", k)
+			}
+		}
 	}
 }
 

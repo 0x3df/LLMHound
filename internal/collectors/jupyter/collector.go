@@ -22,17 +22,16 @@ import (
 
 // Config configures the Jupyter collector.
 type Config struct {
-	Scope             string
-	VantageKey        string
-	ScanID            string
-	CollectorVersion  string
-	Bounds            config.Bounds
-	Insecure          bool
-	UserAgent         string
-	Resolver          *correlate.Resolver
-	VerifiedComputers []correlate.Computer
-	Now               func() time.Time
-	HTTPClient        *http.Client // Optional override for testing
+	Scope            string
+	VantageKey       string
+	ScanID           string
+	CollectorVersion string
+	Bounds           config.Bounds
+	Insecure         bool
+	UserAgent        string
+	Resolver         *correlate.Resolver // nil attaches nothing: every target falls back
+	Now              func() time.Time
+	HTTPClient       *http.Client // Optional override for testing
 }
 
 // Collector performs read-only enumeration of Jupyter notebook servers.
@@ -123,11 +122,6 @@ func (c *Collector) collect(ctx context.Context, rawTarget string, probeFirst bo
 		return checkpoint.Result{}, fmt.Errorf("parse canonical endpoint: %w", err)
 	}
 
-	vantageID, err := graph.NewVantageIdentity(c.cfg.Scope, c.cfg.VantageKey)
-	if err != nil {
-		return checkpoint.Result{}, fmt.Errorf("create vantage identity: %w", err)
-	}
-
 	srvID, err := graph.NewServiceIdentity(c.cfg.Scope, graph.JupyterServer, ep)
 	if err != nil {
 		return checkpoint.Result{}, fmt.Errorf("create service identity: %w", err)
@@ -145,7 +139,8 @@ func (c *Collector) collect(ctx context.Context, rawTarget string, probeFirst bo
 		Source:           baseSource,
 		Surface:          "jupyter",
 		ObservedAt:       obsTime,
-		Vantage:          vantageID,
+		DeploymentScope:  c.cfg.Scope,
+		VantageKey:       c.cfg.VantageKey,
 		Coverage:         graph.CoverageComplete,
 	}
 
@@ -310,20 +305,6 @@ func (c *Collector) collect(ctx context.Context, rawTarget string, probeFirst bo
 	var edges []graph.Edge
 	var evRecords []evidence.Record
 
-	// Build Vantage node item
-	vantageNode, err := graph.NewNode(vantageID, finalObs)
-	if err != nil {
-		return checkpoint.Result{}, fmt.Errorf("create vantage node: %w", err)
-	}
-	vantageItem, err := emitter.NewNodeItem(vantageNode, map[string]any{
-		"name":        strings.ToUpper(c.cfg.VantageKey),
-		"vantage_key": c.cfg.VantageKey,
-	})
-	if err != nil {
-		return checkpoint.Result{}, fmt.Errorf("create vantage node item: %w", err)
-	}
-	nodes = append(nodes, vantageItem)
-
 	// Collect unique kernels and session stats
 	kernelMap := make(map[string]bool)
 	for _, s := range sessions {
@@ -336,6 +317,31 @@ func (c *Collector) collect(ctx context.Context, rawTarget string, probeFirst bo
 		kernels = append(kernels, k)
 	}
 	sort.Strings(kernels)
+
+	// Anonymous access is recorded as flat properties from the enumeration
+	// checks only (workspace contents and session listing). Version/API metadata
+	// is often readable even when authentication is enabled, so it must not
+	// make the service look anonymously accessible.
+	var accessEvidence []graph.AccessEvidence
+	for _, ch := range checks {
+		if ch.checkID != CheckIDContents && ch.checkID != CheckIDSessions {
+			continue
+		}
+		if !(ch.anonymous && ch.outcome == graph.OutcomeSuccess) && ch.outcome != graph.OutcomeDenied {
+			continue
+		}
+		accessEvidence = append(accessEvidence, graph.AccessEvidence{
+			Observation:   finalObs,
+			CheckID:       ch.checkID,
+			Operation:     ch.operation,
+			TargetID:      srvID.ID(),
+			Outcome:       ch.outcome,
+			Reason:        ch.reason,
+			Anonymous:     ch.anonymous,
+			OperationKind: graph.EnumerationOperation,
+		})
+	}
+	access := graph.SummarizeAccess(accessEvidence)
 
 	// Build JupyterServer node item
 	srvProps := map[string]any{
@@ -359,6 +365,10 @@ func (c *Collector) collect(ctx context.Context, rawTarget string, probeFirst bo
 		srvProps["kernels"] = kernels
 	}
 	srvProps["active_sessions"] = len(sessions)
+	srvProps["vantage_key"] = c.cfg.VantageKey
+	for k, v := range access.Properties() {
+		srvProps[k] = v
+	}
 
 	srvNode, err := graph.NewNode(srvID, finalObs)
 	if err != nil {
@@ -402,41 +412,6 @@ func (c *Collector) collect(ctx context.Context, rawTarget string, probeFirst bo
 			return checkpoint.Result{}, fmt.Errorf("create contains edge for %q: %w", f.Path, err)
 		}
 		edges = append(edges, containsEdge)
-	}
-
-	// Check if anonymous access succeeded on an enumeration operation to emit UnauthenticatedAccess edge.
-	// Only workspace contents or session listing constitute unauthenticated asset enumeration;
-	// version metadata alone does not grant unauthenticated access to the notebook server.
-	var anonEnumCheck *checkExecution
-	for i := range checks {
-		ch := &checks[i]
-		if ch.anonymous && ch.outcome == graph.OutcomeSuccess && ch.operationKind == graph.EnumerationOperation {
-			if ch.checkID == CheckIDContents {
-				anonEnumCheck = ch
-				break
-			}
-			if ch.checkID == CheckIDSessions && anonEnumCheck == nil {
-				anonEnumCheck = ch
-			}
-		}
-	}
-
-	if anonEnumCheck != nil {
-		accessEv := graph.AccessEvidence{
-			Observation:   finalObs,
-			CheckID:       anonEnumCheck.checkID,
-			Operation:     anonEnumCheck.operation,
-			TargetID:      srvID.ID(),
-			Outcome:       graph.OutcomeSuccess,
-			Reason:        anonEnumCheck.reason,
-			Anonymous:     true,
-			OperationKind: graph.EnumerationOperation,
-		}
-		accessEdge, err := graph.NewAccessEdge(graph.UnauthenticatedAccess, vantageID.Reference(), srvID.Reference(), accessEv)
-		if err != nil {
-			return checkpoint.Result{}, fmt.Errorf("create access edge: %w", err)
-		}
-		edges = append(edges, accessEdge)
 	}
 
 	// Target correlation: Computer or fallback NetworkEndpoint
@@ -854,83 +829,35 @@ func (c *Collector) executeContentsCheck(ctx context.Context, baseURL, targetID 
 }
 
 func (c *Collector) correlateTarget(host string, srvID graph.Identity, obs graph.Observation) (graph.Edge, *emitter.NodeItem, evidence.Record, error) {
-	if c.cfg.Resolver != nil {
-		corrRes, err := c.cfg.Resolver.Resolve(c.cfg.Scope, host, c.cfg.VerifiedComputers)
+	corrRes, err := c.cfg.Resolver.Resolve(c.cfg.Scope, host)
+	if err != nil {
+		return graph.Edge{}, nil, evidence.Record{}, err
+	}
+	observedAt, err := corrRes.ObservedAt(srvID, obs)
+	if err != nil {
+		return graph.Edge{}, nil, evidence.Record{}, err
+	}
+	corrRec, err := evidence.NewCorrelationRecord(corrRes.Evidence(), obs)
+	if err != nil {
+		return graph.Edge{}, nil, evidence.Record{}, err
+	}
+	var fallbackItem *emitter.NodeItem
+	if fbID, isFallback := corrRes.FallbackIdentity(); isFallback {
+		fbNode, err := graph.NewNode(fbID, obs)
 		if err != nil {
 			return graph.Edge{}, nil, evidence.Record{}, err
 		}
-		observedAt, err := corrRes.ObservedAt(srvID, obs)
+		item, err := emitter.NewNodeItem(fbNode, map[string]any{
+			"name":              strings.ToUpper(corrRes.Evidence().NormalizedTarget),
+			"target_type":       string(corrRes.Evidence().TargetType),
+			"normalized_target": corrRes.Evidence().NormalizedTarget,
+		})
 		if err != nil {
 			return graph.Edge{}, nil, evidence.Record{}, err
 		}
-		corrRec, err := evidence.NewCorrelationRecord(corrRes.Evidence(), obs)
-		if err != nil {
-			return graph.Edge{}, nil, evidence.Record{}, err
-		}
-		var fallbackItem *emitter.NodeItem
-		if fbID, isFallback := corrRes.FallbackIdentity(); isFallback {
-			fbNode, err := graph.NewNode(fbID, obs)
-			if err != nil {
-				return graph.Edge{}, nil, evidence.Record{}, err
-			}
-			item, err := emitter.NewNodeItem(fbNode, map[string]any{
-				"name":              strings.ToUpper(corrRes.Evidence().NormalizedTarget),
-				"target_type":       string(corrRes.Evidence().TargetType),
-				"normalized_target": corrRes.Evidence().NormalizedTarget,
-			})
-			if err != nil {
-				return graph.Edge{}, nil, evidence.Record{}, err
-			}
-			fallbackItem = &item
-		}
-		return observedAt, fallbackItem, corrRec, nil
+		fallbackItem = &item
 	}
-
-	// Default fallback correlation when no resolver is configured
-	target, err := graph.ParseTarget(host)
-	if err != nil {
-		return graph.Edge{}, nil, evidence.Record{}, err
-	}
-	fbID, err := graph.NewNetworkEndpointIdentity(c.cfg.Scope, target)
-	if err != nil {
-		return graph.Edge{}, nil, evidence.Record{}, err
-	}
-	fbNode, err := graph.NewNode(fbID, obs)
-	if err != nil {
-		return graph.Edge{}, nil, evidence.Record{}, err
-	}
-	fbItem, err := emitter.NewNodeItem(fbNode, map[string]any{
-		"name":              strings.ToUpper(target.Value()),
-		"target_type":       string(target.Type()),
-		"normalized_target": target.Value(),
-	})
-	if err != nil {
-		return graph.Edge{}, nil, evidence.Record{}, err
-	}
-
-	observedAt, err := graph.NewObservedAtEdge(srvID.Reference(), fbID.Reference(), obs, graph.Correlation{
-		MatchValue:     target.Value(),
-		FallbackReason: "no_resolver_configured",
-	})
-	if err != nil {
-		return graph.Edge{}, nil, evidence.Record{}, err
-	}
-
-	corrRec, err := evidence.NewCorrelationRecord(correlate.Evidence{
-		OriginalTarget:   host,
-		NormalizedTarget: target.Value(),
-		TargetType:       target.Type(),
-		Verified:         false,
-		Correlation: graph.Correlation{
-			MatchValue:     target.Value(),
-			FallbackReason: "no_resolver_configured",
-		},
-	}, obs)
-	if err != nil {
-		return graph.Edge{}, nil, evidence.Record{}, err
-	}
-
-	return observedAt, &fbItem, corrRec, nil
+	return observedAt, fallbackItem, corrRec, nil
 }
 
 func normalizeTargetURL(raw string) (string, error) {

@@ -1,9 +1,13 @@
 # LLMHound graph model
 
-> **Status: revised draft.** Companion to the
-> [design plan](../plans/2026-09-29-llmhound-design.md). Nothing is implemented
-> yet. Names are proposed; the extension schema must be validated against the
-> exact target BloodHound release ([M0](ce-compatibility.md)).
+> **Status: target design, partly implemented.** Companion to the
+> [design plan](../plans/2026-09-29-llmhound-design.md). M0 (CE 9.7.1 spike),
+> M1 (graph, identity, emitter, config, `extension/schema.json`) and the M2a
+> collectors are implemented on `QA`, but they follow the **earlier model**
+> (`CollectionVantage`, access edges, suffix correlation). This document
+> describes the target; the [Implementation delta](#implementation-delta) lists
+> exactly where the code differs. CE behavior is recorded in
+> [ce-compatibility.md](ce-compatibility.md).
 
 This is the **canonical home** for node/edge kinds, identity, attachment to
 existing nodes, the flat property contract, and the bar for traversable edges.
@@ -18,11 +22,17 @@ cleanup.
 
 ## Naming contract
 
-- **Kinds:** clean logical names (`OllamaInstance`, `MCPServer`, `ObservedAt`)
-  with no blanket collector prefix. M0 records whether the target CE requires
-  qualification; the logical → emitted mapping is documented centrally and used
-  by the schema, payloads, and saved queries. `NetworkEndpoint` (not `Host`)
-  avoids a likely collision.
+- **Kinds:** this document uses clean logical names (`OllamaInstance`,
+  `MCPServer`, `ObservedAt`). CE 9.7.1 requires a mandatory, exclusively owned
+  namespace prefix (M0 Q1), so emitted names are `LLMHound_<Kind>` (for example
+  `LLMHound_OllamaInstance`, `LLMHound_ObservedAt`, umbrella
+  `LLMHound_AIService`). `internal/graph/kinds.go` is the single mapping; the
+  schema, payloads, and saved queries use emitted names. Native kinds such as
+  `Computer` stay unqualified and are never emitted.
+- **Property names:** emit lowercase (CE property names are case-sensitive).
+  CE upper-cases node ids and the string values of `name`, so never put a
+  value that must keep its case in `name`; use a dedicated property such as
+  `host` or `endpoint`.
 - **Display names:** describe the instance, e.g. `Ollama · ai-server-01:11434`.
 - **Ownership:** extension/source metadata carries `LLMHound` and `source_kind`
   `LLMHound`. Never rely on kind-name prefixes.
@@ -112,6 +122,33 @@ names, versions, timestamps, and descriptions never enter identity; endpoints
 distinguishable only by excluded secret/query material need an explicit
 configured instance key.
 
+### Implemented identity v1
+
+`internal/graph/identity.go` hashes a JSON string-array tuple beginning with
+`["1", "LLMHound", deployment_scope, logical_kind, ...]`; the SHA-256 hex is
+upper-case to match CE's id normalization. Native node IDs are preserved
+verbatim, never hashed or rewritten. Resource ownership is the scoped concrete
+service ID; stable keys retain case and are not trimmed. `ParseEndpoint`
+(HTTP/HTTPS) normalizes as follows:
+
+- DNS names are ASCII (A-labels for international names), lower-case, without
+  one terminal dot; IPs use canonical `net/netip` spelling. Zoned IPs and
+  malformed numeric addresses are rejected, including names whose final label
+  is all digits or starts with `0x` (`example.123`, `0x7f.0.0.1`).
+- Omitted ports are 80/443; explicit default ports and leading-zero decimal
+  spellings normalize to the same effective port. Schemes stay distinct.
+- Empty path and `/` are equivalent. Unreserved percent escapes normalize to
+  literals; remaining escapes use upper-case hex; escaped `/` is not a
+  separator. Path case, non-root trailing slash, repeated slashes and dot
+  segments are preserved because server semantics may differ.
+- Userinfo and fragments fail closed. A query-bearing endpoint requires an
+  explicit **non-secret instance key** that enters identity; the query itself is
+  neither retained nor hashed. Mutable credentials or query values must not
+  become instance keys.
+
+`ParseTarget` accepts bare DNS/IP targets independently of service URLs.
+IP/FQDN coincidence, shared certificates, and redirects never unify identities.
+
 Repeated observations keep their ID. That does not prove an IP-backed
 installation stayed the same. Run IDs and observation times are provenance,
 never identity. One **vantage** (the configured `vantage_key`, e.g. the scanner
@@ -125,7 +162,8 @@ LLMHound does not attribute targets itself. Attribution is an input:
 - **Asset mapping file** (supplied by the normalization program): target (IP,
   FQDN, or `host:port`) → BloodHound `objectid` **and node kind**. The kind may
   be anything already in the graph: AD `Computer`, `AZVM`, an Entra device, and
-  so on.
+  so on. Each entry must point at a node that exists: the mapping is the
+  normalizer's assertion, and `upload` re-verifies it (below).
 - A mapped target gets `ObservedAt` (service → existing node) carrying
   `match_method = mapping_file`, `match_value`, and `mapping_source`
   (a mapping-file revision or ID supplied with the file). No `NetworkEndpoint`
@@ -136,8 +174,23 @@ LLMHound does not attribute targets itself. Attribution is an input:
 - Attachment is **an edge to an existing node, not an identity merge**.
   Service objectids never depend on it, native BloodHound IDs are never
   overwritten, and LLMHound never emits or modifies nodes of native kinds.
-- No suffix matching, reverse DNS, or CE lookup in LLMHound; those belong to
-  the normalizer.
+- No suffix matching, reverse DNS, or CE-side attribution in LLMHound; those
+  belong to the normalizer. (Suffix matching exists in the M1 code; see the
+  [delta](#implementation-delta).)
+- **Why existence matters (M0 Q5/Q6):** an edge to a missing `match_by: id`
+  endpoint makes CE create an empty, kindless **stub node**, and a property
+  match with zero or several hits is silently dropped. So an attachment edge is
+  emitted only for a mapping entry whose destination is verified, and `upload`
+  runs a read-only existence pre-flight against CE before sending the linking
+  payload, skipping and reporting entries that fail (M3).
+- **Upload shape (M0 Q5):** a payload that declares `metadata.source_kind`
+  tags every node it references, including existing `Computer`s, and source
+  cleanup then deletes them. So each scan uploads in two steps:
+  (1) the LLMHound-owned subgraph with `source_kind: LLMHound` (including
+  edges to `NetworkEndpoint`), then (2) a **linking payload without
+  `source_kind`** holding `ObservedAt` edges to existing native nodes.
+  Linking edges are therefore sourceless data, not removed by source cleanup;
+  the normalizer owns their lifecycle.
 
 ## Edges
 
@@ -155,6 +208,9 @@ All edges are non-traversable unless emitted by an enabled
 | `AdvertisesSkill` | A2AAgent → A2ASkill | Skill advertised, not invoked |
 | `UsesBackend` | service → service | Dependency reported by the source, not proof of backend access |
 | `Contains` | service → typed resource | Collection, workspace, model artifact, or artifact store association |
+
+Edges to existing native nodes are emitted in the sourceless linking payload
+described under [Attachment](#attachment-to-existing-nodes).
 
 Anonymous access is **not an edge**. It is recorded as flat properties
 (`anon_operations`, `auth_observed`) on the service or resource, scoped by
@@ -191,7 +247,7 @@ M0 answers):
 | Execution surface | `exec_surface` (array: `code_kernel`, `terminal`, `job_submit`, `code_eval`, `workflow_exec`, `tool_invocation`, `model_mutation`, `unknown`; only positively identified surfaces are listed), `exec_surface_basis` (`observed`/`declared`/`inferred`) |
 | Dependencies | `backend_refs` (sanitized array), `store_refs` (sanitized array), `backend_refs_basis` |
 | Inventory | `model_count`, `tool_count`, `resource_count`, `collection_count` (as applicable) |
-| Content | `system_prompt_present`, `config_collected`, `content_bytes`, `content_truncated`, `has_exposed_secret` (`true` or unset), `secret_types` (array); bodies and secret values never appear in the graph, see [Content and secrets](#content-and-secrets) |
+| Content | `system_prompt_present`, `config_collected`, `content_bytes`, `content_truncated`, `has_exposed_secret` (`true` or unset), `secret_last_confirmed`, `secret_types` (array); bodies and secret values never appear in the graph, see [Content and secrets](#content-and-secrets) |
 | TLS | `tls_verification` (`ok`/`failed`/`insecure_override`/`n_a`), `tls_failure_reason`, `tls_leaf_sha256`, `tls_issuer`, `tls_not_after` |
 | Provenance | `source`, `schema_version`, `scan_id`, `vantage_key`, `first_observed`, `last_observed`, `coverage`, `coverage_reason`, `mapping_source` |
 
@@ -207,6 +263,18 @@ behavior.
 Tool, prompt, and descriptor text is attacker-controlled. Bound its length,
 strip control characters, and treat it as untrusted by any consumer, including
 downstream LLM tooling.
+
+**CE constraints that shape this contract (M0 Q3, Q8):** properties must be
+strings, numbers, booleans, or homogeneous arrays of those (nested objects and
+mixed arrays are rejected at upload); node properties **merge** on re-upload and
+CE **never removes a stale property**. So every scan re-emits the full current
+value of each status property (`auth_observed`, `anon_operations`,
+`exec_surface`, `coverage`, and so on). The one exception is a flag that is
+only ever `true` or unset, such as `has_exposed_secret`: a later scan cannot
+unset it, so it is always accompanied by `secret_last_confirmed` (UTC time of
+the most recent scan that re-detected it), and consumers must read the flag
+together with that timestamp. Reconciliation of old values belongs to the
+normalizer.
 
 Missing version data is **unknown**. Record conflicting fingerprints rather
 than silently keeping the latest. Component, API, protocol, registry, and model
@@ -246,7 +314,8 @@ disabled globally or per surface in `llmhound.yaml`.
   `.content.jsonl` (file mode 0600), never into the OpenGraph payload or the
   shareable evidence sidecar. The graph carries only flags, sizes, and hashes
   (`system_prompt_present`, `config_collected`, `content_bytes`,
-  `content_truncated`, `has_exposed_secret`, `secret_types`).
+  `content_truncated`, `has_exposed_secret`, `secret_last_confirmed`,
+  `secret_types`).
 - **Secrets are a boolean, never a value.** A matched secret is recorded as
   presence only: type and location (path/field/line) in the evidence sidecar,
   and `has_exposed_secret = true` plus `secret_types` on the graph node. The raw
@@ -314,25 +383,54 @@ TCP probe, a version banner, or a shared certificate. Qualification never
 depends on FQDN matching or `RunsOn`.
 
 Rules live in `extension/rules/` as data with their own tests. A rule that
-cannot be validated against the pinned CE (traversability honored by
-pathfinding, M0 question 4) does not ship.
+cannot be validated against the pinned CE does not ship. M0 Q4 confirmed that
+pathfinding honors `is_traversable: false` and that raw search still returns
+non-traversable edges; that an `is_traversable: true` rule edge is honored by
+`only_traversable` pathfinding is still open (R5 in
+[ce-compatibility.md](ce-compatibility.md)).
 
 ## Source ownership and lifecycle
 
-LLMHound tags everything with `source_kind` `LLMHound`, stamps accurate
+LLMHound-owned nodes and edges carry `source_kind` `LLMHound` (the linking
+payload to native nodes deliberately does not; see
+[Attachment](#attachment-to-existing-nodes)). LLMHound stamps accurate
 observation times, scan ID, and coverage, and never claims removal: a failed,
 partial, or truncated scan is not evidence a service or child disappeared.
 Attribution, reconciliation, staleness, and cleanup belong to the
 normalization program. LLMHound never emits or modifies native-kind nodes.
 Resume retains original observation timestamps.
 
+## Implementation delta
+
+What is on `QA` today versus this target design. Docs that describe the
+implemented behavior as it stands, and remain accurate for the code, are
+[configuration](configuration.md), [m2a-integration](m2a-integration.md),
+[checkpoint-journal](checkpoint-journal.md),
+[jupyter-collector](jupyter-collector.md) and
+[ollama-collector](ollama-collector.md).
+
+| Area | Implemented on `QA` | Target |
+|---|---|---|
+| Access evidence | `CollectionVantage` node plus `UnauthenticatedAccess` / `PublicAccess` edges (`internal/graph`, emitter, schema) | Remove; flat `anon_operations` / `auth_observed` / `vantage_key` properties |
+| Attachment target kind | `Computer` only | Any existing native kind (`AZVM`, Entra devices, ...) |
+| Correlation | Mapping file plus AD-suffix property match against a caller-supplied verified inventory; `ad_domain_suffixes`, `reverse_dns`, `ce_lookup` config fields | Mapping file only; suffix, reverse DNS, and CE lookup superseded by the normalizer. Upload pre-flight verifies existence |
+| Sensitive content | `opt_ins.{resource_content,prompts,configuration_content,workspace_content}`, default false; no content reads | Content tier on by default and bounded (`content.*`), restricted `.content.jsonl`, `secrets` detector toggles |
+| Secret detection | None | High-precision detectors, `has_exposed_secret` / `secret_types` / `secret_last_confirmed` |
+| Flat property contract | The properties emitted today | The full [property contract](#property-contract) |
+| Traversability | `EdgeKind.IsTraversable()` is always false | Rule-gated `CanExecuteOn` (M2d) |
+| Upload | `upload` is a not-implemented stub (M3); the emitter already writes a sourceless linking payload | Two-step upload with existence pre-flight |
+
+Closing the delta is a code change; until then, trust the code for what a
+build does and this document for what it should do.
+
 ## Implementation acceptance checks
 
 - Identity goldens: scope separation, case-sensitive resource keys, virtual
   hosts, path-mounted services, repeat scans, IP/FQDN ambiguity.
 - Attachment: mapped target (any node kind), unmapped target, target mapped to
-  several objectids, service IDs unchanged by mapping, native kinds never
-  emitted.
+  several objectids, mapped destination missing from the graph (no stub node),
+  service IDs unchanged by mapping, native kinds never emitted, and the linking
+  payload carries no `source_kind`.
 - Access properties: `anon_operations` contains only successes; denied and
   unknown outcomes appear only in the sidecar; login pages, advertised tools,
   and TCP probes never create access claims.

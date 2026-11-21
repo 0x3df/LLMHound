@@ -1,0 +1,41 @@
+{
+  "graph": {
+    "nodes": [
+      {
+        "id": "m0-props-objectid",
+        "kinds": [
+          "LLMHound_M0UpsertProbe"
+        ],
+        "properties": {
+          "name": "M0 RESERVED OBJECTID PROBE",
+          "objectid": "SHOULD-FAIL"
+        }
+      },
+      {
+        "id": "m0-netep-1e",
+        "kinds": [
+          "LLMHound_NetworkEndpoint"
+        ],
+        "properties": {
+          "name": "M0 NETEP PROBE"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "kind": "LLMHound_ObservedAt",
+        "start": {
+          "match_by": "id",
+          "value": "m0-props-objectid"
+        },
+        "end": {
+          "match_by": "id",
+          "value": "m0-netep-1e"
+        }
+      }
+    ]
+  },
+  "metadata": {
+    "source_kind": "LLMHound"
+  }
+}

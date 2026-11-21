@@ -1,10 +1,15 @@
 # Collector capability matrix
 
-**Status: revised draft; not implemented.** This is the v1 collection contract
+**Status: M2a Jupyter, MCP, and Ollama collectors implemented and wired through
+`llmhound plan` / `llmhound scan` (`internal/scanner`).** This is the v1 collection contract
 for the [design](../plans/2026-09-29-llmhound-design.md) and
 [graph model](graph-model.md), not a claim that every product release exposes
 every field anonymously. Exact operations and supported releases must be verified
 against official product/protocol documentation and recorded in collector tests.
+Live CLI coverage vs package-only tests: [m2a-integration.md](m2a-integration.md).
+The content tier and secret detection described below are part of the target
+design and are not implemented yet; today's collectors are metadata-only (see
+the [implementation delta](graph-model.md#implementation-delta)).
 
 ## Default collection policy
 

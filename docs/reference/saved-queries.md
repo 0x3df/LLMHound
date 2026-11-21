@@ -8,6 +8,14 @@
 
 ## Conventions
 
+- **Emitted kind names.** The examples below use clean logical names for
+  readability. CE 9.7.1 requires the `LLMHound_` namespace prefix
+  ([M0 Q1](ce-compatibility.md)), so the shipped files are generated with
+  emitted names (`LLMHound_AIService`, `LLMHound_ObservedAt`,
+  `LLMHound_NetworkEndpoint`, ...) from `internal/graph/kinds.go`; native kinds
+  (`Computer`, `Group`, ...) stay unqualified. Property names are lowercase.
+- **Import format.** Shipped as `{name, query, description}` JSON files (zipped)
+  for `POST /api/v2/saved-queries/import` (M0 Q9).
 - **Product questions.** The first group answers the tier-0 pathing questions
   this project exists for. They are the acceptance spine for the property
   contract.

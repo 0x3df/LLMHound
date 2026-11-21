@@ -1,0 +1,33 @@
+{
+  "graph": {
+    "nodes": [
+      {
+        "id": "m0-upsert-1",
+        "kinds": [
+          "LLMHound_M0UpsertProbe"
+        ],
+        "properties": {
+          "name": "M0 UPSERT PROBE",
+          "description": "v2",
+          "keep_prop": "kept"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "kind": "LLMHound_ObservedAt",
+        "start": {
+          "match_by": "id",
+          "value": "m0-upsert-1"
+        },
+        "end": {
+          "match_by": "id",
+          "value": "m0-netep-1"
+        }
+      }
+    ]
+  },
+  "metadata": {
+    "source_kind": "LLMHound"
+  }
+}

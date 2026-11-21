@@ -1,0 +1,45 @@
+{
+  "graph": {
+    "nodes": [
+      {
+        "id": "m0-props-hetero",
+        "kinds": [
+          "LLMHound_M0UpsertProbe"
+        ],
+        "properties": {
+          "name": "M0 HETEROGENEOUS ARRAY PROBE",
+          "prop_hetero": [
+            "a",
+            1,
+            true
+          ]
+        }
+      },
+      {
+        "id": "m0-netep-1d",
+        "kinds": [
+          "LLMHound_NetworkEndpoint"
+        ],
+        "properties": {
+          "name": "M0 NETEP PROBE"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "kind": "LLMHound_ObservedAt",
+        "start": {
+          "match_by": "id",
+          "value": "m0-props-hetero"
+        },
+        "end": {
+          "match_by": "id",
+          "value": "m0-netep-1d"
+        }
+      }
+    ]
+  },
+  "metadata": {
+    "source_kind": "LLMHound"
+  }
+}

@@ -1,9 +1,11 @@
 # LLMHound — Design
 
 **Date:** 2026-09-29 (revised 2026-11-20)
-**Status:** Revised draft — reframed around tier-0 pathing, exact-objectid
-attachment, flat property contract, and path-qualification rules; nothing
-implemented. M0 runs before further model design.
+**Status:** Target design, reframed around tier-0 pathing, exact-objectid
+attachment, a flat property contract, and path-qualification rules. M0, M1 and
+M2a are implemented on `QA` against the earlier model; where the code differs
+from this document, see the
+[implementation delta](../reference/graph-model.md#implementation-delta).
 
 ## Purpose
 
@@ -228,8 +230,12 @@ properties.
 
 1. SharpHound/AzureHound collection and the normalizer's asset mapping run first.
 2. `llmhound scan --config llmhound.yaml` → payload + sidecar.
-3. `llmhound upload --server … --token-file …` registers the schema, uploads the
-   payload, and imports saved queries (or the existing ingest picks up the files).
+3. `llmhound upload --server … --token-file …` (M3) registers the schema, then
+   uploads in **two steps** (M0 Q5): the LLMHound-owned subgraph with
+   `source_kind`, then a linking payload to existing native nodes **without**
+   it, after a read-only existence pre-flight (missing endpoints would create
+   stub nodes). It then imports saved queries. Or the existing ingest picks up
+   the emitted files.
 
 ### BloodHound adapter validation gate
 
@@ -275,23 +281,26 @@ remains available.
 
 ## Milestones
 
-0. **M0 — CE compatibility spike (first; freezes model design until done):**
-   pinned CE with SharpHound/AzureHound sample data; toy extension and payload;
-   answer [`ce-compatibility.md`](../reference/ce-compatibility.md), notably
-   array properties, traversable vs non-traversable edge behavior in
-   pathfinding and raw Cypher, attachment by objectid, missing-node behavior,
-   tier-0 tag semantics, and headline-query performance. M1's schema is written
-   from these answers.
-1. **M1 — Skeleton + graph + emitter:** CLI, `llmhound.yaml` loader, targets,
-   graph model, mapping-file attachment, emitter + sidecar, property contract,
-   schema, content-tier bounds and content-file writer, secret-detector
-   framework, `LICENSE`, golden tests. Readiness: identity fixtures,
-   attachment fixtures, property-contract tests, and the M0-recorded
-   capabilities.
-2. **M2a — Vertical slice:** discovery with data-driven fingerprints, checkpoint
-   journal interface, `llmhound plan`, and MCP, Ollama, Jupyter collectors to
-   payload, the first secret detectors (each with a zero-false-positive
-   corpus), and headline queries P1, P2, and P6 working on sample data.
+0. **M0 — CE compatibility spike (done):** pinned CE 9.7.1 + PostgreSQL 18.6
+   lab (`lab/`) with toy extension and payloads; answers recorded in
+   [`ce-compatibility.md`](../reference/ce-compatibility.md). Key results: kinds
+   need the `LLMHound_` prefix; arrays of primitives are accepted; pathfinding
+   honors non-traversable edges; a `source_kind` payload tags referenced
+   native nodes (hence the two-step upload); missing endpoints create stub
+   nodes; CE merges properties and never removes stale ones. Follow-ups
+   R1–R9 from the redesign (tier-0 tags, typed-kind path performance,
+   AzureHound node resolution, array overwrite, traversable rule edges) are
+   open.
+1. **M1 — Skeleton + graph + emitter (implemented, earlier model):** CLI,
+   `llmhound.yaml` loader, targets, graph identity, emitter + sidecar, schema,
+   golden tests. Remaining for the redesign: mapping-file-only attachment to any
+   native kind, flat property contract, content-tier bounds and content-file
+   writer, secret-detector framework.
+2. **M2a — Vertical slice (implemented):** discovery with data-driven
+   fingerprints, checkpoint journal, `llmhound plan`/`scan`, and MCP, Ollama,
+   Jupyter collectors to payload. Remaining for the redesign: the first secret
+   detectors (each with a zero-false-positive corpus) and headline queries P1,
+   P2, and P6 working on sample data.
 3. **M2b — Remaining core surfaces:** A2A, vLLM, LiteLLM, Qdrant, MLflow, Open
    WebUI, LangServe.
 4. **M2c — Long tail:** `OpenAICompatibleEndpoint` (used whenever a specific
@@ -308,9 +317,10 @@ remains available.
    Langflow follow), each with documentation references, version ranges,
    fixtures, and fail-closed tests. If M0 shows rule-enabled traversal cannot
    be verified, this milestone does not ship.
-6. **M3 — Resume + upload:** resume, CE API client, saved queries, end-to-end
-   against a CE instance, and the adapter validation gate against a recorded
-   exact CE version/schema.
+6. **M3 — Resume + upload:** resume, CE API client with two-step upload and
+   existence pre-flight, saved queries, end-to-end against a CE instance, and
+   the adapter validation gate re-running `lab/scripts/run-m0-checks.sh`
+   against the candidate CE version/schema.
 7. **M4 — Credentials (future):** authenticated enumeration and richer evidence.
 8. **M5 — Library listing (future, secondary):** README polish, node/edge
    description docs, submission to the BloodHound docs repo.

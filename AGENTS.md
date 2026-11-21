@@ -32,13 +32,15 @@ listed on the SpecterOps OpenGraph community library page
 | Doc | Role |
 |---|---|
 | `docs/plans/2026-09-29-llmhound-design.md` | Design (revised draft) — purpose, architecture, behavior, testing, milestones. **Source of truth for architecture and milestones.** |
-| `docs/reference/graph-model.md` | Node/edge kinds, identity, attachment, flat property contract, path qualification. **Canonical for the model.** |
+| `docs/reference/graph-model.md` | Node/edge kinds, identity, attachment, flat property contract, content/secrets, path qualification, and the **implementation delta** (code vs target). **Canonical for the model.** |
 | `docs/reference/collector-capabilities.md` | Per-surface allowlisted checks and per-check outcome contract. |
-| `docs/reference/ce-compatibility.md` | M0 spike questions and recorded CE answers. |
+| `docs/reference/ce-compatibility.md` | M0 results on CE 9.7.1 (answered) plus open questions from the tier-0 redesign. |
 | `docs/reference/saved-queries.md` | Starter saved queries (drive which properties must be queryable). |
-| `README.md` | Public-facing overview. |
+| `README.md` | Public-facing overview; implemented CLI vs planned collector behavior. |
+| `docs/reference/configuration.md` | Working CLI/configuration/target-input and M2a plan/scan contract, limits, build and test commands (describes the code as it stands). |
+| `docs/reference/m2a-integration.md` | M2a live CLI vs unit-test coverage and remaining gaps. |
 | `docs/plans/.future/` | Parked ideas only. Not a roadmap; nothing there is in scope. |
-| `extension/schema.json`, `extension/saved_searches/` | Not yet created (M1/M3). |
+| `extension/schema.json` | OpenGraph extension schema (M1). `extension/saved_searches/` is not yet created (M3). |
 
 ## Decisions already made (do not relitigate without cause)
 
@@ -57,10 +59,9 @@ listed on the SpecterOps OpenGraph community library page
    Rejected as taken: AgentHound (reference project), MCPHound (3 existing
    MCP scanners), AIHound (Netwrix extension), PromptHound, ContextHound,
    AgenticHound. A single extension covers all surfaces (an LLMHound/MCP
-   split was considered and declined). Kinds use clean logical names
-   (`OllamaInstance`, `ProvidesModel`) with no blanket prefix; whether any
-   qualification is needed is decided by the M0 spike and recorded in
-   `ce-compatibility.md`.
+   split was considered and declined). Docs and code use clean logical names;
+   M0 requires emitted `LLMHound_<Kind>` names on CE 9.7.1. The central mapping
+   is `internal/graph/kinds.go`; details are in `ce-compatibility.md`.
 4. **Graph model** per `docs/reference/graph-model.md`. **Nothing is
    traversable by default**; the existing AD/Azure edges provide paths and
    LLMHound supplies the AI-service target set and context. A traversable edge
@@ -69,13 +70,17 @@ listed on the SpecterOps OpenGraph community library page
    flat, queryable data (min-max): identity/version, auth posture, execution
    surface, dependencies, inventory, TLS, each labeled observed/declared/
    inferred. Anonymous access is **properties**, not edges; there is no
-   `CollectionVantage` node. Deterministic SHA-256 objectids scoped by
+   `CollectionVantage` node (the M1 code still has one; see the delta). Deterministic SHA-256 objectids scoped by
    deployment. **Attachment:** services attach via `ObservedAt` to an existing
    BloodHound node of any kind (Computer, AZVM, …) using an externally supplied
    asset mapping (target → objectid + kind); unmapped targets get a fallback
    `NetworkEndpoint` for the normalizer. No suffix/reverse-DNS/CE-lookup
    matching in LLMHound. Attachment is an edge, never an identity merge; native
-   IDs are never overwritten and native-kind nodes are never emitted.
+   IDs are never overwritten and native-kind nodes are never emitted. **Upload
+   is two-step (M0 Q5):** owned subgraph with `source_kind`, then a linking
+   payload to native nodes **without** it, because a `source_kind` payload tags
+   referenced Computers and source cleanup would delete them. Missing endpoints
+   create stub nodes, so attachment requires verified existence.
 5. **Reference environment:** BloodHound CE on PostgreSQL at a pinned,
    validated version; upload via API (`POST /api/v2/login`,
    `PUT /api/v2/extensions`, `POST /api/v2/file-upload`,
@@ -98,8 +103,11 @@ listed on the SpecterOps OpenGraph community library page
    generally are precision-first; ambiguous stays unknown. LLMHound never
    guesses, tests, validates, or uses credentials (M4). See
    `graph-model.md#content-and-secrets`.
-9. **Sequencing:** M0 (CE spike) runs before further model design. The model
-   docs are a draft until `ce-compatibility.md` is answered.
+9. **Code vs design:** M0, M1 and M2a are implemented on `QA` against the
+   *earlier* model (`CollectionVantage`, access edges, suffix correlation,
+   `opt_ins` default off). The docs describe the redesigned target;
+   `graph-model.md#implementation-delta` lists exactly where the code differs.
+   Closing that delta is a code change and should land as its own PR.
 10. **Doc ownership:** one canonical home per rule — model, property contract,
     content/secrets, and path qualification in `graph-model.md`; checks and
     outcomes in `collector-capabilities.md`. Other docs link; do not restate.
@@ -125,17 +133,22 @@ listed on the SpecterOps OpenGraph community library page
 
 0. **M0 — CE compatibility spike:** pinned CE in docker-compose with
    SharpHound/AzureHound sample data; toy extension + payload; answer the
-   questions in `ce-compatibility.md` (kind namespacing, multi-label, array
-   properties, traversable/non-traversable behavior in pathfinding and raw
-   Cypher, attachment by objectid, missing-node behavior, tier-0 tags, query
-   performance). *Next up.*
+   questions in `ce-compatibility.md` (kind namespacing, multi-label, property types,
+   non-traversable edges, `source_kind` cleanup, property-matched edges).
+   **Complete** on CE 9.7.1; follow-ups R1–R9 from the redesign (tier-0 tags,
+   typed-kind path performance, AzureHound node resolution, array overwrite,
+   traversable rule edges, stale-property refresh) are open in
+   `ce-compatibility.md`.
 1. **M1 — Skeleton + graph + emitter:** CLI (cobra), `llmhound.yaml` loader,
    targets, graph model, mapping-file attachment, OpenGraph emitter + evidence
-   sidecar, content file + secret-detector framework, property contract,
-   `extension/schema.json`, `LICENSE`, golden-file tests.
+   sidecar, `extension/schema.json`, golden-file tests. **Implemented** (earlier
+   model). Still to add for the redesign: content file + secret-detector
+   framework, full property contract.
 2. **M2a — Vertical slice:** discovery, checkpoint journal interface, and
-   MCP, Ollama, Jupyter collectors end-to-end to payload, plus the first secret
-   detectors (zero-FP corpora).
+   MCP, Ollama, Jupyter collectors end-to-end to payload. **Complete on QA
+   path:** `llmhound plan`/`scan` wired via `internal/scanner`; see
+   `docs/reference/m2a-integration.md`. Still to add: the first secret detectors
+   (zero-FP corpora).
 3. **M2b — Remaining core surfaces:** A2A, vLLM, LiteLLM, Qdrant, MLflow,
    Open WebUI, LangServe.
 4. **M2c — Long tail:** generic `OpenAICompatibleEndpoint`, Ray dashboard,
@@ -152,10 +165,24 @@ listed on the SpecterOps OpenGraph community library page
 ## Working conventions
 
 - Repo: `~/Projects/LLMHound`.
-- Default branch is `QA`; small committed steps; docs live under `docs/`.
+- Integration branch `QA` for implementation; PRs target `QA`, not `main`.
+  Small committed steps; docs live under `docs/`.
+- CLI/input and M2a scan orchestration: `docs/reference/configuration.md` and
+  `docs/reference/m2a-integration.md`. `targets` and `plan` are offline; `scan`
+  enumerates Jupyter/MCP/Ollama; `upload`/resume remain M3 stubs.
 - Discovery ports/paths are data-driven fingerprint definitions (embedded,
-  overridable). Baseline: Ollama 11434, vLLM 8000, MLflow 5000, Jupyter 8888,
+  overridable via `--discovery-file`). Baseline: Ollama 11434, vLLM 8000, MLflow 5000, Jupyter 8888,
   Qdrant 6333, Open WebUI 3000/8080, LiteLLM 4000, MCP/A2A on 80/443/8080 +
   well-known paths.
 - Design decisions follow the brainstorming-first process: design docs in
   `docs/plans/` before code.
+- M0 results live in `docs/reference/ce-compatibility.md`; the reproducible lab
+  and check suite are in `lab/` (see `lab/README.md`).
+- Test locally without external targets: `go test -race ./...` and `go vet ./...`.
+
+## Maintaining this file
+
+Keep this file for knowledge useful to almost every future agent session in this project.
+Do not repeat what the codebase already shows; point to the authoritative file or command instead.
+Prefer rewriting or pruning existing entries over appending new ones.
+When updating this file, preserve this bar for all agents and keep entries concise.

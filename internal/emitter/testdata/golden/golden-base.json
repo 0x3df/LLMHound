@@ -1,0 +1,94 @@
+{
+  "metadata": {
+    "source_kind": "LLMHound"
+  },
+  "graph": {
+    "nodes": [
+      {
+        "id": "C52A42573EF9FFDBA2C0AB4CCFC353851F5C3A2D5BA45E2B40745991D21B4460",
+        "kinds": [
+          "LLMHound_CollectionVantage"
+        ],
+        "properties": {
+          "coverage": "complete",
+          "evidence_id": "ev-golden-001",
+          "name": "VANTAGE-DC01",
+          "observed_at": "2026-10-01T12:00:00Z",
+          "scan_id": "golden-scan-001",
+          "vantage_key": "vantage-dc01"
+        }
+      },
+      {
+        "id": "B32E6924F96ACFD7959832FF1E1D6F78CB373DF925F868571ED161AF7355D30D",
+        "kinds": [
+          "LLMHound_OllamaInstance",
+          "LLMHound_AIService"
+        ],
+        "properties": {
+          "coverage": "complete",
+          "endpoint_host": "ollama.corp.local",
+          "endpoint_port": 11434,
+          "evidence_id": "ev-golden-001",
+          "name": "OLLAMA · ollama.corp.local:11434",
+          "observed_at": "2026-10-01T12:00:00Z",
+          "product": "Ollama",
+          "scan_id": "golden-scan-001",
+          "software_version": "0.3.12",
+          "vendor": "Ollama"
+        }
+      },
+      {
+        "id": "8DA0477E7BDB265C2DACBEAA9D6ACE1E2CAA4803D5675B69E7137459270216A9",
+        "kinds": [
+          "LLMHound_AIModel"
+        ],
+        "properties": {
+          "coverage": "complete",
+          "digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+          "evidence_id": "ev-golden-001",
+          "name": "LLAMA3:LATEST",
+          "observed_at": "2026-10-01T12:00:00Z",
+          "scan_id": "golden-scan-001"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "kind": "LLMHound_UnauthenticatedAccess",
+        "start": {
+          "match_by": "id",
+          "value": "C52A42573EF9FFDBA2C0AB4CCFC353851F5C3A2D5BA45E2B40745991D21B4460"
+        },
+        "end": {
+          "match_by": "id",
+          "value": "B32E6924F96ACFD7959832FF1E1D6F78CB373DF925F868571ED161AF7355D30D"
+        },
+        "properties": {
+          "check_id": "ollama_tags_check",
+          "evidence_id": "ev-golden-001",
+          "observed_at": "2026-10-01T12:00:00Z",
+          "operation": "ollama_tags",
+          "outcome": "success",
+          "reason": "tags listed anonymously",
+          "scan_id": "golden-scan-001"
+        }
+      },
+      {
+        "kind": "LLMHound_ProvidesModel",
+        "start": {
+          "match_by": "id",
+          "value": "B32E6924F96ACFD7959832FF1E1D6F78CB373DF925F868571ED161AF7355D30D"
+        },
+        "end": {
+          "match_by": "id",
+          "value": "8DA0477E7BDB265C2DACBEAA9D6ACE1E2CAA4803D5675B69E7137459270216A9"
+        },
+        "properties": {
+          "evidence_id": "ev-golden-001",
+          "observed_at": "2026-10-01T12:00:00Z",
+          "scan_id": "golden-scan-001"
+        }
+      }
+    ]
+  }
+}

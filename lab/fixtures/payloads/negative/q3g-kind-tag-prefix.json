@@ -1,0 +1,40 @@
+{
+  "graph": {
+    "nodes": [
+      {
+        "id": "m0-tagprobe",
+        "kinds": [
+          "tag_probe_kind"
+        ],
+        "properties": {
+          "name": "M0 TAG PREFIX PROBE"
+        }
+      },
+      {
+        "id": "m0-netep-1g",
+        "kinds": [
+          "LLMHound_NetworkEndpoint"
+        ],
+        "properties": {
+          "name": "M0 NETEP PROBE"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "kind": "LLMHound_ObservedAt",
+        "start": {
+          "match_by": "id",
+          "value": "m0-tagprobe"
+        },
+        "end": {
+          "match_by": "id",
+          "value": "m0-netep-1g"
+        }
+      }
+    ]
+  },
+  "metadata": {
+    "source_kind": "LLMHound"
+  }
+}

@@ -1,0 +1,263 @@
+{
+  "schema": {
+    "name": "LLMHound",
+    "display_name": "LLMHound",
+    "version": "v0.1.0",
+    "namespace": "LLMHound"
+  },
+  "node_kinds": [
+    {
+      "name": "LLMHound_NetworkEndpoint",
+      "display_name": "Network Endpoint",
+      "description": "Fallback node for an observed IP or FQDN target that did not correlate to an existing AD Computer.",
+      "is_display_kind": true,
+      "icon": "server",
+      "color": "#64748B"
+    },
+    {
+      "name": "LLMHound_CollectionVantage",
+      "display_name": "Collection Vantage",
+      "description": "Configured scanner or network context from which observations were made. Not an attacker principal.",
+      "is_display_kind": true,
+      "icon": "network-wired",
+      "color": "#6366F1"
+    },
+    {
+      "name": "LLMHound_AIService",
+      "display_name": "AI Service",
+      "description": "Umbrella label carried by concrete AI service nodes; does not own identity.",
+      "is_display_kind": false
+    },
+    {
+      "name": "LLMHound_MCPServer",
+      "display_name": "MCP Server",
+      "description": "Fingerprinted Model Context Protocol server endpoint.",
+      "is_display_kind": true,
+      "icon": "plug",
+      "color": "#10B981"
+    },
+    {
+      "name": "LLMHound_MCPTool",
+      "display_name": "MCP Tool",
+      "description": "Tool advertised by an MCP server; enumerated, not executed.",
+      "is_display_kind": false
+    },
+    {
+      "name": "LLMHound_MCPResource",
+      "display_name": "MCP Resource",
+      "description": "Resource advertised by an MCP server; enumerated, not necessarily read.",
+      "is_display_kind": false
+    },
+    {
+      "name": "LLMHound_MCPPrompt",
+      "display_name": "MCP Prompt",
+      "description": "Prompt template advertised by an MCP server.",
+      "is_display_kind": false
+    },
+    {
+      "name": "LLMHound_A2AAgent",
+      "display_name": "A2A Agent",
+      "description": "Agent advertised by an A2A agent card.",
+      "is_display_kind": true,
+      "icon": "robot",
+      "color": "#8B5CF6"
+    },
+    {
+      "name": "LLMHound_A2ASkill",
+      "display_name": "A2A Skill",
+      "description": "Skill advertised by an A2A agent; advertised, not invoked.",
+      "is_display_kind": false
+    },
+    {
+      "name": "LLMHound_OllamaInstance",
+      "display_name": "Ollama Instance",
+      "description": "Fingerprinted Ollama service endpoint.",
+      "is_display_kind": true,
+      "icon": "cube",
+      "color": "#F97316"
+    },
+    {
+      "name": "LLMHound_VLLMInstance",
+      "display_name": "vLLM Instance",
+      "description": "Fingerprinted vLLM service endpoint.",
+      "is_display_kind": true,
+      "icon": "bolt",
+      "color": "#EC4899"
+    },
+    {
+      "name": "LLMHound_LiteLLMGateway",
+      "display_name": "LiteLLM Gateway",
+      "description": "Fingerprinted LiteLLM proxy and gateway endpoint.",
+      "is_display_kind": true,
+      "icon": "share-nodes",
+      "color": "#06B6D4"
+    },
+    {
+      "name": "LLMHound_QdrantInstance",
+      "display_name": "Qdrant Instance",
+      "description": "Fingerprinted Qdrant vector database endpoint.",
+      "is_display_kind": true,
+      "icon": "database",
+      "color": "#DC2626"
+    },
+    {
+      "name": "LLMHound_MLflowServer",
+      "display_name": "MLflow Server",
+      "description": "Fingerprinted MLflow tracking and model registry server endpoint.",
+      "is_display_kind": true,
+      "icon": "chart-line",
+      "color": "#2563EB"
+    },
+    {
+      "name": "LLMHound_JupyterServer",
+      "display_name": "Jupyter Server",
+      "description": "Fingerprinted Jupyter notebook server endpoint.",
+      "is_display_kind": true,
+      "icon": "book-open",
+      "color": "#D97706"
+    },
+    {
+      "name": "LLMHound_OpenWebUIInstance",
+      "display_name": "Open WebUI Instance",
+      "description": "Fingerprinted Open WebUI frontend and service endpoint.",
+      "is_display_kind": true,
+      "icon": "window-maximize",
+      "color": "#059669"
+    },
+    {
+      "name": "LLMHound_LangServeApp",
+      "display_name": "LangServe App",
+      "description": "Fingerprinted LangServe application endpoint.",
+      "is_display_kind": true,
+      "icon": "link",
+      "color": "#7C3AED"
+    },
+    {
+      "name": "LLMHound_OpenAICompatibleEndpoint",
+      "display_name": "OpenAI Compatible Endpoint",
+      "description": "Generic OpenAI-compatible API endpoint when no specific runtime product can be proven.",
+      "is_display_kind": true,
+      "icon": "microchip",
+      "color": "#4B5563"
+    },
+    {
+      "name": "LLMHound_RayDashboard",
+      "display_name": "Ray Dashboard",
+      "description": "Fingerprinted Ray cluster dashboard endpoint.",
+      "is_display_kind": true,
+      "icon": "sun",
+      "color": "#0284C7"
+    },
+    {
+      "name": "LLMHound_LangflowInstance",
+      "display_name": "Langflow Instance",
+      "description": "Fingerprinted Langflow visual AI framework endpoint.",
+      "is_display_kind": true,
+      "icon": "diagram-project",
+      "color": "#9333EA"
+    },
+    {
+      "name": "LLMHound_FlowiseInstance",
+      "display_name": "Flowise Instance",
+      "description": "Fingerprinted Flowise UI workflow endpoint.",
+      "is_display_kind": true,
+      "icon": "sitemap",
+      "color": "#4F46E5"
+    },
+    {
+      "name": "LLMHound_ChromaInstance",
+      "display_name": "Chroma Instance",
+      "description": "Fingerprinted Chroma vector store endpoint.",
+      "is_display_kind": true,
+      "icon": "layer-group",
+      "color": "#E11D48"
+    },
+    {
+      "name": "LLMHound_AIModel",
+      "display_name": "AI Model",
+      "description": "Model served or advertised by an AI runtime.",
+      "is_display_kind": false
+    },
+    {
+      "name": "LLMHound_VectorCollection",
+      "display_name": "Vector Collection",
+      "description": "Collection within a vector database.",
+      "is_display_kind": false
+    },
+    {
+      "name": "LLMHound_WorkspaceFile",
+      "display_name": "Workspace File",
+      "description": "Notebook or file enumerated from a workspace or server.",
+      "is_display_kind": false
+    },
+    {
+      "name": "LLMHound_ModelArtifact",
+      "display_name": "Model Artifact",
+      "description": "Registered model artifact or version in an ML registry.",
+      "is_display_kind": false
+    },
+    {
+      "name": "LLMHound_ArtifactStore",
+      "display_name": "Artifact Store",
+      "description": "Storage root or bucket reported by an ML tracking server.",
+      "is_display_kind": false
+    }
+  ],
+  "relationship_kinds": [
+    {
+      "name": "LLMHound_ObservedAt",
+      "description": "Fingerprinted service was observed through this target (correlated Computer or fallback NetworkEndpoint).",
+      "is_traversable": false
+    },
+    {
+      "name": "LLMHound_RunsOn",
+      "description": "Reserved for supported runtime placement; listening at an address alone is insufficient.",
+      "is_traversable": false
+    },
+    {
+      "name": "LLMHound_ProvidesTool",
+      "description": "Tool enumerated from an MCP server; not executed.",
+      "is_traversable": false
+    },
+    {
+      "name": "LLMHound_ProvidesResource",
+      "description": "Resource enumerated from an MCP server; not necessarily read.",
+      "is_traversable": false
+    },
+    {
+      "name": "LLMHound_ProvidesPrompt",
+      "description": "Prompt template enumerated from an MCP server.",
+      "is_traversable": false
+    },
+    {
+      "name": "LLMHound_ProvidesModel",
+      "description": "Model advertised by an AI runtime; inference not implied.",
+      "is_traversable": false
+    },
+    {
+      "name": "LLMHound_AdvertisesSkill",
+      "description": "Skill advertised by an A2A agent; not invoked.",
+      "is_traversable": false
+    },
+    {
+      "name": "LLMHound_UsesBackend",
+      "description": "Explicit backend dependency reported by the service; not proof of backend access.",
+      "is_traversable": false
+    },
+    {
+      "name": "LLMHound_Contains",
+      "description": "Collection, workspace file, model artifact, or reported artifact store association.",
+      "is_traversable": false
+    },
+    {
+      "name": "LLMHound_UnauthenticatedAccess",
+      "description": "A specific enumeration operation succeeded without credentials from the recorded vantage.",
+      "is_traversable": false
+    },
+    {
+      "name": "LLMHound_PublicAccess",
+      "description": "A specific sensitive resource read succeeded without credentials from the recorded vantage.",
+      "is_traversable": false
+    }
+  ]
+}

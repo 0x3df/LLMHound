@@ -1,0 +1,40 @@
+{
+  "graph": {
+    "nodes": [
+      {
+        "id": "m0-match-q6c",
+        "kinds": [
+          "LLMHound_OllamaInstance"
+        ],
+        "properties": {
+          "name": "M0 LINK PROBE WITH SOURCEKIND"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "kind": "LLMHound_ObservedAt",
+        "start": {
+          "match_by": "id",
+          "value": "m0-match-q6c"
+        },
+        "end": {
+          "match_by": "property",
+          "kind": "Computer",
+          "property_matchers": [
+            {
+              "key": "name",
+              "operator": "equals",
+              "value": "NO-SUCH-HOST.LAB.LOCAL"
+            }
+          ]
+        },
+        "properties": {
+          "match_method": "fqdn_suffix",
+          "match_value": "NO-SUCH-HOST.LAB.LOCAL",
+          "confidence": "candidate"
+        }
+      }
+    ]
+  }
+}

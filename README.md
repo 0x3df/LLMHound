@@ -29,19 +29,29 @@ asset mapping + targets → network scan → OpenGraph payload + evidence sideca
 ```
 
 > [!NOTE]
-> **Status: revised design draft.** Nothing is implemented yet. The design is
-> [`docs/plans/2026-09-29-llmhound-design.md`](docs/plans/2026-09-29-llmhound-design.md);
-> see [Roadmap](#roadmap). Commands and flags below are planned and may change.
+> **Status: M0, M1 and the M2a slice are implemented on `QA`.** Offline
+> `targets` and `plan`, plus `scan` for Jupyter, MCP, and Ollama, write
+> OpenGraph payloads, evidence sidecars, and checkpoint journals. `upload`,
+> resume, and the remaining surfaces are later milestones. The implemented
+> code follows an earlier model (`CollectionVantage`, access edges, suffix
+> correlation, content opt-ins off); this README and the
+> [design](docs/plans/2026-09-29-llmhound-design.md) describe the **target**,
+> and the [implementation delta](docs/reference/graph-model.md#implementation-delta)
+> lists where the code differs. See [configuration](docs/reference/configuration.md),
+> the [M2a integration note](docs/reference/m2a-integration.md), the
+> [M0 lab](lab/README.md), and the [Roadmap](#roadmap).
 
 ## Contents
 
 - [What it finds](#what-it-finds)
 - [How it works](#how-it-works)
 - [BloodHound integration](#bloodhound-integration)
-- [Quick start (planned)](#quick-start-planned)
+- [Quick start](#quick-start)
+- [Collection workflow](#collection-workflow)
 - [Operational model](#operational-model)
 - [Responsible use](#responsible-use)
 - [Roadmap](#roadmap)
+- [Development validation](#development-validation)
 - [Licensing](#licensing)
 
 ## What it finds
@@ -58,7 +68,9 @@ samples), within size caps. Exposed secrets are reported only as a presence
 flag, never a value, and only when a high-precision detector is certain;
 otherwise the field stays unset. Content bodies go to a separate restricted
 file, never into the graph. LLMHound never guesses, tests, or uses credentials.
-The [capability matrix](docs/reference/collector-capabilities.md)
+(The content tier and secret detection are target design; the M2a collectors
+currently collect metadata only.) The
+[capability matrix](docs/reference/collector-capabilities.md)
 defines each surface's checks; availability varies by product, version, and
 deployment, so collection is not guaranteed.
 
@@ -86,8 +98,11 @@ keychains on the machine it runs on or on any target.
 
 1. **Targets.** CIDR ranges and/or a targets file of IPs and FQDNs,
    deduplicated.
-2. **Discovery.** Bounded TCP probes against known AI-service ports, then HTTP
-   path fingerprinting. Fingerprints are data-driven definitions you can extend.
+2. **Discovery.** Data-driven HTTP path fingerprints (`internal/discovery`)
+   type services on known default ports; definitions are embedded and
+   overridable via `--discovery-file`. A scan probes each configured surface
+   once and collects only on a match; unreachable or unmatched surfaces are
+   journaled as failed coverage.
 3. **Enumeration.** A read-only collector per surface. Each records coverage
    (`complete`, `partial`, `failed`, `truncated`) and, per check, an outcome
    (`success`, `denied`, `unsupported`, `failed`, `skipped`) with a reason.
@@ -109,6 +124,8 @@ keychains on the machine it runs on or on any target.
 Targets **BloodHound CE with PostgreSQL**. Support requires validation of the
 exact CE version, OpenGraph schema, and API capabilities.
 
+- **Extension schema.** `extension/schema.json` registers `LLMHound_`-prefixed
+  kinds (for example `LLMHound_OllamaInstance`), as CE 9.7.1 requires.
 - **Attached to your existing nodes.** `ObservedAt` links a service to the node
   it was mapped to. Attachment is an edge, not an identity merge; LLMHound never
   overwrites native BloodHound IDs or emits native node kinds.
@@ -118,9 +135,12 @@ exact CE version, OpenGraph schema, and API capabilities.
 - **Traversability.** Off by default. Opt-in rules may add `CanExecuteOn`
   edges only where documented product semantics plus observed anonymous
   evidence qualify. See the bar in the graph model.
-- **Provenance.** Everything is tagged `source_kind` `LLMHound` with scan ID,
-  vantage key, and observation time. Reconciliation and cleanup belong to your
-  normalizer.
+- **Provenance and upload shape.** LLMHound-owned nodes and edges are tagged
+  `source_kind` `LLMHound` with scan ID, vantage key, and observation time.
+  Edges to your existing nodes go in a separate linking payload **without**
+  `source_kind`, because CE 9.7.1 would otherwise tag your Computers and delete
+  them on source cleanup. Reconciliation and cleanup of those links belong to
+  your normalizer.
 - **Starter queries.** Saved Cypher searches in `extension/saved_searches/`,
   led by the tier-0 pathing questions; see the
   [planned list](docs/reference/saved-queries.md).
@@ -128,29 +148,65 @@ exact CE version, OpenGraph schema, and API capabilities.
 The node and edge model, identity, and property contract are in
 [`docs/reference/graph-model.md`](docs/reference/graph-model.md).
 
-## Quick start (planned)
+## Quick start
+
+Requires Go 1.27 or newer (tested with 1.27.1):
+
+```bash
+CGO_ENABLED=0 go build -o llmhound ./cmd/llmhound
+./llmhound --help
+./llmhound targets --config llmhound.example.yaml
+# 192.0.2.2
+# 192.0.2.3
+# ai.example.test
+
+# Offline targets × checks inventory (no traffic)
+./llmhound plan --config llmhound.example.yaml
+
+# Scan prepared targets (writes journal + OpenGraph + evidence sidecar)
+./llmhound scan --config llmhound.example.yaml --output-dir ./out --prefix lab
+
+go test -race ./...
+go vet ./...
+```
+
+`targets` validates required deployment scope/vantage and bounds, expands
+bounded IP/FQDN/CIDR inputs, deduplicates, removes exact-name/IP/CIDR
+exclusions, and prints sorted targets without DNS or target traffic. `plan`
+prints the allowlisted check inventory without contacting targets. `scan`
+discovers and enumerates Jupyter/MCP/Ollama on prepared targets. Copy
+`llmhound.example.yaml` to `llmhound.yaml` and replace the example
+scope/vantage and inputs. Explicit flags replace only their own fields. See
+[configuration and limits](docs/reference/configuration.md) for precedence,
+path resolution, strict input rules, and policy bounds.
+
+## Collection workflow
 
 ```bash
 # Review what a scan would do (targets × checks), without touching targets
 llmhound plan --config llmhound.yaml
 
-# Scan; write an OpenGraph payload, an .evidence.jsonl sidecar, and a restricted .content.jsonl
+# Scan; write an OpenGraph payload, evidence sidecar, and checkpoint journal
 llmhound scan --config llmhound.yaml \
     --cidr 10.20.30.0/24 \
-    --asset-mapping normalizer-assets.json \
-    --output llmhound-2026-11-20.json
+    --targets-file known-ai-hosts.txt \
+    --output-dir ./out \
+    --prefix llmhound-2026-11-20
 
-# Register the extension schema, upload the payload, import saved queries
+# Register the extension schema, upload the payload, import saved queries (M3)
 llmhound upload \
     --server https://bloodhound.corp.example \
     --token-file ~/.config/llmhound/bh-token \
-    --payload llmhound-2026-11-20.json
+    --payload ./out/llmhound-2026-11-20.json
 ```
 
 `llmhound.yaml` holds the deployment scope, vantage key, targets and
-exclusions, asset-mapping path, rate/size bounds, content settings and
-secret-detector toggles, TLS mode, User-Agent, and any enabled
-path-qualification rules. Flags override it.
+exclusions, rate/size bounds, TLS mode, User-Agent, and the asset-mapping path
+(`correlation.mapping_file`). The target design adds content and
+secret-detector settings and any enabled path-qualification rules (see the
+[implementation delta](docs/reference/graph-model.md#implementation-delta)).
+Flags override the file. `upload` remains an honest not-implemented stub until
+M3.
 
 TLS certificate verification is on by default. Verification metadata is
 recorded without bypassing a failure; only explicit `--insecure` permits
@@ -190,15 +246,21 @@ downstream of the graph.
 
 | Milestone         | Scope                                                                                                                                           |
 | ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| **M0**            | CE compatibility spike (runs first): array properties, traversable vs non-traversable behavior, attachment by objectid, tier-0 semantics, query performance |
-| **M1**            | CLI skeleton, `llmhound.yaml`, graph model, mapping-file attachment, emitter + sidecar, content file and secret-detector framework, property contract, extension schema; golden, identity, and attachment tests |
-| **M2a**           | Discovery, checkpoint journal, `llmhound plan`, the MCP, Ollama, and Jupyter collectors end-to-end, and the first secret detectors                 |
+| **M0** _(done)_   | CE 9.7.1 compatibility spike and reproducible `lab/`; follow-ups R1–R9 (tier-0 tags, path performance, AzureHound nodes, traversable rule edges) are open |
+| **M1** _(done, earlier model)_ | CLI skeleton, `llmhound.yaml`, graph model, mapping-file attachment, emitter + sidecar, content file and secret-detector framework, property contract, extension schema; golden, identity, and attachment tests |
+| **M2a** _(done, earlier model)_ | Discovery, checkpoint journal, `llmhound plan`, the MCP, Ollama, and Jupyter collectors end-to-end, and the first secret detectors                 |
 | **M2b**           | A2A, vLLM, LiteLLM, Qdrant, MLflow, Open WebUI, LangServe collectors under the [capability matrix](docs/reference/collector-capabilities.md)   |
 | **M2c**           | Generic OpenAI-compatible endpoint, Ray dashboard, Langflow, Flowise, ChromaDB                                                                  |
 | **M2d**           | Path-qualification rules: opt-in traversable edges for cases that clear the evidence bar                                                        |
 | **M3**            | Resume, BloodHound CE API upload, saved queries; adapter validation against an exact CE version/schema                                         |
 | **M4** _(future)_ | Credential-driven enumeration and richer evidence                                                                                               |
 | **M5** _(future)_ | Node/edge description docs and an OpenGraph community library listing (secondary goal)                                                          |
+
+## Development validation
+
+The [Go CI operator guide](docs/reference/go-ci.md) describes automated PR
+checks, the module-free M0 bootstrap distinction, and how to trigger real
+checks on existing QA PRs without changing their code.
 
 ## Licensing
 
@@ -207,4 +269,4 @@ LLMHound is original code written from scratch. Reference projects
 only; no code is derived from them. See the
 [provenance table](docs/plans/2026-09-29-llmhound-design.md#provenance-and-licensing-posture).
 
-LLMHound is licensed under Apache-2.0 (`LICENSE` ships with M1).
+LLMHound is licensed under Apache-2.0 (see [`LICENSE`](LICENSE)).

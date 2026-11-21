@@ -1,0 +1,41 @@
+{
+  "meta": {
+    "methods": 0,
+    "type": "users",
+    "count": 1,
+    "version": 6
+  },
+  "data": [
+    {
+      "ObjectIdentifier": "S-1-5-21-3623811015-3361044348-30300870-1601",
+      "PrimaryGroupSID": "S-1-5-21-3623811015-3361044348-30300870-513",
+      "AllowedToDelegate": [],
+      "HasSIDHistory": [],
+      "SPNTargets": [],
+      "Aces": [],
+      "IsDeleted": false,
+      "IsACLProtected": false,
+      "ContainedBy": null,
+      "Properties": {
+        "domain": "LAB.LOCAL",
+        "name": "M0-ADM@LAB.LOCAL",
+        "distinguishedname": "CN=M0-ADM,CN=USERS,DC=LAB,DC=LOCAL",
+        "domainsid": "S-1-5-21-3623811015-3361044348-30300870",
+        "samaccountname": "M0-ADM",
+        "highvalue": false,
+        "enabled": true,
+        "dontreqpreauth": false,
+        "passwordnotreqd": false,
+        "admincount": false,
+        "description": null,
+        "whencreated": 1759100000,
+        "sensitive": false,
+        "dontexpirypasswd": false,
+        "trustedtoauth": false,
+        "spn": [],
+        "sidhistory": [],
+        "domaintag": "LAB.LOCAL"
+      }
+    }
+  ]
+}

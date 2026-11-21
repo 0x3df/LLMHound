@@ -56,9 +56,10 @@ The collector strictly executes only three allowlisted read-only checks:
 
 ### Nodes Emitted
 
-- **`LLMHound_JupyterServer`**: Scoped service node carrying `product`, `vendor`, `api_version`,
-  `endpoint_host`, `endpoint_port`, `auth_required`, `active_sessions`, `kernels`, `vantage_key`,
-  and the flat access properties `auth_observed` and `anon_operations` (below).
+- **`LLMHound_JupyterServer`**: Scoped service node carrying the shared property contract
+  (endpoint, access, TLS), `api_version`, `auth_required`, `active_sessions`, `kernels`, and
+  `exec_surface = [code_kernel]` (`inferred` from product identity; no kernel is started).
+  Access properties are described below.
 - **`LLMHound_AIService`**: Multi-kind umbrella label carried by the server node.
 - **`LLMHound_WorkspaceFile`**: Resource node for each enumerated notebook or file, scoped by
   service ID and resource path key (`item.Path`).

@@ -33,11 +33,11 @@ transports. Package: `internal/collectors/mcp`. Contract: the MCP row of the
 
 ## Graph output
 
-- **`MCPServer`** (with the `AIService` label): `endpoint*`, `product`/`vendor` and
-  `software_version_raw` (the reported implementation), `protocol_version` (kept separate from
-  the implementation version), `capabilities`, `tls_verification`, `vantage_key`, and the flat
-  access properties `auth_observed` and `anon_operations` (every successful check is anonymous,
-  since no credentials are ever sent).
+- **`MCPServer`** (with the `AIService` label): the shared property contract
+  (endpoint, access, TLS), `product`/`vendor` and `software_version_raw` (the reported
+  implementation), `protocol_version` (kept separate from the implementation version),
+  `capabilities`, and `exec_surface = [tool_invocation]` (`declared`) when a tools capability is
+  advertised. Every successful check is anonymous, since no credentials are ever sent.
 - **`MCPTool`**, **`MCPResource`**, **`MCPPrompt`** with bounded descriptions and schemas. These
   strings come from the scanned server and are **untrusted input**, including to any LLM
   tooling downstream of the graph.
@@ -49,6 +49,6 @@ transports. Package: `internal/collectors/mcp`. Contract: the MCP row of the
 
 ## Not yet implemented
 
-`capability_hint` on tools, `exec_surface` classification, and content-tier reads of resource
+`capability_hint` on tools and content-tier reads of resource
 bodies are specified in the [graph model](../02-graph-model.md#property-contract) and scheduled
 in the [roadmap](../06-roadmap.md) (D1, D3).

@@ -815,8 +815,8 @@ func TestOllama_TLSVerification(t *testing.T) {
 	// Verify service properties reflect unverified_override
 	for _, n := range resInsecure.Nodes {
 		if n.Node.Identity().Kind() == graph.OllamaInstance {
-			if n.Properties["tls_verification"] != "unverified_override" {
-				t.Errorf("expected tls_verification unverified_override, got %v", n.Properties["tls_verification"])
+			if n.Properties["tls_verification"] != "insecure_override" {
+				t.Errorf("expected tls_verification insecure_override, got %v", n.Properties["tls_verification"])
 			}
 		}
 	}

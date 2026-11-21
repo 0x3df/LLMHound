@@ -169,6 +169,16 @@ func TestAnonymousJupyterServer(t *testing.T) {
 	if props["active_sessions"] != 2 {
 		t.Errorf("got active_sessions %v, want 2", props["active_sessions"])
 	}
+	// Shared property contract: inferred execution surface, endpoint facts, TLS n/a over http.
+	if ex, _ := props["exec_surface"].([]string); len(ex) != 1 || ex[0] != "code_kernel" || props["exec_surface_basis"] != "inferred" {
+		t.Errorf("exec_surface = %v (%v), want [code_kernel] inferred", props["exec_surface"], props["exec_surface_basis"])
+	}
+	if props["endpoint_scheme"] != "http" || props["tls_verification"] != "n_a" {
+		t.Errorf("endpoint_scheme/tls_verification = %v/%v, want http/n_a", props["endpoint_scheme"], props["tls_verification"])
+	}
+	if _, ok := props["auth_advertised"]; ok {
+		t.Error("auth_advertised must be unset: no collector has declared-auth evidence")
+	}
 
 	// Anonymous access is flat properties from the enumeration checks, not an edge.
 	if props["auth_observed"] != "anonymous" {

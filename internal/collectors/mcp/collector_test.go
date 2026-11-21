@@ -682,11 +682,14 @@ func TestMCPCollector_TLSVerification_EnforcedAndBypassed(t *testing.T) {
 		t.Error("expected leaf certificate fingerprint to be captured")
 	}
 
-	// Server node must indicate tls_verification = failed
+	// Server node must record the override and keep the failure reason.
 	for _, n := range resB.Nodes {
 		if n.Node.Identity().Kind() == graph.MCPServer {
-			if n.Properties["tls_verification"] != "failed" {
-				t.Errorf("expected tls_verification = 'failed' on server node, got %v", n.Properties["tls_verification"])
+			if n.Properties["tls_verification"] != "insecure_override" {
+				t.Errorf("expected tls_verification = 'insecure_override' on server node, got %v", n.Properties["tls_verification"])
+			}
+			if _, ok := n.Properties["tls_failure_reason"]; !ok {
+				t.Error("expected tls_failure_reason to record why the certificate would not verify")
 			}
 		}
 	}

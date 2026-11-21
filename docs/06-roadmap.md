@@ -9,7 +9,7 @@ status. Order and exit criteria, not dates.
 |---|---|---|
 | **Baseline** | Docs reframed around tier-0 pathing; code aligned (no vantage node, mapping-only attachment of any native kind, access as flat properties); repo structure, legacy retirement | **Done** |
 | **M0** | BloodHound CE 9.7.1 compatibility spike and reproducible [`lab/`](../lab/README.md); answers in [05](05-ce-compatibility.md) | **Done** (follow-ups R1–R9 closed) |
-| **M1** | CLI, `llmhound.yaml`, targets, graph identity, emitter + sidecar, `extension/schema.json` | **Done** (property contract incomplete, see D1) |
+| **M1** | CLI, `llmhound.yaml`, targets, graph identity, emitter + sidecar, `extension/schema.json` | **Done** (shared property contract built in D1) |
 | **M2a** | Discovery, checkpoint journal, `plan`/`scan`; Jupyter, MCP, Ollama collectors | **Done** |
 | **M2b** | A2A, vLLM, LiteLLM, Qdrant, MLflow, Open WebUI, LangServe | Planned |
 | **M2c** | Generic OpenAI-compatible endpoint, Ray, Langflow, Flowise, ChromaDB | Planned |
@@ -26,7 +26,7 @@ decide which properties must exist.
 | # | Item | Exit criterion |
 |---|---|---|
 | **R** | **Close M0 follow-ups R1–R9** ([05](05-ce-compatibility.md#follow-up-answers-for-the-tier-0-redesign-r1r9)): tier-0 tags, typed-kind path performance, AzureHound node resolution, array overwrite, traversable rule edges, stale-property refresh, existence pre-flight call, sourceless-edge cleanup | **Done 2026-11-21.** Each answered with recorded evidence by `lab/scripts/run-r-checks.sh` |
-| **D1** | **Complete the flat property contract** on the three existing collectors: `auth_advertised`, `exec_surface` (+ basis), TLS fields, `mapping_source`; every property labeled observed/declared/inferred | Contract in [02](02-graph-model.md#property-contract) matches emitted properties; golden tests cover it |
+| **D1** | **Complete the flat property contract** on the three existing collectors: `auth_advertised`, `exec_surface` (+ basis), TLS fields, `mapping_source`; every property labeled observed/declared/inferred | Contract in [02](02-graph-model.md#property-contract) matches emitted properties; golden tests cover it. **Done 2026-11-21** for endpoint, access, `exec_surface`, and TLS via `graph.ServiceFacts`. Deferred with reasons: `auth_advertised` (no collector has declared-auth evidence on an emitted node), `mapping_source` (needs a revision field in the mapping file, D8), per-field version `*_basis` labels (arrive with the collectors that report build metadata) |
 | **D2** | **Headline queries on sample data**: P1, P2, P6 in [04](04-saved-queries.md) running against the lab with SharpHound/AzureHound fixtures plus emitted payloads; ship `extension/saved_searches/` | The three queries return the expected rows in the lab; query files generated from the `extensions-edges` kind list, using the shapes in [04](04-saved-queries.md) |
 | **D3** | **Content tier**: config migration `opt_ins` → `content.*` (default on, bounded), `internal/content`, restricted `.content.jsonl` | Bounds enforced and recorded as `truncated`; bodies appear only in the content file; opt-out per surface works |
 | **D4** | **Secret detection**: `internal/secrets` framework and the first high-precision detectors | Every detector has a true-positive corpus and a look-alike negative corpus with **zero** false positives; raw value appears nowhere; `has_exposed_secret` is only ever `true` or unset |

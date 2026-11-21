@@ -239,20 +239,21 @@ precision-first:** a boolean or classification is set only on deterministic
 evidence; anything ambiguous stays unknown or unset, never guessed, and an
 unknown or unset value never implies absence.
 
-Service properties (logical names; final serialization is fixed in M1 from the
-M0 answers):
+Service properties, as serialized. Rows marked *(built)* are emitted today by
+`graph.ServiceFacts` for all collectors; the rest are specified and arrive with the
+work named in the [roadmap](06-roadmap.md):
 
 | Group | Properties |
 |---|---|
-| Endpoint | `scheme`, `host`, `port`, `base_path`, `endpoint` (canonical) |
-| Product | `product`, `vendor`, `software_version_raw`, `software_version`, `build_id`, `commit`, `image_digest`, `api_version`, `protocol_version`, each with `*_source` and `*_basis` |
-| Auth | `auth_advertised` (`none`/`required`/`mixed`/`unknown`, `declared`), `auth_observed` (`anonymous`/`denied`/`mixed`/`unknown`, `observed`), `anon_operations` (array of succeeded `check_id`s only) |
-| Execution surface | `exec_surface` (array: `code_kernel`, `terminal`, `job_submit`, `code_eval`, `workflow_exec`, `tool_invocation`, `model_mutation`, `unknown`; only positively identified surfaces are listed), `exec_surface_basis` (`observed`/`declared`/`inferred`) |
+| Endpoint *(built)* | `endpoint` (canonical URL), `endpoint_scheme`, `endpoint_host`, `endpoint_port`, `endpoint_base_path` (omitted for `/`) |
+| Product | `product`, `vendor` *(built)*; `software_version`, `software_version_raw`, `api_version`, `protocol_version` (built where the surface reports them). Specified, not built: `build_id`, `commit`, `image_digest`, and `*_source` / `*_basis` labels on each |
+| Auth *(built)* | `auth_observed` (`anonymous`/`denied`/`mixed`/`unknown`, `observed`), `anon_operations` (sorted array of succeeded `check_id`s only). `auth_advertised` (`none`/`required`/`mixed`, always `declared`, with `auth_advertised_basis`) is supported by the builder but **no collector sets it yet**: the only declared-auth evidence today (MCP protected-resource metadata) appears when the server denies access, which emits no node. Jupyter also keeps the surface-specific `auth_required` |
+| Execution surface *(built)* | `exec_surface` (sorted array: `code_kernel`, `terminal`, `job_submit`, `code_eval`, `workflow_exec`, `tool_invocation`, `model_mutation`; only positively identified surfaces are listed, never `unknown`), `exec_surface_basis` (`observed`/`declared`/`inferred`). Emitted today: Jupyter `code_kernel` and Ollama `model_mutation` (both `inferred` from product identity, nothing executed), MCP `tool_invocation` (`declared`, when the server advertises a tools capability). It says a surface exists, not that anything was run |
 | Dependencies | `backend_refs` (sanitized array), `store_refs` (sanitized array), `backend_refs_basis` |
 | Inventory | `model_count`, `tool_count`, `resource_count`, `collection_count` (as applicable) |
 | Content | `system_prompt_present`, `config_collected`, `content_bytes`, `content_truncated`, `has_exposed_secret` (`true` or unset), `secret_last_confirmed`, `secret_types` (array); bodies and secret values never appear in the graph, see [Content and secrets](#content-and-secrets) |
-| TLS | `tls_verification` (`ok`/`failed`/`insecure_override`/`n_a`), `tls_failure_reason`, `tls_leaf_sha256`, `tls_issuer`, `tls_not_after` |
-| Provenance | `source`, `schema_version`, `scan_id`, `vantage_key`, `first_observed`, `last_observed`, `coverage`, `coverage_reason`, `mapping_source` |
+| TLS *(built)* | `tls_verification` (`ok`/`failed`/`insecure_override`/`n_a`; `n_a` for plain `http`, absent when no handshake was observed), `tls_failure_reason` (bounded; kept under `insecure_override` when the certificate would not have verified), `tls_leaf_sha256` (lower-case hex), `tls_issuer`, `tls_not_after`, `tls_negotiated_version` |
+| Provenance | `vantage_key`, `scan_id`, `coverage`, `observed_at` *(built)*; specified, not built: `schema_version`, `first_observed`, `coverage_reason`, `mapping_source` |
 
 Child resources carry the subset that applies (`anon_operations`, `*_basis`,
 `last_observed`, `scan_id`, plus resource-specific fields such as `digest`,
@@ -416,6 +417,7 @@ backlog, in the order the [roadmap](06-roadmap.md) schedules it.
 |---|---|
 | Scoped identity, canonical endpoints, kind mapping (`LLMHound_<Kind>`), all-non-traversable edges | `internal/graph` |
 | Mapping-file attachment to an existing native node of any kind; `NetworkEndpoint` fallback; nil resolver is an empty mapping | `internal/correlate` |
+| Shared service property contract (`graph.ServiceFacts`: endpoint, access, execution surface, TLS) | `internal/graph/serviceprops.go`, all three collectors |
 | Anonymous access as flat properties (`auth_observed`, `anon_operations`, `vantage_key`) derived from operation evidence | `internal/graph/access.go`, collectors |
 | Base payload (`source_kind`) and sourceless linking payload; evidence sidecar | `internal/emitter`, `internal/evidence` |
 | Checkpoint journal and deterministic replay | `internal/checkpoint` |
@@ -427,7 +429,7 @@ backlog, in the order the [roadmap](06-roadmap.md) schedules it.
 |---|---|
 | Content tier | Default-on, bounded reads of prompts, config, file and flow bodies into a restricted `.content.jsonl`; replaces today's `opt_ins` gate |
 | Secret detection | High-precision detectors and `has_exposed_secret` / `secret_types` / `secret_last_confirmed` |
-| Full property contract | The complete [property contract](#property-contract); collectors emit a subset today (`exec_surface`, `auth_advertised`, TLS fields, etc. are not all present) |
+| Remaining property contract | The rows of the [property contract](#property-contract) not marked *(built)*: dependencies, inventory counts, content flags, `auth_advertised` evidence, version provenance labels |
 | Path qualification | Rule-gated, opt-in `CanExecuteOn` edges (M2d); `EdgeKind.IsTraversable()` is always false today |
 | Upload | Two-step upload with an existence pre-flight (M3); `upload` is a not-implemented stub, though the emitter already splits base and linking payloads |
 | Mapping provenance | `mapping_source` on attachment edges |

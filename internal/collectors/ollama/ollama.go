@@ -721,33 +721,26 @@ func (c *Collector) Collect(
 		return checkpoint.Result{}, fmt.Errorf("create service node: %w", err)
 	}
 
-	srvProps := map[string]any{
-		"name":          fmt.Sprintf("OLLAMA · %s:%d", ep.Host(), ep.Port()),
-		"endpoint_host": ep.Host(),
-		"endpoint_port": int(ep.Port()),
-		"product":       "Ollama",
-		"vendor":        "Ollama",
-		"vantage_key":   vantageKey,
+	facts := graph.ServiceFacts{
+		Endpoint: ep, Name: fmt.Sprintf("OLLAMA · %s:%d", ep.Host(), ep.Port()),
+		Product: "Ollama", Vendor: "Ollama", VantageKey: vantageKey, Access: access,
+		// Ollama's documented API includes pull, copy, and delete; this is
+		// inferred from product identity, not exercised.
+		ExecSurface: []string{graph.ExecModelMutation}, ExecSurfaceBasis: graph.BasisInferred,
 	}
-	for k, v := range access.Properties() {
-		srvProps[k] = v
+	if tlsInfo != nil {
+		facts.TLS = &graph.TLSSummary{
+			Result: tlsInfo.VerificationResult, Reason: tlsInfo.VerificationReason,
+			LeafSHA256: tlsInfo.CertFingerprint, Issuer: tlsInfo.Issuer, NotAfter: tlsInfo.ValidTo,
+			TLSVersion: tlsInfo.NegotiatedVersion, InsecureSet: tlsInfo.InsecureOverride,
+		}
 	}
+	srvProps := facts.Properties()
 	if reportedVersion != "" {
 		srvProps["software_version"] = reportedVersion
 	}
 	if rawReportedVersion != "" {
 		srvProps["software_version_raw"] = rawReportedVersion
-	}
-	if tlsInfo != nil {
-		if tlsInfo.VerificationResult != "" {
-			srvProps["tls_verification"] = tlsInfo.VerificationResult
-		}
-		if tlsInfo.CertFingerprint != "" {
-			srvProps["tls_fingerprint"] = tlsInfo.CertFingerprint
-		}
-		if tlsInfo.NegotiatedVersion != "" {
-			srvProps["tls_negotiated_version"] = tlsInfo.NegotiatedVersion
-		}
 	}
 
 	srvItem, err := emitter.NewNodeItem(srvNode, srvProps)

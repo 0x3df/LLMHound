@@ -75,19 +75,21 @@ func buildServerNode(srvID graph.Identity, ep graph.Endpoint, obs graph.Observat
 	}
 
 	displayName := fmt.Sprintf("MCP · %s:%d%s", ep.Host(), ep.Port(), ep.BasePath())
-	props := map[string]any{
-		"name":               displayName,
-		"display_name":       displayName,
-		"endpoint":           ep.String(),
-		"endpoint_host":      ep.Host(),
-		"endpoint_port":      int(ep.Port()),
-		"endpoint_scheme":    ep.Scheme(),
-		"endpoint_base_path": ep.BasePath(),
-		"vantage_key":        obs.VantageKey,
+	facts := graph.ServiceFacts{Endpoint: ep, Name: displayName, VantageKey: obs.VantageKey, Access: access}
+	if tlsObs != nil {
+		facts.TLS = &graph.TLSSummary{
+			Result: tlsObs.VerificationResult, Reason: tlsObs.VerificationReason,
+			LeafSHA256: tlsObs.CertFingerprint, Issuer: tlsObs.Issuer, NotAfter: tlsObs.ValidTo,
+			TLSVersion: tlsObs.NegotiatedVersion, InsecureSet: tlsObs.InsecureOverride,
+		}
 	}
-	for k, v := range access.Properties() {
-		props[k] = v
+	// The server advertises a tools capability: tool invocation is a declared
+	// execution surface (it was not invoked, and what a tool does is unknown).
+	if initResult != nil && initResult.Capabilities != nil && initResult.Capabilities.Tools != nil {
+		facts.ExecSurface = []string{graph.ExecToolInvocation}
+		facts.ExecSurfaceBasis = graph.BasisDeclared
 	}
+	props := facts.Properties()
 
 	if initResult != nil {
 		if initResult.ServerInfo != nil {
@@ -121,10 +123,6 @@ func buildServerNode(srvID graph.Identity, ep graph.Endpoint, obs graph.Observat
 		if initResult.Instructions != "" {
 			props["instructions"] = boundString(initResult.Instructions, maxStringLen)
 		}
-	}
-
-	if tlsObs != nil && tlsObs.VerificationResult != "" {
-		props["tls_verification"] = tlsObs.VerificationResult
 	}
 
 	return emitter.NewNodeItem(node, props)

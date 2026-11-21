@@ -344,17 +344,20 @@ func (c *Collector) collect(ctx context.Context, rawTarget string, probeFirst bo
 	access := graph.SummarizeAccess(accessEvidence)
 
 	// Build JupyterServer node item
-	srvProps := map[string]any{
-		"name":          fmt.Sprintf("Jupyter Server · %s:%d", ep.Host(), ep.Port()),
-		"endpoint_host": ep.Host(),
-		"endpoint_port": int(ep.Port()),
-		"product":       "Jupyter Server",
-		"vendor":        "Project Jupyter",
-		"auth_required": authRequired,
+	facts := graph.ServiceFacts{
+		Endpoint: ep, Name: fmt.Sprintf("Jupyter Server · %s:%d", ep.Host(), ep.Port()),
+		Product: "Jupyter Server", Vendor: "Project Jupyter", VantageKey: c.cfg.VantageKey, Access: access,
+		// Kernel execution is the product's purpose; inferred from identity, not run.
+		ExecSurface: []string{graph.ExecCodeKernel}, ExecSurfaceBasis: graph.BasisInferred,
 	}
-	if ep.BasePath() != "" && ep.BasePath() != "/" {
-		srvProps["endpoint_path"] = ep.BasePath()
+	if observedTLS.Observed {
+		facts.TLS = &graph.TLSSummary{
+			Result: observedTLS.VerificationResult, Reason: observedTLS.VerificationReason,
+			LeafSHA256: observedTLS.Fingerprint, Issuer: observedTLS.Issuer, NotAfter: observedTLS.ValidTo,
+			TLSVersion: observedTLS.NegotiatedVersion, InsecureSet: observedTLS.InsecureOverride,
+		}
 	}
+	srvProps := facts.Properties()
 	if verInfo.APIVersion != "" {
 		srvProps["api_version"] = verInfo.APIVersion
 	}
@@ -365,10 +368,7 @@ func (c *Collector) collect(ctx context.Context, rawTarget string, probeFirst bo
 		srvProps["kernels"] = kernels
 	}
 	srvProps["active_sessions"] = len(sessions)
-	srvProps["vantage_key"] = c.cfg.VantageKey
-	for k, v := range access.Properties() {
-		srvProps[k] = v
-	}
+	srvProps["auth_required"] = authRequired // any observed 401/403 (Jupyter-specific; auth_observed is the cross-surface form)
 
 	srvNode, err := graph.NewNode(srvID, finalObs)
 	if err != nil {

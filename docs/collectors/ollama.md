@@ -43,10 +43,9 @@ graph/evidence output, and checkpoint journal contracts.
 ## Graph and Evidence Mapping
 
 - **Nodes:**
-  - `OllamaInstance` carrying `AIService` umbrella label, with properties `endpoint_host`,
-    `endpoint_port`, `product`, `vendor`, `software_version`, `software_version_raw`,
-    `tls_verification`, `tls_fingerprint`, `vantage_key`, and the flat access properties
-    `auth_observed` and `anon_operations`.
+  - `OllamaInstance` carrying `AIService` umbrella label, with the shared [service property contract](../02-graph-model.md#property-contract) (endpoint, access, `exec_surface`, TLS)
+    plus `software_version` and `software_version_raw`. `exec_surface` is `model_mutation`
+    (`inferred` from product identity; nothing is pulled or deleted).
   - `AIModel` nodes for each enumerated model, scoped to the owning service ID,
     with properties `name`, `digest`, `size`, `format`, `family`, `parameter_size`,
     `quantization_level`, `parent_model`, `modified_at`, plus `running`/`size_vram`

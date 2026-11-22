@@ -315,8 +315,9 @@ checks per-file task results rather than relying on job status alone.
 `GET /api/v2/saved-queries`. The client therefore never assumes a job or query
 is on the first page: it looks a job up with `?id=eq:<id>` and, if CE rejects
 or ignores the filter, pages with `skip`/`limit` (bounded, stopping when rows
-repeat); a job absent from the listing is never treated as complete. Confirm
-the filter in the lab (`run-m3-gate.sh`) when the pinned CE version changes.
+repeat); a job absent from the listing is never treated as complete. Confirming
+the filter in the lab is backlog item [F1](06-roadmap.md#development-backlog-in-order); repeat
+it (`run-m3-gate.sh`) whenever the pinned CE version changes.
 Note the docs' `POST /api/v2/file-upload` description in the design doc is
 the older single-step form; on 9.7.1 the flow above is what actually works.
 

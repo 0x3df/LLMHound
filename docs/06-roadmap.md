@@ -34,6 +34,8 @@ decide which properties must exist.
 | **D6** | **M2c long tail** | **Done 2026-11-21.** Generic OpenAI-compatible (port-fallback guarded), Ray, Langflow, Flowise, and ChromaDB implemented and wired |
 | **D7** | **M2d path-qualification**: `internal/rules`, `extension/rules`, first rules (`jupyter-auth-disabled`, `ray-anonymous-jobs`, `langflow-unauthenticated-exec`) | **Done 2026-11-21.** Meets all six criteria in [02](02-graph-model.md#path-qualification-traversable-edges), fails closed on unknown version, missing evidence, or unmapped target, disabled by default (`path_qualification.enabled_rules`) |
 | **D8** | **M3 upload and resume**: `internal/bloodhound`, two-step upload, existence pre-flight, `resume`, `mapping_source`, 15 saved queries, adapter validation gate | **Done 2026-11-21.** `llmhound resume`, `llmhound upload` (`--validate-only`, `--register-schema`, `--base-file`, `--linking-file`, `--import-queries`), all 15 queries (`P1`–`P8`, `I1`–`I7`), `mapping_source` envelope support, and `lab/scripts/run-m3-gate.sh` implemented and verified against mock CE |
+| **F1** | **Confirm CE's upload-job `id` filter in the lab.** `llmhound upload` waits on an ingest job via `GET /api/v2/file-upload?id=eq:<job>` and falls back to bounded `skip`/`limit` paging when CE rejects (HTTP 400) or ignores the filter (`findUploadJob` in `internal/bloodhound/upload.go`). Neither behavior, nor the listing's default page size, has been measured on CE 9.7.1 ([05 Q10](05-ce-compatibility.md#q10--payload-size-limits-and-zip-upload-handling)) | **Open.** Against the pinned CE lab with more than 10 historical upload jobs, record whether `?id=eq:<id>` returns only that job, is rejected, or is ignored, plus the default page size of `GET /api/v2/file-upload` and `GET /api/v2/saved-queries`. Add the measured answer to [05](05-ce-compatibility.md) (replacing the "Not measured" note), add the check to `lab/scripts/run-m3-gate.sh`, and remove the fallback only if the filter is proven honored |
+| **F2** | **Move the Jupyter collector onto the shared scan transport.** Jupyter still builds its own `http.Client` (`internal/collectors/jupyter/client.go`); it now applies the same per-host limiter, explicit proxy, same-host redirect rule, and GET-only use, but not through `internal/transport`, so its allowlist, `CheckSafety`, and TLS capture are separate code | **Open.** `jupyter.Collector` accepts and uses the scan's shared `*transport.Client` (like the other 13 HTTP collectors' `WithTransport`); `internal/collectors/jupyter/client.go` no longer constructs an `http.Transport`; TLS and redirect evidence keep their current semantics, with any golden or evidence-shape change reviewed in the same PR; Jupyter tests cover the fail-closed host allowlist and the shared limiter |
 
 ## Why this order
 
@@ -43,7 +45,9 @@ decide which properties must exist.
    queries; adding seven more first would multiply any property-contract mistake.
 3. **D3–D4 before D5.** New collectors should be written against the content and secret
    frameworks, not retrofitted.
-4. **D7 last among features.** Traversable edges change attack-path results; they ship only
+4. **F1 and F2 are post-v1.0.0 follow-ups.** F1 needs the CE lab; F2 is a refactor with no
+   behavior change intended. Either may go first.
+5. **D7 last among features.** Traversable edges change attack-path results; they ship only
    after the data they depend on is trustworthy and an owner opts in
    ([executive summary](00-executive-summary.md#operational-decisions-before-first-scan)).
 

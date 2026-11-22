@@ -124,8 +124,10 @@ Add a row to [docs/07-decisions.md](docs/07-decisions.md); supersede, don't eras
 - Go: `gofmt`, wrapped errors with context, no panics on input, context-aware and bounded I/O.
 - Tests live beside code; fixtures are local `httptest` servers or `testdata/`; goldens define the
   emitted contract, so review their diffs.
-- Branches: `QA` is the integration branch; PRs target `QA`. Small, reviewable commits; no
-  force-push on shared branches. Commit bodies explain *why*.
+- Branches: `main` is the default and release branch; `QA` is the integration branch. PRs
+  target `QA`; `main` is fast-forwarded from `QA` once CI is green on both (never commit to
+  `main` directly). Releases are `v*` tags on `main` (see the development guide). Small,
+  reviewable commits; no force-push on shared branches. Commit bodies explain *why*.
 - Behavior and docs change together. If you touch a "specified, not built" row, update the status table.
 
 ## State and next work

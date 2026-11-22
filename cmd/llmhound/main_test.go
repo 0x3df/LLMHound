@@ -146,11 +146,12 @@ func TestFilePathsAndListOverrides(t *testing.T) {
 	}
 }
 
-func TestUploadStillUnimplementedAndPlanWritesNoArtifacts(t *testing.T) {
+func TestUploadValidationAndPlanWritesNoArtifacts(t *testing.T) {
+	t.Setenv("BLOODHOUND_URL", "")
 	inEmptyDirectory(t)
 	out, err := execute("upload")
-	if err == nil || !strings.Contains(err.Error(), "not implemented") || out != "" {
-		t.Fatalf("upload: %q %v", out, err)
+	if err == nil || !strings.Contains(err.Error(), "bloodhound url is required") || out != "" {
+		t.Fatalf("upload without url: %q %v", out, err)
 	}
 
 	out, err = execute("plan", "--scope", "tenant", "--vantage", "scanner", "--targets", "ai.example.test")
@@ -160,7 +161,11 @@ func TestUploadStillUnimplementedAndPlanWritesNoArtifacts(t *testing.T) {
 	if !strings.Contains(out, "TARGET: ai.example.test") {
 		t.Fatalf("plan missing target: %q", out)
 	}
-	for _, surface := range []string{"jupyter", "mcp", "ollama", "a2a", "vllm", "qdrant"} {
+	for _, surface := range []string{
+		"jupyter", "mcp", "ollama", "a2a", "vllm", "qdrant",
+		"litellm", "mlflow", "open_webui", "langserve",
+		"ray", "langflow", "flowise", "chromadb", "openai_compatible",
+	} {
 		if !strings.Contains(out, "SURFACE: "+surface) {
 			t.Fatalf("plan missing surface %s: %q", surface, out)
 		}
@@ -700,5 +705,481 @@ func TestScanCLIM2bCohortLoopbackFixtures(t *testing.T) {
 	}
 	if strings.Contains(out, tok) {
 		t.Errorf("secret value leaked into CLI stdout")
+	}
+}
+
+func TestScanCLID5D6CohortLoopbackFixtures(t *testing.T) {
+	inEmptyDirectory(t)
+	tok := secretstest.GitHubToken("ghp", "Qr1St5Uv9Wx3Yz7Ab1Cd5Ef9Gh3Ij7")
+
+	litellmSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/openapi.json":
+			_, _ = w.Write([]byte(`{"info":{"title":"LiteLLM API","version":"0.1.0"},"paths":{"/v1/models":{},"/model/info":{}}}`))
+		case "/v1/models":
+			_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"gpt-4o"}]}`))
+		case "/model/info":
+			_, _ = w.Write([]byte(fmt.Sprintf(`{"data":[{"model_name":"gpt-4o","litellm_params":{"model":"openai/gpt-4o","api_key":"%s"}}]}`, tok)))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer litellmSrv.Close()
+
+	mlflowSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/version":
+			_, _ = w.Write([]byte("2.16.2"))
+		case "/api/2.0/mlflow/experiments/search":
+			_, _ = w.Write([]byte(`{"experiments":[{"experiment_id":"0","name":"Default","artifact_location":"s3://mlflow-bucket/exp"}]}`))
+		case "/api/2.0/mlflow/registered-models/search":
+			_, _ = w.Write([]byte(`{"registered_models":[]}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer mlflowSrv.Close()
+
+	openwebuiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/version":
+			_, _ = w.Write([]byte(`{"version":"0.4.8"}`))
+		case "/api/config":
+			_, _ = w.Write([]byte(`{"status":true,"name":"Open WebUI","features":{"auth":false,"enable_signup":true}}`))
+		case "/api/models":
+			_, _ = w.Write([]byte(`{"data":[{"id":"llama3"}]}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer openwebuiSrv.Close()
+
+	langserveSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/openapi.json":
+			_, _ = w.Write([]byte(`{"info":{"title":"LangChain Server","version":"1.0"},"paths":{"/chain/invoke":{},"/chain/input_schema":{}}}`))
+		case "/chain/input_schema":
+			_, _ = w.Write([]byte(`{"type":"object"}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer langserveSrv.Close()
+
+	raySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/version":
+			_, _ = w.Write([]byte(`{"version":"0.8.0","ray_version":"2.37.0","ray_commit":"abc123"}`))
+		case "/api/cluster_status":
+			_, _ = w.Write([]byte(`{"result":true,"data":{"clusterStatus":{"active_nodes":{"head":1}}}}`))
+		case "/api/jobs/":
+			_, _ = w.Write([]byte(`[{"submission_id":"raysubmit_1","status":"SUCCEEDED","entrypoint":"echo hi"}]`))
+		case "/api/v0/actors":
+			_, _ = w.Write([]byte(`{"result":true,"data":{"result":{"total":0}}}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer raySrv.Close()
+
+	langflowSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/version":
+			_, _ = w.Write([]byte(`{"version":"1.0.19","main_version":"1.0.19","package":"Langflow"}`))
+		case "/api/v1/auto_login":
+			_, _ = w.Write([]byte(`{"access_token":"LF_RAW_JWT_SECRET","token_type":"bearer"}`))
+		case "/api/v1/flows/":
+			_, _ = w.Write([]byte(`[{"id":"f1","name":"Flow1","data":{"nodes":[]}}]`))
+		case "/api/v1/all":
+			_, _ = w.Write([]byte(`{"tools":{"ToolA":{}}}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer langflowSrv.Close()
+
+	flowiseSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/version":
+			_, _ = w.Write([]byte(`{"version":"2.1.4"}`))
+		case "/api/v1/chatflows":
+			_, _ = w.Write([]byte(`[{"id":"cf1","name":"Bot","isPublic":true,"flowData":"{}"}]`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer flowiseSrv.Close()
+
+	chromaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v2/heartbeat":
+			_, _ = w.Write([]byte(`{"nanosecond heartbeat":1}`))
+		case "/api/v2/version":
+			_, _ = w.Write([]byte(`"0.5.20"`))
+		case "/api/v2/auth/identity":
+			_, _ = w.Write([]byte(`{"tenant":"default_tenant","databases":["default_database"]}`))
+		case "/api/v2/tenants/default_tenant/databases/default_database/collections":
+			_, _ = w.Write([]byte(`[]`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer chromaSrv.Close()
+
+	oaiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"local-llm","owned_by":"org"}]}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer oaiSrv.Close()
+
+	defs := fmt.Sprintf(`[
+  {"surface":"litellm","default_port":%d,"probe_paths":["/openapi.json","/model/info"]},
+  {"surface":"mlflow","default_port":%d,"probe_paths":["/api/2.0/mlflow/experiments/search?max_results=1"]},
+  {"surface":"open_webui","default_port":%d,"probe_paths":["/api/config"]},
+  {"surface":"langserve","default_port":%d,"probe_paths":["/openapi.json"]},
+  {"surface":"ray","default_port":%d,"probe_paths":["/api/version"]},
+  {"surface":"langflow","default_port":%d,"probe_paths":["/api/v1/version"]},
+  {"surface":"flowise","default_port":%d,"probe_paths":["/api/v1/chatflows","/api/v1/version"]},
+  {"surface":"chromadb","default_port":%d,"probe_paths":["/api/v2/heartbeat"]},
+  {"surface":"openai_compatible","default_port":%d,"probe_paths":["/v1/models"]}
+]`,
+		portOf(litellmSrv.URL), portOf(mlflowSrv.URL), portOf(openwebuiSrv.URL), portOf(langserveSrv.URL),
+		portOf(raySrv.URL), portOf(langflowSrv.URL), portOf(flowiseSrv.URL), portOf(chromaSrv.URL), portOf(oaiSrv.URL))
+	if err := os.WriteFile("d5d6-discovery.json", []byte(defs), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	outDir := t.TempDir()
+	out, err := execute(
+		"scan",
+		"--scope", "cli-d5d6",
+		"--vantage", "cli-vantage",
+		"--targets", "127.0.0.1",
+		"--discovery-file", "d5d6-discovery.json",
+		"--output-dir", outDir,
+		"--prefix", "d5d6-live",
+	)
+	if err != nil {
+		t.Fatalf("scan: %q %v", out, err)
+	}
+
+	payloadData, err := os.ReadFile(filepath.Join(outDir, "d5d6-live.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload emitter.Payload
+	if err := json.Unmarshal(payloadData, &payload); err != nil {
+		t.Fatal(err)
+	}
+	kinds := map[string]bool{}
+	for _, n := range payload.Graph.Nodes {
+		for _, k := range n.Kinds {
+			kinds[k] = true
+		}
+	}
+	for _, want := range []string{
+		"LLMHound_LiteLLMGateway", "LLMHound_MLflowServer", "LLMHound_OpenWebUIInstance", "LLMHound_LangServeApp",
+		"LLMHound_RayDashboard", "LLMHound_LangflowInstance", "LLMHound_FlowiseInstance", "LLMHound_ChromaInstance",
+		"LLMHound_OpenAICompatibleEndpoint",
+	} {
+		if !kinds[want] {
+			t.Errorf("missing kind %s in %+v", want, kinds)
+		}
+	}
+
+	contentPath := filepath.Join(outDir, "d5d6-live.content.jsonl")
+	cInfo, err := os.Stat(contentPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cInfo.Mode().Perm() != 0600 {
+		t.Errorf("content file mode = %o, want 0600", cInfo.Mode().Perm())
+	}
+
+	entries, err := os.ReadDir(outDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		raw, err := os.ReadFile(filepath.Join(outDir, e.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(raw), tok) || strings.Contains(string(raw), "LF_RAW_JWT_SECRET") {
+			t.Errorf("secret leaked into %s", e.Name())
+		}
+	}
+}
+
+func TestResumeCLI(t *testing.T) {
+	inEmptyDirectory(t)
+
+	var hitsA atomic.Int32
+	srvA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hitsA.Add(1)
+		switch r.URL.Path {
+		case "/api/version":
+			_, _ = w.Write([]byte(`{"version":"0.6.0"}`))
+		case "/api/tags":
+			_, _ = w.Write([]byte(`{"models":[{"name":"llama3:latest"}]}`))
+		case "/api/ps":
+			_, _ = w.Write([]byte(`{"models":[]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srvA.Close()
+
+	var hitsB atomic.Int32
+	srvB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hitsB.Add(1)
+		switch r.URL.Path {
+		case "/version":
+			_, _ = w.Write([]byte(`{"version":"0.6.3"}`))
+		case "/v1/models":
+			_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"meta-llama/Llama-3-8B","object":"model","owned_by":"vllm"}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srvB.Close()
+
+	defs1 := fmt.Sprintf(`[{"surface":"ollama","default_port":%d,"probe_paths":["/api/version"]}]`, portOf(srvA.URL))
+	if err := os.WriteFile("disc1.json", []byte(defs1), 0600); err != nil {
+		t.Fatal(err)
+	}
+	outDir := t.TempDir()
+	out, err := execute("scan", "--scope", "cli-resume", "--vantage", "cli-v", "--targets", "127.0.0.1", "--content=false", "--discovery-file", "disc1.json", "--output-dir", outDir, "--prefix", "job1")
+	if err != nil {
+		t.Fatalf("initial scan: %q %v", out, err)
+	}
+	if hitsA.Load() == 0 {
+		t.Fatal("expected hits on server A during initial scan")
+	}
+	hitsA.Store(0)
+
+	journalPath := filepath.Join(outDir, "job1.journal.jsonl")
+	jf, err := os.OpenFile(journalPath, os.O_WRONLY|os.O_APPEND, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := jf.WriteString(`{"entry_type":"result","result":{"target":"127.0.0.1"`); err != nil {
+		_ = jf.Close()
+		t.Fatal(err)
+	}
+	_ = jf.Close()
+
+	defs2 := fmt.Sprintf(`[
+  {"surface":"ollama","default_port":%d,"probe_paths":["/api/version"]},
+  {"surface":"vllm","default_port":%d,"probe_paths":["/version"]}
+]`, portOf(srvA.URL), portOf(srvB.URL))
+	if err := os.WriteFile("disc2.json", []byte(defs2), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err = execute("resume", "--journal", journalPath, "--scope", "cli-resume", "--vantage", "cli-v", "--targets", "127.0.0.1", "--content=false", "--discovery-file", "disc2.json", "--output-dir", outDir, "--prefix", "job1")
+	if err != nil {
+		t.Fatalf("resume failed: %q %v", out, err)
+	}
+	if !strings.Contains(out, "Resume completed for 1 target(s)") {
+		t.Fatalf("unexpected resume output: %q", out)
+	}
+	if hitsA.Load() != 0 {
+		t.Fatalf("expected 0 hits on already-completed ollama during resume, got %d", hitsA.Load())
+	}
+	if hitsB.Load() == 0 {
+		t.Fatal("expected vllm to be collected during resume")
+	}
+
+	rawBase, err := os.ReadFile(filepath.Join(outDir, "job1.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(rawBase), "LLMHound_OllamaInstance") || !strings.Contains(string(rawBase), "LLMHound_VLLMInstance") {
+		t.Fatalf("resumed base payload missing expected surfaces: %s", rawBase)
+	}
+}
+
+func TestUploadCLIWithMockCE(t *testing.T) {
+	inEmptyDirectory(t)
+
+	var serverVersion atomic.Value
+	serverVersion.Store("v9.7.1")
+
+	var registeredSchema atomic.Value
+	var uploadedFiles [][]byte
+	var uploadedFileNames []string
+	var importedZip []byte
+	var deletedIDs []int64
+
+	ce := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/version":
+			_, _ = fmt.Fprintf(w, `{"data":{"API":{"current_version":"v2"},"server_version":"%s","product_edition":"community"}}`, serverVersion.Load().(string))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v2/extensions":
+			_, _ = w.Write([]byte(`{"data":[]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v2/graphs/source-kinds":
+			_, _ = w.Write([]byte(`{"data":{"kinds":[{"id":1,"name":"LLMHound"}]}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v2/extensions-edges":
+			_, _ = w.Write([]byte(`{"data":[{"id":1,"name":"MemberOf","is_traversable":true},{"id":2,"name":"AdminTo","is_traversable":true},{"id":3,"name":"LLMHound_CanExecuteOn","is_traversable":true}]}`))
+		case r.Method == http.MethodPut && r.URL.Path == "/api/v2/extensions":
+			b, _ := io.ReadAll(r.Body)
+			registeredSchema.Store(string(b))
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"data":{}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v2/graphs/cypher":
+			var req struct {
+				Query string `json:"query"`
+			}
+			b, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(b, &req)
+			if strings.Contains(req.Query, "LIMIT 1") {
+				_, _ = w.Write([]byte(`{"data":{"nodes":{"1":{"objectId":"PROBE","kinds":["Computer"]}}}}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"data":{"nodes":{
+				"1":{"objectId":"S-1-5-21-EXISTS","kinds":["Computer"]},
+				"2":{"objectId":"S-1-5-21-STUB","kinds":[]}
+			}}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v2/file-upload/start":
+			w.WriteHeader(http.StatusCreated)
+			_, _ = fmt.Fprintf(w, `{"data":{"id":%d}}`, len(uploadedFiles)+1)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v2/file-upload/1":
+			b, _ := io.ReadAll(r.Body)
+			uploadedFiles = append(uploadedFiles, b)
+			uploadedFileNames = append(uploadedFileNames, r.Header.Get("X-File-Upload-Name"))
+			w.WriteHeader(http.StatusAccepted)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v2/file-upload/2":
+			b, _ := io.ReadAll(r.Body)
+			uploadedFiles = append(uploadedFiles, b)
+			uploadedFileNames = append(uploadedFileNames, r.Header.Get("X-File-Upload-Name"))
+			w.WriteHeader(http.StatusAccepted)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/end"):
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v2/file-upload":
+			_, _ = w.Write([]byte(`{"data":[{"id":1,"status":2},{"id":2,"status":2}]}`))
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/completed-tasks"):
+			_, _ = w.Write([]byte(`{"data":[]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v2/saved-queries":
+			_, _ = w.Write([]byte(`{"data":[{"id":42,"name":"LLMHound_Old","description":"old","query":"MATCH (n) RETURN n"}]}`))
+		case r.Method == http.MethodDelete && r.URL.Path == "/api/v2/saved-queries/42":
+			deletedIDs = append(deletedIDs, 42)
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v2/saved-queries/import":
+			importedZip, _ = io.ReadAll(r.Body)
+			w.WriteHeader(http.StatusCreated)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ce.Close()
+
+	// 1. --validate-only passes on v9.7.1
+	out, err := execute("upload", "--url", ce.URL, "--bearer-token", "tok", "--validate-only")
+	if err != nil {
+		t.Fatalf("--validate-only failed: %q %v", out, err)
+	}
+	if !strings.Contains(out, "adapter gate passed") {
+		t.Fatalf("unexpected validate-only output: %q", out)
+	}
+
+	// 2. Write base and linking payloads and upload with --register-schema --enable-rules-schema --import-queries
+	basePayload := emitter.Payload{
+		Metadata: &emitter.Metadata{SourceKind: "LLMHound"},
+		Graph: emitter.GraphPayload{
+			Nodes: []emitter.NodePayload{{
+				ID:         "svc-1",
+				Kinds:      []string{"LLMHound_JupyterServer", "LLMHound_AIService"},
+				Properties: map[string]any{"name": "jup", "deployment_scope": "s"},
+			}},
+		},
+	}
+	linkPayload := emitter.Payload{
+		Graph: emitter.GraphPayload{
+			Edges: []emitter.EdgePayload{
+				{
+					Kind:  "LLMHound_HostedOn",
+					Start: emitter.EndpointPayload{MatchBy: "id", Value: "svc-1"},
+					End:   emitter.EndpointPayload{MatchBy: "id", Value: "S-1-5-21-EXISTS"},
+				},
+				{
+					Kind:  "LLMHound_HostedOn",
+					Start: emitter.EndpointPayload{MatchBy: "id", Value: "svc-1"},
+					End:   emitter.EndpointPayload{MatchBy: "id", Value: "S-1-5-21-STUB"},
+				},
+				{
+					Kind:  "LLMHound_HostedOn",
+					Start: emitter.EndpointPayload{MatchBy: "id", Value: "svc-1"},
+					End:   emitter.EndpointPayload{MatchBy: "id", Value: "S-1-5-21-MISSING"},
+				},
+			},
+		},
+	}
+	baseBytes, _ := json.Marshal(basePayload)
+	linkBytes, _ := json.Marshal(linkPayload)
+	if err := os.WriteFile("base.json", baseBytes, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile("link.json", linkBytes, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err = execute(
+		"upload",
+		"--url", ce.URL,
+		"--bearer-token", "tok",
+		"--register-schema",
+		"--enable-rules-schema",
+		"--base-file", "base.json",
+		"--linking-file", "link.json",
+		"--import-queries",
+		"--include-can-execute-on",
+		"--poll-interval", "1ms",
+	)
+	if err != nil {
+		t.Fatalf("full upload failed: %q %v", out, err)
+	}
+
+	schemaRaw, _ := registeredSchema.Load().(string)
+	if !strings.Contains(schemaRaw, `"LLMHound_CanExecuteOn"`) || !strings.Contains(schemaRaw, `"is_traversable": true`) {
+		t.Fatalf("expected rules schema with traversable CanExecuteOn, got: %s", schemaRaw)
+	}
+	if len(uploadedFiles) != 2 {
+		t.Fatalf("expected 2 uploaded files (base + filtered linking), got %d", len(uploadedFiles))
+	}
+	if !strings.Contains(string(uploadedFiles[0]), `"source_kind":"LLMHound"`) {
+		t.Fatalf("first upload must contain source_kind")
+	}
+	if strings.Contains(string(uploadedFiles[1]), `"source_kind"`) {
+		t.Fatalf("linking upload must NOT contain source_kind: %s", uploadedFiles[1])
+	}
+	if !strings.Contains(string(uploadedFiles[1]), "S-1-5-21-EXISTS") ||
+		strings.Contains(string(uploadedFiles[1]), "S-1-5-21-STUB") ||
+		strings.Contains(string(uploadedFiles[1]), "S-1-5-21-MISSING") {
+		t.Fatalf("pre-flight filtering mismatch in linking payload: %s", uploadedFiles[1])
+	}
+	if len(deletedIDs) != 1 || deletedIDs[0] != 42 {
+		t.Fatalf("expected existing LLMHound query to be deleted before import, got %v", deletedIDs)
+	}
+	if len(importedZip) == 0 {
+		t.Fatal("expected non-empty saved queries zip import")
+	}
+	if !strings.Contains(out, "Imported 15 saved queries") {
+		t.Fatalf("expected 15 imported saved queries, got: %q", out)
+	}
+
+	// 3. Unpinned CE version fails closed unless --allow-unvalidated-ce is set.
+	serverVersion.Store("v9.8.0")
+	_, err = execute("upload", "--url", ce.URL, "--bearer-token", "tok", "--validate-only")
+	if err == nil || !strings.Contains(err.Error(), "v9.7.1") {
+		t.Fatalf("expected version gate rejection on v9.8.0, got %v", err)
+	}
+	out, err = execute("upload", "--url", ce.URL, "--bearer-token", "tok", "--validate-only", "--allow-unvalidated-ce")
+	if err != nil || !strings.Contains(out, "WARNING [version]") {
+		t.Fatalf("expected warning with --allow-unvalidated-ce, got out=%q err=%v", out, err)
 	}
 }

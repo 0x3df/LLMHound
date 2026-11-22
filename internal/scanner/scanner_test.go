@@ -11,11 +11,13 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/0x3df/LLMHound/internal/config"
 	"github.com/0x3df/LLMHound/internal/content"
+	"github.com/0x3df/LLMHound/internal/correlate"
 	"github.com/0x3df/LLMHound/internal/discovery"
 	"github.com/0x3df/LLMHound/internal/emitter"
 	"github.com/0x3df/LLMHound/internal/evidence"
@@ -41,8 +43,8 @@ func TestScanner_Plan(t *testing.T) {
 	}
 
 	for _, tp := range plans {
-		if len(tp.Surfaces) != 6 {
-			t.Fatalf("target %s expected 6 surfaces, got %d", tp.Target, len(tp.Surfaces))
+		if len(tp.Surfaces) != 15 {
+			t.Fatalf("target %s expected 15 surfaces, got %d", tp.Target, len(tp.Surfaces))
 		}
 
 		surfaceNames := make(map[discovery.Surface]bool)
@@ -105,6 +107,9 @@ func TestScanner_Plan(t *testing.T) {
 		for _, wantSurf := range []discovery.Surface{
 			discovery.SurfaceJupyter, discovery.SurfaceMCP, discovery.SurfaceOllama,
 			discovery.SurfaceA2A, discovery.SurfaceVLLM, discovery.SurfaceQdrant,
+			discovery.SurfaceLiteLLM, discovery.SurfaceMLflow, discovery.SurfaceOpenWebUI, discovery.SurfaceLangServe,
+			discovery.SurfaceRay, discovery.SurfaceLangflow, discovery.SurfaceFlowise,
+			discovery.SurfaceChromaDB, discovery.SurfaceOpenAICompatible,
 		} {
 			if !surfaceNames[wantSurf] {
 				t.Errorf("target %s missing surface %s in plan: %+v", tp.Target, wantSurf, surfaceNames)
@@ -1064,5 +1069,273 @@ func TestScanner_M2bCohortEndToEnd(t *testing.T) {
 	}
 	if resGen.State.IsCompleted("127.0.0.1", "vllm") || len(resGen.State.Nodes()) != 0 {
 		t.Errorf("generic OpenAI server must fail vllm discovery without nodes: nodes=%d", len(resGen.State.Nodes()))
+	}
+}
+
+func TestScanner_PathQualificationRules(t *testing.T) {
+	jupSrv := setupMockJupyter(t)
+	defer jupSrv.Close()
+
+	defs := []discovery.Definition{
+		{
+			Surface:     discovery.SurfaceJupyter,
+			DefaultPort: parsePort(jupSrv.URL),
+			ProbePaths:  discovery.JupyterDefinition().ProbePaths,
+			Match:       discovery.JupyterDefinition().Match,
+		},
+	}
+
+	resolver, err := correlate.New([]correlate.Mapping{{
+		Target:   "127.0.0.1",
+		ObjectID: "S-1-5-21-1-2-3-1103",
+		Kind:     "Computer",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Rules disabled by default -> zero CanExecuteOn edges in linking payload.
+	cfgOff := config.Defaults()
+	cfgOff.Scope = "corp-scope"
+	cfgOff.VantageKey = "scanner-01"
+	cfgOff.Targets = []string{"127.0.0.1"}
+
+	sOff, err := scanner.New(cfgOff, scanner.WithDefinitions(defs), scanner.WithResolver(resolver))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resOff, err := sOff.Scan(context.Background(), []string{"127.0.0.1"}, t.TempDir(), "rules-off")
+	if err != nil {
+		t.Fatal(err)
+	}
+	linkOff, err := os.ReadFile(resOff.Artifacts.LinkingPayloadPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(linkOff), "LLMHound_CanExecuteOn") {
+		t.Fatalf("disabled rules must emit zero CanExecuteOn edges: %s", linkOff)
+	}
+
+	// 2. Enabled rule on mapped Jupyter -> emits sourceless CanExecuteOn in linking payload.
+	cfgOn := cfgOff
+	cfgOn.PathQualification = config.PathQualification{
+		EnabledRules: []string{"jupyter-auth-disabled"},
+		AssumedReachPrincipals: []config.ReachPrincipal{
+			{ObjectID: "S-1-5-21-1-2-3-513", Kind: "Group"},
+		},
+	}
+	sOn, err := scanner.New(cfgOn, scanner.WithDefinitions(defs), scanner.WithResolver(resolver))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resOn, err := sOn.Scan(context.Background(), []string{"127.0.0.1"}, t.TempDir(), "rules-on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseOn, err := os.ReadFile(resOn.Artifacts.BasePayloadPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(baseOn), "LLMHound_CanExecuteOn") {
+		t.Fatalf("CanExecuteOn must never appear in base payload (M0 Q5): %s", baseOn)
+	}
+	linkOn, err := os.ReadFile(resOn.Artifacts.LinkingPayloadPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var linkPayload emitter.Payload
+	if err := json.Unmarshal(linkOn, &linkPayload); err != nil {
+		t.Fatal(err)
+	}
+	if linkPayload.Metadata != nil {
+		t.Fatalf("linking payload must have nil metadata, got %+v", linkPayload.Metadata)
+	}
+	var foundCanExec bool
+	for _, e := range linkPayload.Graph.Edges {
+		if e.Kind == "LLMHound_CanExecuteOn" {
+			foundCanExec = true
+			if e.Start.Value != "S-1-5-21-1-2-3-513" || e.End.Value != "S-1-5-21-1-2-3-1103" {
+				t.Errorf("unexpected CanExecuteOn endpoints: %+v -> %+v", e.Start, e.End)
+			}
+			if e.Properties["rule_id"] != "jupyter-auth-disabled" || e.Properties["reach_basis"] != "scanner_vantage" {
+				t.Errorf("missing rule provenance properties: %+v", e.Properties)
+			}
+		}
+	}
+	if !foundCanExec {
+		t.Fatalf("expected LLMHound_CanExecuteOn edge in linking payload: %s", linkOn)
+	}
+
+	// 3. Enabled rule on unmapped target (NetworkEndpoint) -> fails closed (no CanExecuteOn).
+	sUnmapped, err := scanner.New(cfgOn, scanner.WithDefinitions(defs))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resUnmapped, err := sUnmapped.Scan(context.Background(), []string{"127.0.0.1"}, t.TempDir(), "rules-unmapped")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resUnmapped.Artifacts.LinkingPayloadPath != "" {
+		t.Fatalf("unmapped target must not emit linking payload or CanExecuteOn")
+	}
+}
+
+func TestScanner_ResumeSkipsCompletedAndRepairsTornTail(t *testing.T) {
+	var hitsA atomic.Int32
+	srvA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hitsA.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/version":
+			_, _ = w.Write([]byte(`{"version":"0.6.0"}`))
+		case "/api/tags":
+			_, _ = w.Write([]byte(`{"models":[{"name":"llama3:latest"}]}`))
+		case "/api/ps":
+			_, _ = w.Write([]byte(`{"models":[]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srvA.Close()
+
+	var hitsB atomic.Int32
+	srvB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hitsB.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/version":
+			_, _ = w.Write([]byte(`{"version":"0.6.3"}`))
+		case "/v1/models":
+			_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"meta-llama/Llama-3-8B","object":"model","owned_by":"vllm"}]}`))
+		case "/metrics":
+			w.WriteHeader(http.StatusNotFound)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srvB.Close()
+
+	defA := discovery.OllamaDefinition()
+	defA.DefaultPort = parsePort(srvA.URL)
+	defB := discovery.VLLMDefinition()
+	defB.DefaultPort = parsePort(srvB.URL)
+
+	t1 := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
+	t2 := time.Date(2026, 5, 1, 11, 0, 0, 0, time.UTC)
+
+	cfg := config.Defaults()
+	cfg.Scope = "corp"
+	cfg.VantageKey = "v1"
+	cfg.Targets = []string{"127.0.0.1"}
+	cfg.Bounds.MaxTargets = 10
+	cfg.Content.Enabled = false
+
+	outDir := t.TempDir()
+	prefix := "resume-test"
+
+	s1, err := scanner.New(cfg,
+		scanner.WithNow(func() time.Time { return t1 }),
+		scanner.WithDefinitions([]discovery.Definition{defA}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res1, err := s1.Scan(context.Background(), []string{"127.0.0.1"}, outDir, prefix)
+	if err != nil {
+		t.Fatalf("initial scan: %v", err)
+	}
+	if hitsA.Load() == 0 {
+		t.Fatal("expected initial scan to hit server A")
+	}
+	hitsA.Store(0)
+
+	// Simulate crash leaving an unterminated torn line at EOF.
+	jf, err := os.OpenFile(res1.JournalPath, os.O_WRONLY|os.O_APPEND, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := jf.WriteString(`{"entry_type":"result","result":{"target":"127.0.0.1"`); err != nil {
+		_ = jf.Close()
+		t.Fatal(err)
+	}
+	if err := jf.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Scope mismatch must fail closed without touching completed state.
+	badCfg := cfg
+	badCfg.Scope = "other-scope"
+	sBad, err := scanner.New(badCfg,
+		scanner.WithNow(func() time.Time { return t2 }),
+		scanner.WithDefinitions([]discovery.Definition{defA, defB}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sBad.Resume(context.Background(), res1.JournalPath, []string{"127.0.0.1"}, outDir, prefix); err == nil || !strings.Contains(err.Error(), "scope") {
+		t.Fatalf("expected scope mismatch error on Resume, got %v", err)
+	}
+
+	s2, err := scanner.New(cfg,
+		scanner.WithNow(func() time.Time { return t2 }),
+		scanner.WithDefinitions([]discovery.Definition{defA, defB}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res2, err := s2.Resume(context.Background(), res1.JournalPath, []string{"127.0.0.1"}, outDir, prefix)
+	if err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	if got := hitsA.Load(); got != 0 {
+		t.Fatalf("expected 0 hits on already-completed server A during resume, got %d", got)
+	}
+	if hitsB.Load() == 0 {
+		t.Fatal("expected server B to be probed and collected during resume")
+	}
+
+	baseBytes, err := os.ReadFile(res2.Artifacts.BasePayloadPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var base emitter.Payload
+	if err := json.Unmarshal(baseBytes, &base); err != nil {
+		t.Fatal(err)
+	}
+	var seenA, seenB bool
+	for _, n := range base.Graph.Nodes {
+		obsAt, _ := n.Properties["observed_at"].(string)
+		for _, k := range n.Kinds {
+			switch k {
+			case "LLMHound_OllamaInstance":
+				seenA = true
+				if obsAt != t1.Format(time.RFC3339) {
+					t.Errorf("ollama observed_at = %q, want preserved %q", obsAt, t1.Format(time.RFC3339))
+				}
+			case "LLMHound_VLLMInstance":
+				seenB = true
+				if obsAt != t2.Format(time.RFC3339) {
+					t.Errorf("vllm observed_at = %q, want %q", obsAt, t2.Format(time.RFC3339))
+				}
+			}
+		}
+	}
+	if !seenA || !seenB {
+		t.Fatalf("expected both ollama (%v) and vllm (%v) in resumed base payload", seenA, seenB)
+	}
+
+	evBytes, err := os.ReadFile(res2.Artifacts.EvidenceSidecarPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(evBytes)), "\n")
+	if len(lines) == 0 {
+		t.Fatal("expected evidence records after resume")
+	}
+	for i, line := range lines {
+		var rec evidence.Record
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatalf("evidence line %d invalid JSON: %v", i+1, err)
+		}
 	}
 }

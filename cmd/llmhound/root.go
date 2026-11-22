@@ -1,12 +1,20 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+	"sort"
 	"strings"
+	"time"
 
+	"github.com/0x3df/LLMHound/extension"
+	"github.com/0x3df/LLMHound/internal/bloodhound"
 	"github.com/0x3df/LLMHound/internal/config"
 	"github.com/0x3df/LLMHound/internal/discovery"
+	"github.com/0x3df/LLMHound/internal/rules"
+	"github.com/0x3df/LLMHound/internal/savedsearch"
 	"github.com/0x3df/LLMHound/internal/scanner"
 	"github.com/0x3df/LLMHound/internal/targets"
 	"github.com/spf13/cobra"
@@ -144,7 +152,7 @@ func newRootCommand() *cobra.Command {
 	scanCmd := &cobra.Command{
 		Use:     "scan",
 		Short:   "Remotely enumerate AI infrastructure across configured targets",
-		Long:    "Discovers and enumerates AI services (Jupyter, MCP, Ollama, A2A, vLLM, Qdrant) on prepared\ntargets, writing through a checkpoint journal and emitting OpenGraph JSON\nand evidence sidecar files.",
+		Long:    "Discovers and enumerates AI services (Jupyter, MCP, Ollama, A2A, vLLM, Qdrant, LiteLLM,\nMLflow, Open WebUI, LangServe, Generic OpenAI-compatible, Ray, Langflow, Flowise, ChromaDB)\non prepared targets, writing through a checkpoint journal and emitting OpenGraph JSON\nand evidence sidecar files.",
 		Args:    cobra.NoArgs,
 		PreRunE: prepare,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -165,16 +173,7 @@ func newRootCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Scan completed for %d target(s)\n", res.TargetsCount)
-			fmt.Fprintf(cmd.OutOrStdout(), "  Base payload: %s\n", res.Artifacts.BasePayloadPath)
-			if res.Artifacts.LinkingPayloadPath != "" {
-				fmt.Fprintf(cmd.OutOrStdout(), "  Linking payload: %s\n", res.Artifacts.LinkingPayloadPath)
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "  Evidence sidecar: %s\n", res.Artifacts.EvidenceSidecarPath)
-			fmt.Fprintf(cmd.OutOrStdout(), "  Checkpoint journal: %s\n", res.JournalPath)
-			if res.ContentPath != "" {
-				fmt.Fprintf(cmd.OutOrStdout(), "  Content file: %s\n", res.ContentPath)
-			}
+			printScanSummary(cmd, "Scan", res)
 			return nil
 		},
 	}
@@ -183,11 +182,273 @@ func newRootCommand() *cobra.Command {
 	scanCmd.Flags().StringVar(&discoveryFile, "discovery-file", "", "Optional custom discovery fingerprint definitions file")
 	root.AddCommand(scanCmd)
 
-	root.AddCommand(&cobra.Command{
-		Use: "upload", Short: "upload (not implemented; reserved for M3)", Args: cobra.NoArgs,
-		RunE: func(*cobra.Command, []string) error {
-			return fmt.Errorf("upload is not implemented (M3); no CE API calls were made")
+	var resumeJournalPath string
+	var resumeOutputDir string
+	var resumePrefix string
+	var resumeDiscoveryFile string
+
+	resumeCmd := &cobra.Command{
+		Use:     "resume",
+		Short:   "Resume an interrupted scan from a checkpoint journal",
+		Long:    "Replays an existing checkpoint journal, repairs any torn tail line, skips\nalready-completed (target, surface) pairs, collects remaining work, and\nre-emits OpenGraph JSON, evidence sidecar, and content artifacts.",
+		Args:    cobra.NoArgs,
+		PreRunE: prepare,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if strings.TrimSpace(resumeJournalPath) == "" {
+				return fmt.Errorf("--journal is required")
+			}
+			var scanOpts []scanner.Option
+			scanOpts = append(scanOpts, scanner.WithCollectorVersion(version))
+			if resumeDiscoveryFile != "" {
+				defs, err := discovery.LoadDefinitionsFile(resumeDiscoveryFile)
+				if err != nil {
+					return fmt.Errorf("load discovery definitions: %w", err)
+				}
+				scanOpts = append(scanOpts, scanner.WithDefinitions(defs))
+			}
+			s, err := scanner.New(effectiveConfig, scanOpts...)
+			if err != nil {
+				return err
+			}
+			res, err := s.Resume(cmd.Context(), resumeJournalPath, prepared, resumeOutputDir, resumePrefix)
+			if err != nil {
+				return err
+			}
+			printScanSummary(cmd, "Resume", res)
+			return nil
 		},
-	})
+	}
+	resumeCmd.Flags().StringVar(&resumeJournalPath, "journal", "", "Path to existing .journal.jsonl file (required)")
+	resumeCmd.Flags().StringVar(&resumeOutputDir, "output-dir", "", "Directory to write resumed scan artifacts (default: journal directory)")
+	resumeCmd.Flags().StringVar(&resumePrefix, "prefix", "", "Filename prefix for resumed artifacts (default: derived from journal filename)")
+	resumeCmd.Flags().StringVar(&resumeDiscoveryFile, "discovery-file", "", "Optional custom discovery fingerprint definitions file")
+	root.AddCommand(resumeCmd)
+
+	var (
+		bhURL             string
+		bhTokenID         string
+		bhTokenKey        string
+		bhBearerToken     string
+		bhUsername        string
+		bhPassword        string
+		baseFile          string
+		linkingFile       string
+		registerSchema    bool
+		enableRulesSchema bool
+		importQueries     bool
+		queriesDir        string
+		includeCanExec    bool
+		validateOnly      bool
+		allowUnvalidated  bool
+		uploadTimeout     time.Duration
+		pollInterval      time.Duration
+		maxRetries        int
+		insecureCE        bool
+	)
+
+	uploadCmd := &cobra.Command{
+		Use:   "upload",
+		Short: "Validate BloodHound CE adapter, register schema, upload OpenGraph payloads, and import saved queries",
+		Long:  "Runs the M3 BloodHound CE validation gate, registers the LLMHound extension schema,\nperforms M0 Q5 two-step upload (with read-only Cypher existence pre-flight for linking\npayloads), and imports saved searches into BloodHound CE.",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			resolvedURL := firstNonEmpty(bhURL, os.Getenv("BLOODHOUND_URL"))
+			auth := bloodhound.AuthConfig{
+				TokenID:     firstNonEmpty(bhTokenID, os.Getenv("BLOODHOUND_TOKEN_ID")),
+				TokenKey:    firstNonEmpty(bhTokenKey, os.Getenv("BLOODHOUND_TOKEN_KEY")),
+				BearerToken: firstNonEmpty(bhBearerToken, os.Getenv("BLOODHOUND_BEARER_TOKEN")),
+				Username:    firstNonEmpty(bhUsername, os.Getenv("BLOODHOUND_USERNAME")),
+				Password:    firstNonEmpty(bhPassword, os.Getenv("BLOODHOUND_PASSWORD")),
+			}
+
+			client, err := bloodhound.NewClient(bloodhound.ClientConfig{
+				BaseURL:   resolvedURL,
+				Auth:      auth,
+				Timeout:   uploadTimeout,
+				Insecure:  insecureCE,
+				UserAgent: "LLMHound/" + version,
+			})
+			if err != nil {
+				return err
+			}
+
+			if !validateOnly && !registerSchema && baseFile == "" && linkingFile == "" && !importQueries {
+				return fmt.Errorf("nothing to do: specify at least one of --validate-only, --register-schema, --base-file, --linking-file, or --import-queries")
+			}
+
+			ctx := cmd.Context()
+			gate, err := client.ValidateAdapter(ctx, allowUnvalidated)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "BloodHound CE %s (%s) adapter gate passed\n", gate.ServerVersion, gate.Edition)
+			for _, chk := range gate.Checks {
+				if chk.Warning != "" {
+					fmt.Fprintf(cmd.OutOrStdout(), "  WARNING [%s]: %s\n", chk.Name, chk.Warning)
+				}
+			}
+
+			if validateOnly {
+				return nil
+			}
+
+			if registerSchema {
+				schemaBytes := extension.SchemaJSON
+				if enableRulesSchema {
+					schemaBytes, err = rules.SchemaWithCanExecuteOn(schemaBytes)
+					if err != nil {
+						return fmt.Errorf("build rules schema extension: %w", err)
+					}
+				}
+				if err := client.RegisterExtension(ctx, schemaBytes); err != nil {
+					return fmt.Errorf("register extension schema: %w", err)
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "Extension schema registered (rules_schema=%v)\n", enableRulesSchema)
+			}
+
+			if baseFile != "" || linkingFile != "" {
+				var opts bloodhound.UploadOptions
+				opts.PollInterval = pollInterval
+				opts.PollTimeout = uploadTimeout
+				opts.MaxRetries = maxRetries
+				if baseFile != "" {
+					b, err := os.ReadFile(baseFile)
+					if err != nil {
+						return fmt.Errorf("read base file %q: %w", baseFile, err)
+					}
+					opts.BasePayloadBytes = b
+					opts.BaseFileName = filepath.Base(baseFile)
+				}
+				if linkingFile != "" {
+					b, err := os.ReadFile(linkingFile)
+					if err != nil {
+						return fmt.Errorf("read linking file %q: %w", linkingFile, err)
+					}
+					opts.LinkingPayloadBytes = b
+					opts.LinkingFileName = filepath.Base(linkingFile)
+				}
+				rep, err := client.UploadScan(ctx, opts)
+				if err != nil {
+					return err
+				}
+				if rep.BaseJob != nil {
+					fmt.Fprintf(cmd.OutOrStdout(), "  Base payload uploaded: job=%d status=%d attempts=%d\n", rep.BaseJob.JobID, rep.BaseJob.Status, rep.BaseJob.Attempts)
+				}
+				if linkingFile != "" {
+					fmt.Fprintf(cmd.OutOrStdout(), "  Linking pre-flight: kept=%d skipped=%d\n", rep.KeptEdges, len(rep.SkippedEdges))
+					for _, sk := range rep.SkippedEdges {
+						fmt.Fprintf(cmd.OutOrStdout(), "    SKIP edge %s %s -> %s: %s\n", sk.Kind, sk.StartID, sk.EndID, sk.Reason)
+					}
+					if rep.LinkingJob != nil {
+						fmt.Fprintf(cmd.OutOrStdout(), "  Linking payload uploaded: job=%d status=%d attempts=%d\n", rep.LinkingJob.JobID, rep.LinkingJob.Status, rep.LinkingJob.Attempts)
+					}
+				}
+			}
+
+			if importQueries {
+				var queries []savedsearch.Query
+				if queriesDir != "" {
+					queries, err = loadQueriesDir(queriesDir)
+					if err != nil {
+						return err
+					}
+				} else {
+					kinds, err := client.TraversablePathKinds(ctx, includeCanExec)
+					if err != nil {
+						return fmt.Errorf("discover traversable path kinds: %w", err)
+					}
+					if len(kinds) == 0 {
+						return fmt.Errorf("no traversable path kinds reported by BloodHound CE; pass --queries-dir or register extension edges first")
+					}
+					queries = savedsearch.GenerateWithOptions(kinds, savedsearch.GenerateOptions{
+						IncludeCanExecuteOn: includeCanExec,
+					})
+				}
+				n, err := client.ImportSavedQueries(ctx, queries)
+				if err != nil {
+					return fmt.Errorf("import saved queries: %w", err)
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "  Imported %d saved queries into BloodHound CE\n", n)
+			}
+
+			return nil
+		},
+	}
+	uploadCmd.Flags().StringVar(&bhURL, "url", "", "BloodHound CE base URL (or BLOODHOUND_URL)")
+	uploadCmd.Flags().StringVar(&bhTokenID, "token-id", "", "BloodHound HMAC Token ID (or BLOODHOUND_TOKEN_ID)")
+	uploadCmd.Flags().StringVar(&bhTokenKey, "token-key", "", "BloodHound HMAC Token Key (or BLOODHOUND_TOKEN_KEY)")
+	uploadCmd.Flags().StringVar(&bhBearerToken, "bearer-token", "", "BloodHound Bearer JWT (or BLOODHOUND_BEARER_TOKEN)")
+	uploadCmd.Flags().StringVar(&bhUsername, "username", "", "BloodHound username for login (or BLOODHOUND_USERNAME)")
+	uploadCmd.Flags().StringVar(&bhPassword, "password", "", "BloodHound password for login (or BLOODHOUND_PASSWORD)")
+	uploadCmd.Flags().StringVar(&baseFile, "base-file", "", "Path to base OpenGraph JSON payload (with source_kind: LLMHound)")
+	uploadCmd.Flags().StringVar(&linkingFile, "linking-file", "", "Path to sourceless linking OpenGraph JSON payload")
+	uploadCmd.Flags().BoolVar(&registerSchema, "register-schema", false, "Register the embedded LLMHound extension schema before uploading")
+	uploadCmd.Flags().BoolVar(&enableRulesSchema, "enable-rules-schema", false, "When registering schema, include opt-in traversable LLMHound_CanExecuteOn")
+	uploadCmd.Flags().BoolVar(&importQueries, "import-queries", false, "Import LLMHound saved queries into BloodHound CE")
+	uploadCmd.Flags().StringVar(&queriesDir, "queries-dir", "", "Directory of saved-query JSON files to import (default: generate from CE traversable path kinds)")
+	uploadCmd.Flags().BoolVar(&includeCanExec, "include-can-execute-on", false, "Include LLMHound_CanExecuteOn when generating saved queries")
+	uploadCmd.Flags().BoolVar(&validateOnly, "validate-only", false, "Run the BloodHound CE adapter validation gate and exit")
+	uploadCmd.Flags().BoolVar(&allowUnvalidated, "allow-unvalidated-ce", false, "Allow non-pinned CE version with a warning (off by default)")
+	uploadCmd.Flags().DurationVar(&uploadTimeout, "timeout", 5*time.Minute, "HTTP request and upload job poll timeout")
+	uploadCmd.Flags().DurationVar(&pollInterval, "poll-interval", 1*time.Second, "Upload job status polling interval")
+	uploadCmd.Flags().IntVar(&maxRetries, "max-retries", 2, "Retries on canceled upload jobs")
+	uploadCmd.Flags().BoolVar(&insecureCE, "insecure-ce", false, "Bypass TLS verification for BloodHound CE API (explicit opt-in; off by default)")
+	root.AddCommand(uploadCmd)
 	return root
+}
+
+func printScanSummary(cmd *cobra.Command, verb string, res *scanner.ScanResult) {
+	fmt.Fprintf(cmd.OutOrStdout(), "%s completed for %d target(s)\n", verb, res.TargetsCount)
+	fmt.Fprintf(cmd.OutOrStdout(), "  Base payload: %s\n", res.Artifacts.BasePayloadPath)
+	if res.Artifacts.LinkingPayloadPath != "" {
+		fmt.Fprintf(cmd.OutOrStdout(), "  Linking payload: %s\n", res.Artifacts.LinkingPayloadPath)
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "  Evidence sidecar: %s\n", res.Artifacts.EvidenceSidecarPath)
+	fmt.Fprintf(cmd.OutOrStdout(), "  Checkpoint journal: %s\n", res.JournalPath)
+	if res.ContentPath != "" {
+		fmt.Fprintf(cmd.OutOrStdout(), "  Content file: %s\n", res.ContentPath)
+	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
+}
+
+func loadQueriesDir(dir string) ([]savedsearch.Query, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("read queries directory %q: %w", dir, err)
+	}
+	var names []string
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".json") {
+			names = append(names, entry.Name())
+		}
+	}
+	sort.Strings(names)
+	if len(names) == 0 {
+		return nil, fmt.Errorf("no .json saved query files found in %q", dir)
+	}
+	out := make([]savedsearch.Query, 0, len(names))
+	for _, name := range names {
+		p := filepath.Join(dir, name)
+		raw, err := os.ReadFile(p)
+		if err != nil {
+			return nil, fmt.Errorf("read saved query %q: %w", p, err)
+		}
+		var q savedsearch.Query
+		if err := json.Unmarshal(raw, &q); err != nil {
+			return nil, fmt.Errorf("decode saved query %q: %w", p, err)
+		}
+		if strings.TrimSpace(q.Name) == "" || strings.TrimSpace(q.Query) == "" {
+			return nil, fmt.Errorf("saved query %q missing name or query", p)
+		}
+		out = append(out, q)
+	}
+	return out, nil
 }

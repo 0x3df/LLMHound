@@ -325,8 +325,11 @@ func TestMCPDefinitionMatch(t *testing.T) {
 
 func TestBuiltinDefinitions(t *testing.T) {
 	defs := discovery.BuiltinDefinitions()
-	if len(defs) != 6 {
-		t.Fatalf("expected 6 builtin definitions, got %d", len(defs))
+	if len(defs) != 15 {
+		t.Fatalf("expected 15 builtin definitions, got %d", len(defs))
+	}
+	if defs[len(defs)-1].Surface != discovery.SurfaceOpenAICompatible {
+		t.Fatalf("last builtin definition must be %s, got %s", discovery.SurfaceOpenAICompatible, defs[len(defs)-1].Surface)
 	}
 
 	seen := make(map[discovery.Surface]bool)
@@ -346,6 +349,9 @@ func TestBuiltinDefinitions(t *testing.T) {
 	for _, s := range []discovery.Surface{
 		discovery.SurfaceJupyter, discovery.SurfaceOllama, discovery.SurfaceMCP,
 		discovery.SurfaceA2A, discovery.SurfaceVLLM, discovery.SurfaceQdrant,
+		discovery.SurfaceLiteLLM, discovery.SurfaceMLflow, discovery.SurfaceOpenWebUI, discovery.SurfaceLangServe,
+		discovery.SurfaceRay, discovery.SurfaceLangflow, discovery.SurfaceFlowise,
+		discovery.SurfaceChromaDB, discovery.SurfaceOpenAICompatible,
 	} {
 		if !seen[s] {
 			t.Errorf("expected surface %s in builtin definitions", s)
@@ -509,6 +515,132 @@ func TestA2AVLLMQdrantDefinitionsMatch(t *testing.T) {
 			path: "/",
 			handler: func(w http.ResponseWriter, r *http.Request) {
 				_, _ = w.Write([]byte(`<html>welcome</html>`))
+			},
+			wantMatch: false,
+		},
+		{
+			name: "litellm openapi",
+			def:  discovery.LiteLLMDefinition(),
+			path: "/openapi.json",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(`{"info":{"title":"LiteLLM API","version":"0.1.0"},"paths":{"/v1/models":{}}}`))
+			},
+			wantMatch: true,
+		},
+		{
+			name: "litellm rejects generic openai models",
+			def:  discovery.LiteLLMDefinition(),
+			path: "/v1/models",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"gpt-4o","owned_by":"openai"}]}`))
+			},
+			wantMatch: false,
+		},
+		{
+			name: "mlflow experiments",
+			def:  discovery.MLflowDefinition(),
+			path: "/api/2.0/mlflow/experiments/search?max_results=1",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(`{"experiments":[]}`))
+			},
+			wantMatch: true,
+		},
+		{
+			name: "open_webui config",
+			def:  discovery.OpenWebUIDefinition(),
+			path: "/api/config",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(`{"status":true,"name":"Open WebUI","features":{"auth":true}}`))
+			},
+			wantMatch: true,
+		},
+		{
+			name: "langserve openapi runnable routes",
+			def:  discovery.LangServeDefinition(),
+			path: "/openapi.json",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(`{"info":{"title":"App","version":"1.0"},"paths":{"/chain/invoke":{},"/chain/input_schema":{}}}`))
+			},
+			wantMatch: true,
+		},
+		{
+			name: "langserve rejects generic fastapi",
+			def:  discovery.LangServeDefinition(),
+			path: "/openapi.json",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(`{"info":{"title":"FastAPI","version":"0.1.0"},"paths":{"/health":{}}}`))
+			},
+			wantMatch: false,
+		},
+		{
+			name: "ray version",
+			def:  discovery.RayDefinition(),
+			path: "/api/version",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(`{"version":"0.8.0","ray_version":"2.37.0","ray_commit":"abc"}`))
+			},
+			wantMatch: true,
+		},
+		{
+			name: "ray rejects ollama version",
+			def:  discovery.RayDefinition(),
+			path: "/api/version",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(`{"version":"0.3.12"}`))
+			},
+			wantMatch: false,
+		},
+		{
+			name: "langflow version",
+			def:  discovery.LangflowDefinition(),
+			path: "/api/v1/version",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(`{"version":"1.0.19","main_version":"1.0.19","package":"Langflow"}`))
+			},
+			wantMatch: true,
+		},
+		{
+			name: "flowise rejects langflow version",
+			def:  discovery.FlowiseDefinition(),
+			path: "/api/v1/version",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(`{"version":"1.0.19","main_version":"1.0.19","package":"Langflow"}`))
+			},
+			wantMatch: false,
+		},
+		{
+			name: "flowise version",
+			def:  discovery.FlowiseDefinition(),
+			path: "/api/v1/version",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(`{"version":"2.1.4"}`))
+			},
+			wantMatch: true,
+		},
+		{
+			name: "chromadb heartbeat",
+			def:  discovery.ChromaDBDefinition(),
+			path: "/api/v2/heartbeat",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(`{"nanosecond heartbeat":1700000000}`))
+			},
+			wantMatch: true,
+		},
+		{
+			name: "openai_compatible matches generic models",
+			def:  discovery.OpenAICompatibleDefinition(),
+			path: "/v1/models",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"local-llm","owned_by":"custom"}]}`))
+			},
+			wantMatch: true,
+		},
+		{
+			name: "openai_compatible rejects vllm models",
+			def:  discovery.OpenAICompatibleDefinition(),
+			path: "/v1/models",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"llama3","owned_by":"vllm"}]}`))
 			},
 			wantMatch: false,
 		},

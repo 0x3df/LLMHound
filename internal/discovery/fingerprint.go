@@ -17,12 +17,21 @@ import (
 type Surface string
 
 const (
-	SurfaceJupyter Surface = "jupyter"
-	SurfaceOllama  Surface = "ollama"
-	SurfaceMCP     Surface = "mcp"
-	SurfaceA2A     Surface = "a2a"
-	SurfaceVLLM    Surface = "vllm"
-	SurfaceQdrant  Surface = "qdrant"
+	SurfaceJupyter          Surface = "jupyter"
+	SurfaceOllama           Surface = "ollama"
+	SurfaceMCP              Surface = "mcp"
+	SurfaceA2A              Surface = "a2a"
+	SurfaceVLLM             Surface = "vllm"
+	SurfaceQdrant           Surface = "qdrant"
+	SurfaceLiteLLM          Surface = "litellm"
+	SurfaceMLflow           Surface = "mlflow"
+	SurfaceOpenWebUI        Surface = "open_webui"
+	SurfaceLangServe        Surface = "langserve"
+	SurfaceRay              Surface = "ray"
+	SurfaceLangflow         Surface = "langflow"
+	SurfaceFlowise          Surface = "flowise"
+	SurfaceChromaDB         Surface = "chromadb"
+	SurfaceOpenAICompatible Surface = "openai_compatible"
 )
 
 // MatchFunc inspects an HTTP probe response to verify a service match.
@@ -37,6 +46,7 @@ type Definition struct {
 }
 
 // BuiltinDefinitions returns embedded discovery definitions.
+// Generic OpenAI-compatible is placed last so specific surfaces match first.
 func BuiltinDefinitions() []Definition {
 	return []Definition{
 		JupyterDefinition(),
@@ -45,6 +55,15 @@ func BuiltinDefinitions() []Definition {
 		A2ADefinition(),
 		VLLMDefinition(),
 		QdrantDefinition(),
+		LiteLLMDefinition(),
+		MLflowDefinition(),
+		OpenWebUIDefinition(),
+		LangServeDefinition(),
+		RayDefinition(),
+		LangflowDefinition(),
+		FlowiseDefinition(),
+		ChromaDBDefinition(),
+		OpenAICompatibleDefinition(),
 	}
 }
 
@@ -314,6 +333,393 @@ func QdrantDefinition() Definition {
 			}
 			if status == http.StatusUnauthorized || status == http.StatusForbidden {
 				return strings.Contains(bodyStr, "qdrant") || strings.Contains(strings.ToLower(headers.Get("Www-Authenticate")), "qdrant")
+			}
+			return false
+		},
+	}
+}
+
+// LiteLLMDefinition returns the fingerprint definition for LiteLLM proxy gateways.
+func LiteLLMDefinition() Definition {
+	return Definition{
+		Surface:     SurfaceLiteLLM,
+		DefaultPort: 4000,
+		ProbePaths:  []string{"/openapi.json", "/model/info", "/v1/models"},
+		Match: func(status int, headers http.Header, body []byte) bool {
+			for k := range headers {
+				if strings.HasPrefix(strings.ToLower(k), "x-litellm-") {
+					return true
+				}
+			}
+			if strings.Contains(strings.ToLower(headers.Get("Server")), "litellm") {
+				return true
+			}
+			bodyStr := strings.ToLower(string(body))
+			if status == http.StatusOK {
+				var doc struct {
+					Info struct {
+						Title string `json:"title"`
+					} `json:"info"`
+					Paths map[string]json.RawMessage `json:"paths"`
+				}
+				if json.Unmarshal(body, &doc) == nil {
+					if strings.Contains(strings.ToLower(doc.Info.Title), "litellm") {
+						return true
+					}
+					if _, hasModels := doc.Paths["/v1/models"]; hasModels {
+						for _, marker := range []string{"/model/info", "/key/generate", "/spend/logs"} {
+							if _, ok := doc.Paths[marker]; ok {
+								return true
+							}
+						}
+					}
+				}
+				var mInfo struct {
+					Data []struct {
+						LiteLLMParams *struct {
+							Model             string `json:"model"`
+							APIBase           string `json:"api_base"`
+							CustomLLMProvider string `json:"custom_llm_provider"`
+						} `json:"litellm_params"`
+						ModelInfo *struct {
+							LiteLLMProvider string `json:"litellm_provider"`
+						} `json:"model_info"`
+					} `json:"data"`
+				}
+				if json.Unmarshal(body, &mInfo) == nil {
+					for _, e := range mInfo.Data {
+						if (e.LiteLLMParams != nil && (e.LiteLLMParams.Model != "" || e.LiteLLMParams.APIBase != "" || e.LiteLLMParams.CustomLLMProvider != "")) ||
+							(e.ModelInfo != nil && e.ModelInfo.LiteLLMProvider != "") {
+							return true
+						}
+					}
+				}
+			}
+			if status == http.StatusUnauthorized || status == http.StatusForbidden {
+				return strings.Contains(bodyStr, "litellm") || strings.Contains(strings.ToLower(headers.Get("Www-Authenticate")), "litellm")
+			}
+			return false
+		},
+	}
+}
+
+// MLflowDefinition returns the fingerprint definition for MLflow tracking servers.
+func MLflowDefinition() Definition {
+	return Definition{
+		Surface:     SurfaceMLflow,
+		DefaultPort: 5000,
+		ProbePaths:  []string{"/api/2.0/mlflow/experiments/search?max_results=1", "/api/2.0/mlflow/registered-models/search?max_results=1"},
+		Match: func(status int, headers http.Header, body []byte) bool {
+			if strings.Contains(strings.ToLower(headers.Get("Server")), "mlflow") {
+				return true
+			}
+			bodyStr := strings.ToLower(string(body))
+			if status == http.StatusOK {
+				var doc map[string]json.RawMessage
+				if json.Unmarshal(body, &doc) == nil {
+					if raw, ok := doc["experiments"]; ok && strings.HasPrefix(strings.TrimSpace(string(raw)), "[") {
+						return true
+					}
+					if raw, ok := doc["registered_models"]; ok && strings.HasPrefix(strings.TrimSpace(string(raw)), "[") {
+						return true
+					}
+				}
+			}
+			if status == http.StatusUnauthorized || status == http.StatusForbidden {
+				return strings.Contains(bodyStr, "mlflow") || strings.Contains(strings.ToLower(headers.Get("Www-Authenticate")), "mlflow")
+			}
+			return false
+		},
+	}
+}
+
+// OpenWebUIDefinition returns the fingerprint definition for Open WebUI instances.
+func OpenWebUIDefinition() Definition {
+	return Definition{
+		Surface:     SurfaceOpenWebUI,
+		DefaultPort: 3000,
+		ProbePaths:  []string{"/api/config"},
+		Match: func(status int, headers http.Header, body []byte) bool {
+			srv := strings.ToLower(headers.Get("Server"))
+			if strings.Contains(srv, "open-webui") || strings.Contains(srv, "open webui") {
+				return true
+			}
+			bodyStr := strings.ToLower(string(body))
+			if status == http.StatusOK {
+				var doc struct {
+					Status            *bool           `json:"status"`
+					Name              string          `json:"name"`
+					Onboarding        json.RawMessage `json:"onboarding"`
+					DefaultModels     json.RawMessage `json:"default_models"`
+					OllamaBaseURLs    []string        `json:"ollama_base_urls"`
+					OpenAIAPIBaseURLs []string        `json:"openai_api_base_urls"`
+					Features          *struct {
+						Auth         *bool `json:"auth"`
+						EnableSignup *bool `json:"enable_signup"`
+					} `json:"features"`
+				}
+				if json.Unmarshal(body, &doc) == nil {
+					if strings.Contains(strings.ToLower(doc.Name), "open webui") {
+						return true
+					}
+					if doc.Features != nil && (doc.Features.Auth != nil || doc.Features.EnableSignup != nil) {
+						return true
+					}
+					if len(doc.Onboarding) > 0 || (len(doc.DefaultModels) > 0 && doc.Status != nil) ||
+						len(doc.OllamaBaseURLs) > 0 || len(doc.OpenAIAPIBaseURLs) > 0 {
+						return true
+					}
+				}
+			}
+			if status == http.StatusUnauthorized || status == http.StatusForbidden {
+				return strings.Contains(bodyStr, "open webui") || strings.Contains(bodyStr, "open-webui") || strings.Contains(strings.ToLower(headers.Get("Www-Authenticate")), "open-webui")
+			}
+			return false
+		},
+	}
+}
+
+// LangServeDefinition returns the fingerprint definition for LangServe applications.
+func LangServeDefinition() Definition {
+	return Definition{
+		Surface:     SurfaceLangServe,
+		DefaultPort: 8000,
+		ProbePaths:  []string{"/openapi.json"},
+		Match: func(status int, headers http.Header, body []byte) bool {
+			if headers.Get("X-LangServe-Version") != "" || headers.Get("X-Langserve-Version") != "" {
+				return true
+			}
+			bodyStr := strings.ToLower(string(body))
+			if status == http.StatusOK {
+				var doc struct {
+					Info struct {
+						Title             string `json:"title"`
+						Description       string `json:"description"`
+						XLangServeVersion string `json:"x-langserve-version"`
+					} `json:"info"`
+					Paths map[string]json.RawMessage `json:"paths"`
+				}
+				if json.Unmarshal(body, &doc) == nil {
+					if strings.Contains(strings.ToLower(doc.Info.Title), "langserve") ||
+						strings.Contains(strings.ToLower(doc.Info.Description), "langserve") ||
+						doc.Info.XLangServeVersion != "" {
+						return true
+					}
+					byBase := make(map[string]map[string]bool)
+					suffixes := []string{"/invoke", "/batch", "/stream", "/stream_log", "/stream_events", "/input_schema", "/output_schema", "/config_schema", "/playground"}
+					for p := range doc.Paths {
+						clean := strings.TrimRight(p, "/")
+						for _, suf := range suffixes {
+							if strings.HasSuffix(clean, suf) {
+								base := strings.TrimSuffix(clean, suf)
+								if byBase[base] == nil {
+									byBase[base] = make(map[string]bool)
+								}
+								byBase[base][suf] = true
+								break
+							}
+						}
+					}
+					for _, seen := range byBase {
+						hasInvoke := seen["/invoke"] || seen["/batch"] || seen["/stream"] || seen["/stream_log"] || seen["/stream_events"]
+						hasSchema := seen["/input_schema"] || seen["/output_schema"] || seen["/config_schema"] || seen["/playground"]
+						if (hasInvoke && hasSchema) || len(seen) >= 3 {
+							return true
+						}
+					}
+				}
+			}
+			if status == http.StatusUnauthorized || status == http.StatusForbidden {
+				return strings.Contains(bodyStr, "langserve") || strings.Contains(strings.ToLower(headers.Get("Www-Authenticate")), "langserve")
+			}
+			return false
+		},
+	}
+}
+
+// RayDefinition returns the fingerprint definition for Ray Dashboard endpoints.
+func RayDefinition() Definition {
+	return Definition{
+		Surface:     SurfaceRay,
+		DefaultPort: 8265,
+		ProbePaths:  []string{"/api/version", "/api/cluster_status", "/api/jobs/"},
+		Match: func(status int, headers http.Header, body []byte) bool {
+			bodyStr := strings.ToLower(string(body))
+			if status == http.StatusOK {
+				var ver struct {
+					RayVersion string `json:"ray_version"`
+					RayCommit  string `json:"ray_commit"`
+				}
+				if json.Unmarshal(body, &ver) == nil && (strings.TrimSpace(ver.RayVersion) != "" || strings.TrimSpace(ver.RayCommit) != "") {
+					return true
+				}
+				var cs struct {
+					Result bool `json:"result"`
+					Data   struct {
+						ClusterStatus     json.RawMessage `json:"clusterStatus"`
+						LoadMetricsReport json.RawMessage `json:"loadMetricsReport"`
+					} `json:"data"`
+				}
+				if json.Unmarshal(body, &cs) == nil && cs.Result && (len(cs.Data.ClusterStatus) > 0 || len(cs.Data.LoadMetricsReport) > 0) {
+					return true
+				}
+				var jobs []struct {
+					SubmissionID string `json:"submission_id"`
+				}
+				if json.Unmarshal(body, &jobs) == nil {
+					for _, j := range jobs {
+						if j.SubmissionID != "" {
+							return true
+						}
+					}
+				}
+			}
+			if status == http.StatusUnauthorized || status == http.StatusForbidden {
+				return strings.Contains(bodyStr, "ray") || strings.Contains(strings.ToLower(headers.Get("Www-Authenticate")), "ray")
+			}
+			return false
+		},
+	}
+}
+
+// LangflowDefinition returns the fingerprint definition for Langflow endpoints.
+func LangflowDefinition() Definition {
+	return Definition{
+		Surface:     SurfaceLangflow,
+		DefaultPort: 7860,
+		ProbePaths:  []string{"/api/v1/version", "/api/v1/auto_login"},
+		Match: func(status int, headers http.Header, body []byte) bool {
+			bodyStr := strings.ToLower(string(body))
+			if status == http.StatusOK {
+				var ver struct {
+					Version     string `json:"version"`
+					MainVersion string `json:"main_version"`
+					Package     string `json:"package"`
+				}
+				if json.Unmarshal(body, &ver) == nil {
+					if strings.Contains(strings.ToLower(ver.Package), "langflow") ||
+						(strings.TrimSpace(ver.MainVersion) != "" && strings.TrimSpace(ver.Version) != "") {
+						return true
+					}
+				}
+				var al struct {
+					TokenType string `json:"token_type"`
+					AutoLogin *bool  `json:"auto_login"`
+				}
+				if json.Unmarshal(body, &al) == nil && (strings.TrimSpace(al.TokenType) != "" || al.AutoLogin != nil) {
+					return true
+				}
+			}
+			if status == http.StatusUnauthorized || status == http.StatusForbidden {
+				return strings.Contains(bodyStr, "langflow") || strings.Contains(strings.ToLower(headers.Get("Www-Authenticate")), "langflow")
+			}
+			return false
+		},
+	}
+}
+
+// FlowiseDefinition returns the fingerprint definition for Flowise endpoints.
+func FlowiseDefinition() Definition {
+	return Definition{
+		Surface:     SurfaceFlowise,
+		DefaultPort: 3000,
+		ProbePaths:  []string{"/api/v1/chatflows", "/api/v1/version"},
+		Match: func(status int, headers http.Header, body []byte) bool {
+			if strings.Contains(strings.ToLower(headers.Get("Server")), "flowise") {
+				return true
+			}
+			bodyStr := strings.ToLower(string(body))
+			if status == http.StatusOK {
+				var flows []struct {
+					FlowData string `json:"flowData"`
+					IsPublic *bool  `json:"isPublic"`
+					Deployed *bool  `json:"deployed"`
+				}
+				if json.Unmarshal(body, &flows) == nil {
+					for _, f := range flows {
+						if f.FlowData != "" || f.IsPublic != nil || f.Deployed != nil {
+							return true
+						}
+					}
+				}
+				var ver struct {
+					Version     string `json:"version"`
+					Package     string `json:"package"`
+					MainVersion string `json:"main_version"`
+				}
+				var doc map[string]json.RawMessage
+				if json.Unmarshal(body, &doc) == nil && len(doc) == 1 && doc["version"] != nil &&
+					json.Unmarshal(body, &ver) == nil && strings.TrimSpace(ver.Version) != "" &&
+					ver.Package == "" && ver.MainVersion == "" {
+					return true
+				}
+			}
+			if status == http.StatusUnauthorized || status == http.StatusForbidden {
+				return strings.Contains(bodyStr, "flowise") || strings.Contains(strings.ToLower(headers.Get("Www-Authenticate")), "flowise")
+			}
+			return false
+		},
+	}
+}
+
+// ChromaDBDefinition returns the fingerprint definition for ChromaDB endpoints.
+func ChromaDBDefinition() Definition {
+	return Definition{
+		Surface:     SurfaceChromaDB,
+		DefaultPort: 8000,
+		ProbePaths:  []string{"/api/v2/heartbeat", "/api/v1/heartbeat"},
+		Match: func(status int, headers http.Header, body []byte) bool {
+			bodyStr := strings.ToLower(string(body))
+			if status == http.StatusOK {
+				var doc map[string]any
+				if json.Unmarshal(body, &doc) == nil {
+					if _, ok := doc["nanosecond heartbeat"]; ok {
+						return true
+					}
+				}
+			}
+			if status == http.StatusUnauthorized || status == http.StatusForbidden {
+				return strings.Contains(bodyStr, "chroma") || strings.Contains(strings.ToLower(headers.Get("Www-Authenticate")), "chroma")
+			}
+			return false
+		},
+	}
+}
+
+// OpenAICompatibleDefinition returns the generic fallback fingerprint definition
+// for OpenAI-compatible /v1/models endpoints when no specific product is proven.
+func OpenAICompatibleDefinition() Definition {
+	return Definition{
+		Surface:     SurfaceOpenAICompatible,
+		DefaultPort: 8000,
+		ProbePaths:  []string{"/v1/models"},
+		Match: func(status int, headers http.Header, body []byte) bool {
+			srv := strings.ToLower(headers.Get("Server"))
+			if strings.Contains(srv, "vllm") || strings.Contains(srv, "litellm") || strings.Contains(srv, "ollama") {
+				return false
+			}
+			for k := range headers {
+				if strings.HasPrefix(strings.ToLower(k), "x-litellm-") {
+					return false
+				}
+			}
+			if status == http.StatusOK {
+				var models struct {
+					Object string `json:"object"`
+					Data   []struct {
+						ID          string `json:"id"`
+						OwnedBy     string `json:"owned_by"`
+						MaxModelLen *int64 `json:"max_model_len"`
+					} `json:"data"`
+				}
+				if json.Unmarshal(body, &models) == nil && models.Object == "list" && models.Data != nil {
+					for _, m := range models.Data {
+						if strings.EqualFold(strings.TrimSpace(m.OwnedBy), "vllm") || m.MaxModelLen != nil {
+							return false
+						}
+					}
+					return true
+				}
 			}
 			return false
 		},

@@ -433,7 +433,7 @@ func buildCorrelationEdgeAndFallback(
 			return graph.Edge{}, nil, corrRes.Evidence(), err
 		}
 		item, err := emitter.NewNodeItem(fallbackNode, map[string]any{
-			"name":         targetHost,
+			"name":         strings.ToUpper(targetHost),
 			"target_type":  string(corrRes.Evidence().TargetType),
 			"target_value": targetHost,
 		})

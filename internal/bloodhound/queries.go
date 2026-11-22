@@ -57,17 +57,6 @@ func (c *Client) ImportSavedQueries(ctx context.Context, queries []savedsearch.Q
 	if len(queries) == 0 {
 		return 0, nil
 	}
-	existing, err := c.ListSavedQueries(ctx)
-	if err != nil {
-		return 0, fmt.Errorf("list existing saved queries: %w", err)
-	}
-	for _, sq := range existing {
-		if strings.HasPrefix(sq.Name, "LLMHound") {
-			if err := c.DeleteSavedQuery(ctx, sq.ID); err != nil {
-				return 0, fmt.Errorf("delete existing saved query %q (%d): %w", sq.Name, sq.ID, err)
-			}
-		}
-	}
 
 	var zipBuf bytes.Buffer
 	zw := zip.NewWriter(&zipBuf)
@@ -86,6 +75,18 @@ func (c *Client) ImportSavedQueries(ctx context.Context, queries []savedsearch.Q
 	}
 	if err := zw.Close(); err != nil {
 		return 0, fmt.Errorf("close saved queries zip: %w", err)
+	}
+
+	existing, err := c.ListSavedQueries(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("list existing saved queries: %w", err)
+	}
+	for _, sq := range existing {
+		if strings.HasPrefix(sq.Name, "LLMHound") {
+			if err := c.DeleteSavedQuery(ctx, sq.ID); err != nil {
+				return 0, fmt.Errorf("delete existing saved query %q (%d): %w", sq.Name, sq.ID, err)
+			}
+		}
 	}
 
 	status, body, err := c.doRaw(ctx, http.MethodPost, "/api/v2/saved-queries/import", "application/zip", zipBuf.Bytes(), nil)

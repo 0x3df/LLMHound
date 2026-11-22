@@ -371,6 +371,9 @@ func (c *Collector) Collect(
 	} else {
 		if apiVersion == "v1" {
 			colBasePath = "/api/v1/collections"
+		} else if tenant == "" || tenant == "." || tenant == ".." || strings.ContainsAny(tenant, "/\\") ||
+			database == "" || database == "." || database == ".." || strings.ContainsAny(database, "/\\") {
+			return checkpoint.Result{}, fmt.Errorf("invalid chromadb tenant/database segment: %q/%q", tenant, database)
 		} else {
 			colBasePath = fmt.Sprintf("/api/v2/tenants/%s/databases/%s/collections", url.PathEscape(tenant), url.PathEscape(database))
 		}
@@ -478,6 +481,10 @@ func (c *Collector) Collect(
 			if cid == "" {
 				cid = col.Name
 			}
+			if cid == "" || cid == "." || cid == ".." || strings.ContainsAny(cid, "/\\") {
+				cntErrors = append(cntErrors, fmt.Sprintf("%q: invalid collection segment", cid))
+				continue
+			}
 			cURL := baseURL + colBasePath + "/" + url.PathEscape(cid) + "/count"
 			resp, reqErr := c.transport.Get(ctx, cURL)
 			common.AbsorbTransport(resp, &tlsInfo, &redirects)
@@ -567,9 +574,21 @@ func (c *Collector) Collect(
 		var getErrors []string
 
 		for _, col := range collections {
+			if budget.ServiceLimitReached() {
+				budget.MarkTruncated(fmt.Sprintf("content service byte limit (%d) reached", c.cfg.Content.MaxServiceBytes))
+				break
+			}
 			cid := col.ID
 			if cid == "" {
 				cid = col.Name
+			}
+			if cid == "" || cid == "." || cid == ".." || strings.ContainsAny(cid, "/\\") {
+				getErrors = append(getErrors, fmt.Sprintf("%q: invalid collection segment", cid))
+				continue
+			}
+			key := col.Name
+			if key == "" {
+				key = col.ID
 			}
 			getURL := baseURL + colBasePath + "/" + url.PathEscape(cid) + "/get"
 			resp, reqErr := c.transport.Post(ctx, getURL, "application/json", reqBody)
@@ -601,7 +620,7 @@ func (c *Collector) Collect(
 			getSuccess++
 
 			var resIDStr string
-			if resID, err := graph.NewResourceIdentity(scope, graph.VectorCollection, srvID, col.Name); err == nil {
+			if resID, err := graph.NewResourceIdentity(scope, graph.VectorCollection, srvID, key); err == nil {
 				resIDStr = resID.ID()
 			}
 			count := len(gd.Documents)
@@ -609,7 +628,7 @@ func (c *Collector) Collect(
 				count = len(gd.Metadatas)
 			}
 			if count > sampleLimit {
-				budget.MarkTruncated(fmt.Sprintf("collection %s truncated at max_sample_points (%d)", col.Name, sampleLimit))
+				budget.MarkTruncated(fmt.Sprintf("collection %s truncated at max_sample_points (%d)", key, sampleLimit))
 				count = sampleLimit
 			}
 			for i := 0; i < count; i++ {
@@ -630,7 +649,7 @@ func (c *Collector) Collect(
 				if content.LooksBinary(rawSample) {
 					continue
 				}
-				if ok, _ := budget.ClaimResourceItem(col.Name); !ok {
+				if ok, _ := budget.ClaimResourceItem(key); !ok {
 					break
 				}
 				docID := fmt.Sprintf("doc-%d", i)
@@ -647,7 +666,7 @@ func (c *Collector) Collect(
 					CheckID:         CheckDocumentsSample,
 					Source:          getURL,
 					Kind:            content.KindSample,
-					Location:        fmt.Sprintf("%s#%s", col.Name, docID),
+					Location:        fmt.Sprintf("%s#%s", key, docID),
 					MediaType:       "application/json",
 					ObservedAt:      obsTime,
 					Body:            string(rawSample),

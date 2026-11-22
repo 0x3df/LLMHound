@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -240,14 +241,19 @@ func (c *Collector) collectInternal(
 	if c.customHTTPClient != nil && c.customHTTPClient.Transport != nil {
 		baseTransport = c.customHTTPClient.Transport
 	} else {
-		baseTransport = &http.Transport{
-			DialContext:           (&net.Dialer{Timeout: c.config.Bounds.ConnectTimeout}).DialContext,
+		tr := &http.Transport{
+			Proxy:                 http.ProxyFromEnvironment,
+			DialContext:           (&net.Dialer{Timeout: c.config.Bounds.ConnectTimeout, KeepAlive: 30 * time.Second}).DialContext,
 			TLSHandshakeTimeout:   c.config.Bounds.ConnectTimeout,
 			ResponseHeaderTimeout: c.config.Bounds.ResponseTimeout,
+			MaxIdleConns:          32,
+			IdleConnTimeout:       30 * time.Second,
 			TLSClientConfig: &tls.Config{
 				InsecureSkipVerify: c.config.Insecure,
 			},
 		}
+		defer tr.CloseIdleConnections()
+		baseTransport = tr
 	}
 
 	tracker := newTrackingTransport(
@@ -257,6 +263,7 @@ func (c *Collector) collectInternal(
 		c.config.UserAgent,
 		c.config.Insecure,
 		ep.Host(),
+		canonicalURL,
 	)
 
 	httpClient := buildHTTPClient(
@@ -280,6 +287,14 @@ func (c *Collector) collectInternal(
 
 	mcpClient := mcpsdk.NewClient(clientImpl, nil)
 
+	// Bound overall MCP session lifetime (connect + enumeration + SSE stream).
+	sessionTimeout := c.config.Bounds.ResponseTimeout * 12
+	if sessionTimeout < 30*time.Second {
+		sessionTimeout = 30 * time.Second
+	}
+	ctx, sessionCancel := context.WithTimeout(ctx, sessionTimeout)
+	defer sessionCancel()
+
 	// Attempt connection with Streamable HTTP or SSE
 	session, initResult, connectErr := c.connectTransport(ctx, mcpClient, httpClient, canonicalURL, target.Transport)
 
@@ -288,7 +303,7 @@ func (c *Collector) collectInternal(
 	var tlsObs *tlsObservation
 	var evRecords []evidence.Record
 
-	if obs, ok := extractTLSObservation(tlsState, tlsErr, c.config.Insecure); ok {
+	if obs, ok := extractTLSObservation(tlsState, tlsErr, ep.Host(), c.config.Insecure); ok {
 		tlsObs = &obs
 	}
 
@@ -763,25 +778,54 @@ func (c *Collector) connectTransport(
 	endpointURL string,
 	preferredTransport string,
 ) (*mcpsdk.ClientSession, *mcpsdk.InitializeResult, error) {
-	trySSE := func(url string) (*mcpsdk.ClientSession, *mcpsdk.InitializeResult, error) {
+	trySSE := func(rawURL string) (*mcpsdk.ClientSession, *mcpsdk.InitializeResult, error) {
 		t := &mcpsdk.SSEClientTransport{
-			Endpoint:   url,
+			Endpoint:   rawURL,
 			HTTPClient: httpClient,
 		}
-		s, err := mcpClient.Connect(ctx, t, nil)
-		if err != nil {
-			return nil, nil, err
+		type sseResult struct {
+			s   *mcpsdk.ClientSession
+			err error
 		}
-		return s, s.InitializeResult(), nil
+		ch := make(chan sseResult, 1)
+		sseCtx, sseCancel := context.WithCancel(ctx)
+		go func() {
+			s, err := mcpClient.Connect(sseCtx, t, nil)
+			ch <- sseResult{s: s, err: err}
+		}()
+		connectBudget := c.config.Bounds.ResponseTimeout
+		if connectBudget <= 0 {
+			connectBudget = 10 * time.Second
+		}
+		timer := time.NewTimer(connectBudget)
+		defer timer.Stop()
+		select {
+		case res := <-ch:
+			if res.err != nil {
+				sseCancel()
+				return nil, nil, res.err
+			}
+			// Tie SSE lifetime cancellation only via session closure / parent ctx; do not call sseCancel here.
+			_ = sseCancel
+			return res.s, res.s.InitializeResult(), nil
+		case <-timer.C:
+			sseCancel()
+			return nil, nil, fmt.Errorf("sse handshake timed out after %s", connectBudget)
+		case <-ctx.Done():
+			sseCancel()
+			return nil, nil, ctx.Err()
+		}
 	}
 
-	tryStreamable := func(url string) (*mcpsdk.ClientSession, *mcpsdk.InitializeResult, error) {
+	tryStreamable := func(rawURL string) (*mcpsdk.ClientSession, *mcpsdk.InitializeResult, error) {
 		t := &mcpsdk.StreamableClientTransport{
-			Endpoint:             url,
+			Endpoint:             rawURL,
 			HTTPClient:           httpClient,
 			DisableStandaloneSSE: true,
 		}
-		s, err := mcpClient.Connect(ctx, t, nil)
+		connCtx, cancel := callTimeout(ctx, c.config.Bounds.ResponseTimeout)
+		defer cancel()
+		s, err := mcpClient.Connect(connCtx, t, nil)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -798,10 +842,22 @@ func (c *Collector) connectTransport(
 		}
 	}
 
-	// Try Streamable HTTP
+	// Try Streamable HTTP on configured URL, plus /mcp when mounted on bare host root in auto mode.
 	s, initRes, streamableErr := tryStreamable(endpointURL)
 	if streamableErr == nil {
 		return s, initRes, nil
+	}
+	if preferredTransport == "" || preferredTransport == "auto" {
+		if parsed, err := url.Parse(endpointURL); err == nil && (parsed.Path == "" || parsed.Path == "/") {
+			if !strings.Contains(streamableErr.Error(), "Unauthorized") && !strings.Contains(streamableErr.Error(), "Forbidden") &&
+				!strings.Contains(streamableErr.Error(), "401") && !strings.Contains(streamableErr.Error(), "403") &&
+				!isTLSError(streamableErr) {
+				mcpPathURL := strings.TrimSuffix(endpointURL, "/") + "/mcp"
+				if s2, initRes2, err2 := tryStreamable(mcpPathURL); err2 == nil {
+					return s2, initRes2, nil
+				}
+			}
+		}
 	}
 
 	// Check if Streamable failed due to auth denial or TLS verification error; do not fall back in those cases
@@ -844,8 +900,12 @@ func (c *Collector) buildEvidenceRecords(
 		checkObs.EvidenceID = fmt.Sprintf("%s-%s", obs.EvidenceID, check.CheckID)
 		check.Observation = checkObs
 		details := checkDetails[check.CheckID]
-		if check.CheckID == CheckIDInitialize && check.Outcome == graph.OutcomeSuccess {
-			// Record AccessEvidence record for initialize
+		isAnonEnum := (check.CheckID == CheckIDInitialize ||
+			check.CheckID == CheckIDToolsList ||
+			check.CheckID == CheckIDResourcesList ||
+			check.CheckID == CheckIDPromptsList) && check.Outcome == graph.OutcomeSuccess
+		if isAnonEnum {
+			// Record AccessEvidence record for anonymous MCP enumeration checks.
 			accEv := graph.AccessEvidence{
 				Observation:   checkObs,
 				CheckID:       check.CheckID,
@@ -965,6 +1025,10 @@ func (c *Collector) readMCPResources(
 	}
 
 	for _, res := range resources {
+		if budget.ServiceLimitReached() {
+			budget.MarkTruncated(fmt.Sprintf("content service byte limit (%d) reached", c.config.Content.MaxServiceBytes))
+			break
+		}
 		if res == nil || !isValidResourceKey(res.URI) {
 			continue
 		}

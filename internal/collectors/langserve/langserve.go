@@ -10,9 +10,11 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/0x3df/LLMHound/internal/checkpoint"
 	"github.com/0x3df/LLMHound/internal/collectors/internal/common"
@@ -309,8 +311,11 @@ func (c *Collector) Collect(
 		for _, route := range routes {
 			prefix := strings.TrimRight(route, "/")
 			for _, suffix := range []string{"/input_schema", "/output_schema", "/config_schema"} {
+				sURL, ok := buildScopedRouteURL(baseURL, prefix+suffix)
+				if !ok {
+					continue
+				}
 				schemaAttempts++
-				sURL := baseURL + prefix + suffix
 				resp, reqErr := c.transport.Get(ctx, sURL)
 				common.AbsorbTransport(resp, &tlsInfo, &redirects)
 				if reqErr != nil {
@@ -435,7 +440,10 @@ func (c *Collector) Collect(
 		pgDenied := 0
 		var pgErrors []string
 		for _, rPath := range playgroundRoutes {
-			pgURL := baseURL + rPath + "/playground/"
+			pgURL, ok := buildScopedRouteURL(baseURL, rPath+"/playground/")
+			if !ok {
+				continue
+			}
 			resp, reqErr := c.transport.Get(ctx, pgURL)
 			common.AbsorbTransport(resp, &tlsInfo, &redirects)
 			if reqErr != nil {
@@ -700,17 +708,55 @@ func hasLangServeDenial(h http.Header, body []byte) bool {
 	return strings.Contains(b, "langserve") || strings.Contains(www, "langserve")
 }
 
+func isSafeLangServeRoute(route string) bool {
+	if route == "" || !strings.HasPrefix(route, "/") || strings.HasPrefix(route, "//") {
+		return false
+	}
+	if strings.ContainsAny(route, "@?#\\") || strings.Contains(route, "..") {
+		return false
+	}
+	for _, r := range route {
+		if unicode.IsControl(r) {
+			return false
+		}
+	}
+	return true
+}
+
+func buildScopedRouteURL(baseURL, relPath string) (string, bool) {
+	if !isSafeLangServeRoute(relPath) {
+		return "", false
+	}
+	baseParsed, err := url.Parse(baseURL)
+	if err != nil {
+		return "", false
+	}
+	joined, err := url.Parse(baseURL + relPath)
+	if err != nil || joined.User != nil {
+		return "", false
+	}
+	if !strings.EqualFold(joined.Scheme, baseParsed.Scheme) || !strings.EqualFold(joined.Host, baseParsed.Host) {
+		return "", false
+	}
+	return joined.String(), true
+}
+
 func extractLangServeRoutes(doc openAPIDoc, h http.Header) (routes []string, playgroundRoutes []string, confirmed bool) {
 	suffixCountByBase := make(map[string]map[string]bool)
 	hasPlayground := make(map[string]bool)
 
 	for p := range doc.Paths {
+		if !isSafeLangServeRoute(p) {
+			continue
+		}
 		clean := strings.TrimRight(p, "/")
 		for _, suffix := range runnableSuffixes {
 			if strings.HasSuffix(clean, suffix) {
 				base := strings.TrimSuffix(clean, suffix)
 				if base == "" {
 					base = ""
+				} else if !isSafeLangServeRoute(base) {
+					continue
 				}
 				if suffixCountByBase[base] == nil {
 					suffixCountByBase[base] = make(map[string]bool)

@@ -381,6 +381,8 @@ func (c *Collector) Collect(
 							Reason: "experiments response truncated at max_response_bytes limit", OperationKind: graph.EnumerationOperation,
 							Details: map[string]any{"http_status": resp.StatusCode, "truncated": true},
 						})
+					} else {
+						degraded = append(degraded, "experiments pagination response truncated at max_response_bytes")
 					}
 					pageToken = ""
 				} else {
@@ -394,6 +396,8 @@ func (c *Collector) Collect(
 								Reason: "invalid JSON response from /api/2.0/mlflow/experiments/search", OperationKind: graph.EnumerationOperation,
 								Details: map[string]any{"http_status": resp.StatusCode},
 							})
+						} else {
+							degraded = append(degraded, "invalid JSON response on experiments pagination")
 						}
 						pageToken = ""
 					} else {
@@ -427,6 +431,8 @@ func (c *Collector) Collect(
 						OperationKind: graph.EnumerationOperation,
 						Details:       map[string]any{"http_status": resp.StatusCode},
 					})
+				} else {
+					degraded = append(degraded, fmt.Sprintf("experiments pagination denied (HTTP %d)", resp.StatusCode))
 				}
 				pageToken = ""
 			case http.StatusNotFound:
@@ -437,6 +443,8 @@ func (c *Collector) Collect(
 						Reason: "HTTP 404 not found (experiments/search unavailable)", OperationKind: graph.EnumerationOperation,
 						Details: map[string]any{"http_status": resp.StatusCode},
 					})
+				} else {
+					degraded = append(degraded, "experiments pagination endpoint unavailable (HTTP 404)")
 				}
 				pageToken = ""
 			case http.StatusTooManyRequests:
@@ -447,6 +455,8 @@ func (c *Collector) Collect(
 						Reason: "HTTP 429 rate limited", OperationKind: graph.EnumerationOperation,
 						Details: map[string]any{"http_status": resp.StatusCode},
 					})
+				} else {
+					degraded = append(degraded, "experiments pagination rate limited (HTTP 429)")
 				}
 				pageToken = ""
 			default:
@@ -458,6 +468,8 @@ func (c *Collector) Collect(
 						OperationKind: graph.EnumerationOperation,
 						Details:       map[string]any{"http_status": resp.StatusCode},
 					})
+				} else {
+					degraded = append(degraded, fmt.Sprintf("experiments pagination returned HTTP %d", resp.StatusCode))
 				}
 				pageToken = ""
 			}
@@ -541,6 +553,8 @@ func (c *Collector) Collect(
 							Reason: "registered-models response truncated at max_response_bytes limit", OperationKind: graph.EnumerationOperation,
 							Details: map[string]any{"http_status": resp.StatusCode, "truncated": true},
 						})
+					} else {
+						degraded = append(degraded, "registered-models pagination response truncated at max_response_bytes")
 					}
 					pageToken = ""
 				} else {
@@ -554,6 +568,8 @@ func (c *Collector) Collect(
 								Reason: "invalid JSON response from /api/2.0/mlflow/registered-models/search", OperationKind: graph.EnumerationOperation,
 								Details: map[string]any{"http_status": resp.StatusCode},
 							})
+						} else {
+							degraded = append(degraded, "invalid JSON response on registered-models pagination")
 						}
 						pageToken = ""
 					} else {
@@ -587,6 +603,8 @@ func (c *Collector) Collect(
 						OperationKind: graph.EnumerationOperation,
 						Details:       map[string]any{"http_status": resp.StatusCode},
 					})
+				} else {
+					degraded = append(degraded, fmt.Sprintf("registered-models pagination denied (HTTP %d)", resp.StatusCode))
 				}
 				pageToken = ""
 			case http.StatusNotFound:
@@ -597,6 +615,8 @@ func (c *Collector) Collect(
 						Reason: "HTTP 404 not found (registered-models/search unavailable)", OperationKind: graph.EnumerationOperation,
 						Details: map[string]any{"http_status": resp.StatusCode},
 					})
+				} else {
+					degraded = append(degraded, "registered-models pagination unavailable (HTTP 404)")
 				}
 				pageToken = ""
 			case http.StatusTooManyRequests:
@@ -607,6 +627,8 @@ func (c *Collector) Collect(
 						Reason: "HTTP 429 rate limited", OperationKind: graph.EnumerationOperation,
 						Details: map[string]any{"http_status": resp.StatusCode},
 					})
+				} else {
+					degraded = append(degraded, "registered-models pagination rate limited (HTTP 429)")
 				}
 				pageToken = ""
 			default:
@@ -618,6 +640,8 @@ func (c *Collector) Collect(
 						OperationKind: graph.EnumerationOperation,
 						Details:       map[string]any{"http_status": resp.StatusCode},
 					})
+				} else {
+					degraded = append(degraded, fmt.Sprintf("registered-models pagination returned HTTP %d", resp.StatusCode))
 				}
 				pageToken = ""
 			}

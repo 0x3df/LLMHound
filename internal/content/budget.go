@@ -70,6 +70,14 @@ func NewBudget(cfg config.Content, redactor Redactor) *Budget {
 	}
 }
 
+// ServiceLimitReached reports whether the per-service byte budget has been exhausted.
+func (b *Budget) ServiceLimitReached() bool {
+	if b == nil {
+		return false
+	}
+	return b.serviceBytes >= b.cfg.MaxServiceBytes
+}
+
 // ClaimResourceItem reserves one item slot under resourceKey, returning false
 // and recording truncation if max_items_per_resource or max_service_bytes is reached.
 func (b *Budget) ClaimResourceItem(resourceKey string) (bool, string) {

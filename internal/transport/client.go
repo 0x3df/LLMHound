@@ -97,6 +97,60 @@ type Client struct {
 	insecure        bool
 	userAgent       string
 	authorizedHosts map[string]bool
+	tlsRootCAs      *x509.CertPool
+
+	rateMu     sync.Mutex
+	rateByHost map[string]*hostLimiter
+}
+
+type hostLimiter struct {
+	mu       sync.Mutex
+	interval time.Duration
+	last     time.Time
+}
+
+func (l *hostLimiter) wait(ctx context.Context) error {
+	if l == nil || l.interval <= 0 {
+		return nil
+	}
+	l.mu.Lock()
+	now := time.Now()
+	wait := l.interval - now.Sub(l.last)
+	if wait > 0 {
+		l.last = now.Add(wait)
+		l.mu.Unlock()
+		timer := time.NewTimer(wait)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	l.last = now
+	l.mu.Unlock()
+	return nil
+}
+
+func (c *Client) waitRateLimit(ctx context.Context, host string) error {
+	if c.bounds.PerHostRate <= 0 {
+		return nil
+	}
+	key := strings.ToLower(strings.TrimSpace(host))
+	if key == "" {
+		return nil
+	}
+	c.rateMu.Lock()
+	lim, ok := c.rateByHost[key]
+	if !ok {
+		lim = &hostLimiter{
+			interval: time.Duration(float64(time.Second) / c.bounds.PerHostRate),
+		}
+		c.rateByHost[key] = lim
+	}
+	c.rateMu.Unlock()
+	return lim.wait(ctx)
 }
 
 type captureKey struct{}
@@ -126,6 +180,7 @@ type Config struct {
 	UserAgent       string
 	AuthorizedHosts []string
 	DialContext     func(ctx context.Context, network, addr string) (net.Conn, error)
+	TLSRootCAs      *x509.CertPool
 }
 
 // NewClient constructs a Client configured with collection safety and bounds.
@@ -149,11 +204,19 @@ func NewClient(cfg Config) *Client {
 	authMap := make(map[string]bool)
 	for _, h := range cfg.AuthorizedHosts {
 		normalized := strings.ToLower(strings.TrimSpace(h))
-		if normalized != "" {
-			authMap[normalized] = true
-			if host, _, err := net.SplitHostPort(normalized); err == nil {
-				authMap[host] = true
+		if normalized == "" {
+			continue
+		}
+		if strings.Contains(normalized, "://") {
+			if u, err := url.Parse(normalized); err == nil && u.Host != "" {
+				authMap[strings.ToLower(u.Host)] = true
+				authMap[strings.ToLower(u.Hostname())] = true
+				continue
 			}
+		}
+		authMap[normalized] = true
+		if host, _, err := net.SplitHostPort(normalized); err == nil {
+			authMap[host] = true
 		}
 	}
 
@@ -162,12 +225,14 @@ func NewClient(cfg Config) *Client {
 		insecure:        cfg.Insecure,
 		userAgent:       userAgent,
 		authorizedHosts: authMap,
+		tlsRootCAs:      cfg.TLSRootCAs,
+		rateByHost:      make(map[string]*hostLimiter),
 	}
 
 	tlsConfig := &tls.Config{
 		InsecureSkipVerify: true, // Verification handled in VerifyConnection callback to capture metadata
 		VerifyConnection: func(cs tls.ConnectionState) error {
-			_, err := inspectTLS(cs, cfg.Insecure)
+			_, err := inspectTLS(cs, cs.ServerName, cfg.TLSRootCAs, cfg.Insecure)
 			return err
 		},
 	}
@@ -193,7 +258,7 @@ func NewClient(cfg Config) *Client {
 		conf := tlsConfig.Clone()
 		conf.ServerName = host
 		conf.VerifyConnection = func(cs tls.ConnectionState) error {
-			info, verr := inspectTLS(cs, cfg.Insecure)
+			info, verr := inspectTLS(cs, host, cfg.TLSRootCAs, cfg.Insecure)
 			if cp != nil {
 				cp.setTLS(info)
 			}
@@ -216,7 +281,7 @@ func NewClient(cfg Config) *Client {
 		TLSClientConfig:       tlsConfig,
 		ResponseHeaderTimeout: bounds.ResponseTimeout,
 		MaxIdleConns:          100,
-		IdleConnTimeout:       90 * time.Second,
+		IdleConnTimeout:       30 * time.Second,
 		TLSHandshakeTimeout:   bounds.ConnectTimeout,
 		ExpectContinueTimeout: 1 * time.Second,
 	}
@@ -268,6 +333,30 @@ func NewClient(cfg Config) *Client {
 				return err
 			}
 
+			if req.URL.User != nil {
+				rec := RedirectInfo{
+					FromURL:    fromURL,
+					ToURL:      req.URL.String(),
+					StatusCode: status,
+					Authorized: false,
+					Reason:     "redirect contains embedded credentials",
+				}
+				cp.addRedirect(rec)
+				return ErrRedirectNotAuthorized
+			}
+
+			if len(via) > 0 && strings.EqualFold(via[0].URL.Scheme, "https") && !strings.EqualFold(req.URL.Scheme, "https") {
+				rec := RedirectInfo{
+					FromURL:    fromURL,
+					ToURL:      req.URL.String(),
+					StatusCode: status,
+					Authorized: false,
+					Reason:     "https to http downgrade redirect forbidden",
+				}
+				cp.addRedirect(rec)
+				return ErrRedirectNotAuthorized
+			}
+
 			{
 				host := strings.ToLower(req.URL.Hostname())
 				hostWithPort := strings.ToLower(req.URL.Host)
@@ -299,9 +388,21 @@ func NewClient(cfg Config) *Client {
 	return c
 }
 
-func inspectTLS(cs tls.ConnectionState, insecure bool) (*TLSInfo, error) {
+// CloseIdleConnections closes any idle keep-alive sockets held by the client.
+func (c *Client) CloseIdleConnections() {
+	if c != nil && c.httpClient != nil {
+		c.httpClient.CloseIdleConnections()
+	}
+}
+
+func inspectTLS(cs tls.ConnectionState, serverName string, rootCAs *x509.CertPool, insecure bool) (*TLSInfo, error) {
 	info := &TLSInfo{InsecureOverride: insecure}
 	if len(cs.PeerCertificates) == 0 {
+		if !insecure {
+			info.VerificationResult = "failed"
+			info.VerificationReason = "TLS handshake returned no peer certificates"
+			return info, errors.New("TLS handshake returned no peer certificates")
+		}
 		return info, nil
 	}
 	leaf := cs.PeerCertificates[0]
@@ -317,8 +418,14 @@ func inspectTLS(cs tls.ConnectionState, insecure bool) (*TLSInfo, error) {
 	info.ValidTo = leaf.NotAfter.UTC().Format(time.RFC3339)
 	info.NegotiatedVersion = formatTLSVersion(cs.Version)
 
+	dnsName := strings.TrimSpace(serverName)
+	if dnsName == "" {
+		dnsName = cs.ServerName
+	}
+
 	opts := x509.VerifyOptions{
-		DNSName:       cs.ServerName,
+		DNSName:       dnsName,
+		Roots:         rootCAs,
 		Intermediates: x509.NewCertPool(),
 	}
 	for _, cert := range cs.PeerCertificates[1:] {
@@ -355,7 +462,27 @@ func CheckSafety(method, rawPath string) error {
 
 // Do executes a bounded, safety-checked HTTP request.
 func (c *Client) Do(req *http.Request) (*Response, error) {
+	if req == nil || req.URL == nil {
+		return nil, errors.New("request URL is required")
+	}
+	scheme := strings.ToLower(req.URL.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return nil, fmt.Errorf("unsupported URL scheme %q", req.URL.Scheme)
+	}
+	if req.URL.User != nil {
+		return nil, errors.New("embedded URL credentials are forbidden")
+	}
+	if len(c.authorizedHosts) > 0 {
+		host := strings.ToLower(req.URL.Hostname())
+		hostWithPort := strings.ToLower(req.URL.Host)
+		if !c.authorizedHosts[host] && !c.authorizedHosts[hostWithPort] {
+			return nil, fmt.Errorf("%w: target host %q is not in authorized targets", ErrRedirectNotAuthorized, req.URL.Host)
+		}
+	}
 	if err := CheckSafety(req.Method, req.URL.Path); err != nil {
+		return nil, err
+	}
+	if err := c.waitRateLimit(req.Context(), req.URL.Hostname()); err != nil {
 		return nil, err
 	}
 
@@ -364,11 +491,12 @@ func (c *Client) Do(req *http.Request) (*Response, error) {
 	}
 
 	cp := &capture{}
+	reqHost := req.URL.Hostname()
 	ctx := context.WithValue(req.Context(), captureKey{}, cp)
 	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
 		GotConn: func(gc httptrace.GotConnInfo) {
 			if tc, ok := gc.Conn.(*tls.Conn); ok && gc.Reused {
-				if info, _ := inspectTLS(tc.ConnectionState(), c.insecure); info != nil {
+				if info, _ := inspectTLS(tc.ConnectionState(), reqHost, c.tlsRootCAs, c.insecure); info != nil {
 					cp.setTLS(info)
 				}
 			}
@@ -392,7 +520,12 @@ func (c *Client) Do(req *http.Request) (*Response, error) {
 	reader := io.LimitReader(resp.Body, limit+1)
 	body, readErr := io.ReadAll(reader)
 	if readErr != nil {
-		return nil, fmt.Errorf("read response body: %w", readErr)
+		return &Response{
+			StatusCode: resp.StatusCode,
+			Header:     resp.Header.Clone(),
+			TLS:        tlsInfo,
+			Redirects:  redirects,
+		}, fmt.Errorf("read response body: %w", readErr)
 	}
 
 	truncated := false

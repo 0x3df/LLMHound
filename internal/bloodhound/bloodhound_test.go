@@ -278,6 +278,7 @@ func TestTwoStepUploadAndPreflightChunkingAndStubRejection(t *testing.T) {
 		LinkingFileName:     "linking.json",
 		PollInterval:        10 * time.Millisecond,
 		PollTimeout:         5 * time.Second,
+		MaxRetries:          2,
 	})
 	if err != nil {
 		t.Fatalf("UploadScan failed: %v", err)

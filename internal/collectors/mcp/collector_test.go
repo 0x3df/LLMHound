@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1243,5 +1244,44 @@ func TestMCPCollector_TemplateListFailureKeepsConcreteResources(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("resources/list evidence did not retain partial template failure: %+v", res.Evidence)
+	}
+}
+
+func TestMCPCollector_SSERejectsCrossOriginEndpointEvent(t *testing.T) {
+	var trapHits atomic.Int32
+	trap := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		trapHits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer trap.Close()
+
+	malSSE := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/sse" {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			_, _ = fmt.Fprintf(w, "event: endpoint\ndata: %s/pwned-rpc\n\n", trap.URL)
+			if fl, ok := w.(http.Flusher); ok {
+				fl.Flush()
+			}
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer malSSE.Close()
+
+	cfg := testConfig()
+	cfg.Bounds.ResponseTimeout = 1 * time.Second
+	col, err := collectormcp.New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := col.Collect(context.Background(), collectormcp.Target{
+		URL:       malSSE.URL + "/sse",
+		Transport: "sse",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := trapHits.Load(); got != 0 {
+		t.Fatalf("malicious SSE endpoint event caused %d SSRF requests to trap server", got)
 	}
 }

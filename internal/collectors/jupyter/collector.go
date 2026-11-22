@@ -212,91 +212,120 @@ func (c *Collector) collect(ctx context.Context, rawTarget string, probeFirst bo
 		maxItems = 10000
 	}
 
-	// 2. Session Metadata Check: GET /api/sessions
-	sessCheck := c.executeSessionsCheck(ctx, baseURL, srvID.ID(), maxItems)
-	checks = append(checks, sessCheck.exec)
-	if sessCheck.reachable {
-		anyReachable = true
-	}
-	if sessCheck.tls.Observed && !observedTLS.Observed {
-		observedTLS = sessCheck.tls
-	}
-	if sessCheck.authRequired {
-		authRequired = true
-	}
-	if sessCheck.exec.outcome == graph.OutcomeFailed {
-		failedChecks = append(failedChecks, sessCheck.exec.checkID)
-	}
-	sessions = sessCheck.sessions
-	truncatedSessions = sessCheck.truncated
+	tlsBlocked := observedTLS.Observed && observedTLS.VerificationResult == "failed" && !c.cfg.Insecure
 
-	// 3. Workspace Listing Check: GET /api/contents
-	contCheck := c.executeContentsCheck(ctx, baseURL, srvID.ID(), maxItems)
-	checks = append(checks, contCheck.exec)
-	if contCheck.reachable {
-		anyReachable = true
-	}
-	if contCheck.tls.Observed && !observedTLS.Observed {
-		observedTLS = contCheck.tls
-	}
-	if contCheck.authRequired {
-		authRequired = true
-	}
-	if contCheck.exec.outcome == graph.OutcomeFailed {
-		failedChecks = append(failedChecks, contCheck.exec.checkID)
-	}
-	if contCheck.truncated {
-		truncatedWorkspace = true
-	}
-	files = contCheck.files
-	skippedDirs = contCheck.skippedDirs
-
-	// 4. Content Tier: GET /api/contents/<path>?content=1 (default on, bounded)
 	var contentSummary *graph.ContentSummary
 	var contentTruncated bool
 	var contentTruncReason string
-	if !c.cfg.Content.EnabledFor("jupyter") {
-		checks = append(checks, checkExecution{
-			checkID:       CheckIDFileContent,
-			operation:     OpFileContent,
-			outcome:       graph.OutcomeSkipped,
-			reason:        "content collection disabled by policy",
-			operationKind: graph.ResourceReadOperation,
-			details:       map[string]any{"skipped": true, "policy": "content_disabled"},
-		})
-	} else if !anyReachable {
-		checks = append(checks, checkExecution{
-			checkID:       CheckIDFileContent,
-			operation:     OpFileContent,
-			outcome:       graph.OutcomeSkipped,
-			reason:        "prerequisite failed: target unreachable",
-			operationKind: graph.ResourceReadOperation,
-		})
-	} else if contCheck.exec.outcome != graph.OutcomeSuccess {
-		checks = append(checks, checkExecution{
-			checkID:       CheckIDFileContent,
-			operation:     OpFileContent,
-			outcome:       graph.OutcomeSkipped,
-			reason:        "prerequisite failed: workspace contents listing unavailable",
-			operationKind: graph.ResourceReadOperation,
-		})
-	} else if len(files) == 0 {
-		checks = append(checks, checkExecution{
-			checkID:       CheckIDFileContent,
-			operation:     OpFileContent,
-			outcome:       graph.OutcomeSkipped,
-			reason:        "no workspace files available to read",
-			operationKind: graph.ResourceReadOperation,
-		})
+
+	if tlsBlocked {
+		checks = append(checks,
+			checkExecution{
+				checkID:       CheckIDSessions,
+				operation:     OpSessions,
+				outcome:       graph.OutcomeSkipped,
+				reason:        "prerequisite failed: TLS verification failed",
+				operationKind: graph.EnumerationOperation,
+			},
+			checkExecution{
+				checkID:       CheckIDContents,
+				operation:     OpContents,
+				outcome:       graph.OutcomeSkipped,
+				reason:        "prerequisite failed: TLS verification failed",
+				operationKind: graph.EnumerationOperation,
+			},
+			checkExecution{
+				checkID:       CheckIDFileContent,
+				operation:     OpFileContent,
+				outcome:       graph.OutcomeSkipped,
+				reason:        "prerequisite failed: TLS verification failed",
+				operationKind: graph.ResourceReadOperation,
+			},
+		)
 	} else {
-		fcRes, fcErr := c.executeFileContentCheck(ctx, baseURL, srvID, files, obsTime)
-		if fcErr != nil {
-			return checkpoint.Result{}, fcErr
+		// 2. Session Metadata Check: GET /api/sessions
+		sessCheck := c.executeSessionsCheck(ctx, baseURL, srvID.ID(), maxItems)
+		checks = append(checks, sessCheck.exec)
+		if sessCheck.reachable {
+			anyReachable = true
 		}
-		checks = append(checks, fcRes.exec)
-		contentSummary = fcRes.summary
-		contentTruncated = fcRes.truncated
-		contentTruncReason = fcRes.truncateReason
+		if sessCheck.tls.Observed && !observedTLS.Observed {
+			observedTLS = sessCheck.tls
+		}
+		if sessCheck.authRequired {
+			authRequired = true
+		}
+		if sessCheck.exec.outcome == graph.OutcomeFailed {
+			failedChecks = append(failedChecks, sessCheck.exec.checkID)
+		}
+		sessions = sessCheck.sessions
+		truncatedSessions = sessCheck.truncated
+
+		// 3. Workspace Listing Check: GET /api/contents
+		contCheck := c.executeContentsCheck(ctx, baseURL, srvID.ID(), maxItems)
+		checks = append(checks, contCheck.exec)
+		if contCheck.reachable {
+			anyReachable = true
+		}
+		if contCheck.tls.Observed && !observedTLS.Observed {
+			observedTLS = contCheck.tls
+		}
+		if contCheck.authRequired {
+			authRequired = true
+		}
+		if contCheck.exec.outcome == graph.OutcomeFailed {
+			failedChecks = append(failedChecks, contCheck.exec.checkID)
+		}
+		if contCheck.truncated {
+			truncatedWorkspace = true
+		}
+		files = contCheck.files
+		skippedDirs = contCheck.skippedDirs
+
+		// 4. Content Tier: GET /api/contents/<path>?content=1 (default on, bounded)
+		if !c.cfg.Content.EnabledFor("jupyter") {
+			checks = append(checks, checkExecution{
+				checkID:       CheckIDFileContent,
+				operation:     OpFileContent,
+				outcome:       graph.OutcomeSkipped,
+				reason:        "content collection disabled by policy",
+				operationKind: graph.ResourceReadOperation,
+				details:       map[string]any{"skipped": true, "policy": "content_disabled"},
+			})
+		} else if !anyReachable {
+			checks = append(checks, checkExecution{
+				checkID:       CheckIDFileContent,
+				operation:     OpFileContent,
+				outcome:       graph.OutcomeSkipped,
+				reason:        "prerequisite failed: target unreachable",
+				operationKind: graph.ResourceReadOperation,
+			})
+		} else if contCheck.exec.outcome != graph.OutcomeSuccess {
+			checks = append(checks, checkExecution{
+				checkID:       CheckIDFileContent,
+				operation:     OpFileContent,
+				outcome:       graph.OutcomeSkipped,
+				reason:        "prerequisite failed: workspace contents listing unavailable",
+				operationKind: graph.ResourceReadOperation,
+			})
+		} else if len(files) == 0 {
+			checks = append(checks, checkExecution{
+				checkID:       CheckIDFileContent,
+				operation:     OpFileContent,
+				outcome:       graph.OutcomeSkipped,
+				reason:        "no workspace files available to read",
+				operationKind: graph.ResourceReadOperation,
+			})
+		} else {
+			fcRes, fcErr := c.executeFileContentCheck(ctx, baseURL, srvID, files, obsTime)
+			if fcErr != nil {
+				return checkpoint.Result{}, fcErr
+			}
+			checks = append(checks, fcRes.exec)
+			contentSummary = fcRes.summary
+			contentTruncated = fcRes.truncated
+			contentTruncReason = fcRes.truncateReason
+		}
 	}
 
 	// Coverage determination
@@ -349,6 +378,26 @@ func (c *Collector) collect(ctx context.Context, rawTarget string, probeFirst bo
 			}, ch.details)
 			if err == nil {
 				evRecs = append(evRecs, rec)
+			}
+		}
+		if observedTLS.Observed {
+			tlsObs := finalObs
+			tlsObs.EvidenceID = evidenceID + "-tls"
+			if tlsRec, err := evidence.NewTLSRecord(evidence.TLSRecordInput{
+				Observation:        tlsObs,
+				TargetID:           srvID.ID(),
+				CertFingerprint:    observedTLS.Fingerprint,
+				Issuer:             observedTLS.Issuer,
+				Subject:            observedTLS.Subject,
+				SANs:               observedTLS.SANs,
+				ValidFrom:          observedTLS.ValidFrom,
+				ValidTo:            observedTLS.ValidTo,
+				VerificationResult: observedTLS.VerificationResult,
+				VerificationReason: observedTLS.VerificationReason,
+				NegotiatedVersion:  observedTLS.NegotiatedVersion,
+				InsecureOverride:   observedTLS.InsecureOverride,
+			}); err == nil {
+				evRecs = append(evRecs, tlsRec)
 			}
 		}
 		return checkpoint.Result{
@@ -449,11 +498,11 @@ func (c *Collector) collect(ctx context.Context, rawTarget string, probeFirst bo
 	for _, f := range files {
 		fileID, err := graph.NewResourceIdentity(c.cfg.Scope, graph.WorkspaceFile, srvID, f.Path)
 		if err != nil {
-			return checkpoint.Result{}, fmt.Errorf("create file identity for %q: %w", f.Path, err)
+			continue
 		}
 		fileNode, err := graph.NewNode(fileID, finalObs)
 		if err != nil {
-			return checkpoint.Result{}, fmt.Errorf("create file node for %q: %w", f.Path, err)
+			continue
 		}
 		fileProps := map[string]any{
 			"name":      strings.ToUpper(f.Name),
@@ -625,6 +674,10 @@ func (c *Collector) executeVersionCheck(ctx context.Context, baseURL, targetID s
 	reqURL := baseURL + "/api"
 	resp, err := c.httpClient.Get(ctx, reqURL)
 	if err != nil {
+		var tlsInfo TLSInfo
+		if resp != nil {
+			tlsInfo = resp.TLS
+		}
 		return versionCheckResult{
 			exec: checkExecution{
 				checkID:       CheckIDVersion,
@@ -632,8 +685,9 @@ func (c *Collector) executeVersionCheck(ctx context.Context, baseURL, targetID s
 				outcome:       graph.OutcomeFailed,
 				reason:        cleanErrorString(err),
 				operationKind: graph.EnumerationOperation,
-				details:       map[string]any{"url": reqURL, "error": err.Error()},
+				details:       map[string]any{"url": reqURL, "error": cleanErrorString(err)},
 			},
+			tls:       tlsInfo,
 			reachable: false,
 		}
 	}
@@ -1123,9 +1177,9 @@ func (c *Collector) correlateTarget(host string, srvID graph.Identity, obs, corr
 			return graph.Edge{}, nil, evidence.Record{}, err
 		}
 		item, err := emitter.NewNodeItem(fbNode, map[string]any{
-			"name":              strings.ToUpper(corrRes.Evidence().NormalizedTarget),
-			"target_type":       string(corrRes.Evidence().TargetType),
-			"normalized_target": corrRes.Evidence().NormalizedTarget,
+			"name":         strings.ToUpper(corrRes.Evidence().NormalizedTarget),
+			"target_type":  string(corrRes.Evidence().TargetType),
+			"target_value": corrRes.Evidence().NormalizedTarget,
 		})
 		if err != nil {
 			return graph.Edge{}, nil, evidence.Record{}, err

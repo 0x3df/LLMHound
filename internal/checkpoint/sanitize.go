@@ -93,9 +93,8 @@ func SanitizeTarget(raw string) string {
 		return evidence.SanitizeURL(raw)
 	}
 	// Bare target like user:pass@host:port or host:port
-	if strings.Contains(raw, "@") {
-		parts := strings.SplitN(raw, "@", 2)
-		return parts[1]
+	if idx := strings.LastIndex(raw, "@"); idx >= 0 {
+		return raw[idx+1:]
 	}
 	return raw
 }

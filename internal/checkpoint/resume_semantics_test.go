@@ -434,3 +434,84 @@ func TestResultObservationSurfaceMustMatch(t *testing.T) {
 		t.Fatal("replay must reject result with empty target")
 	}
 }
+
+func TestReplayNewerCompleteNodeSupersedesStalePartial(t *testing.T) {
+	var buf bytes.Buffer
+	header := sampleHeader()
+	j, err := checkpoint.NewWriter(&buf, header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	vantage := sampleVantage(t, header.DeploymentScope, header.VantageKey)
+	obs1 := sampleObservation(t, vantage, "ev-1", semanticsTime)
+	obs1.Coverage = graph.CoveragePartial
+	obs1.CoverageReason = "timeout"
+
+	ep, err := graph.ParseEndpoint("http://127.0.0.1:11434", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srvID, err := graph.NewServiceIdentity(header.DeploymentScope, graph.OllamaInstance, ep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	node1, err := graph.NewNode(srvID, obs1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item1, err := emitter.NewNodeItem(node1, map[string]any{
+		"name":          "OLLAMA",
+		"auth_observed": "unknown",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := j.RecordResult(checkpoint.Result{
+		Target:      "h",
+		Surface:     "ollama",
+		Status:      checkpoint.TargetStatusPartial,
+		Observation: obs1,
+		Nodes:       []emitter.NodeItem{item1},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	obs2 := sampleObservation(t, vantage, "ev-2", semanticsTime.Add(time.Minute))
+	obs2.Coverage = graph.CoverageComplete
+	node2, err := graph.NewNode(srvID, obs2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item2, err := emitter.NewNodeItem(node2, map[string]any{
+		"name":            "OLLAMA",
+		"auth_observed":   "anonymous",
+		"anon_operations": []string{"ollama_tags"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := j.RecordResult(checkpoint.Result{
+		Target:      "h",
+		Surface:     "ollama",
+		Status:      checkpoint.TargetStatusCompleted,
+		Observation: obs2,
+		Nodes:       []emitter.NodeItem{item2},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	state, err := checkpoint.Replay(&buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodes := state.Nodes()
+	if len(nodes) != 1 {
+		t.Fatalf("expected 1 merged node, got %d", len(nodes))
+	}
+	if nodes[0].Node.Observation().Coverage != graph.CoverageComplete {
+		t.Errorf("coverage = %s, want complete", nodes[0].Node.Observation().Coverage)
+	}
+	if got := nodes[0].Properties["auth_observed"]; got != "anonymous" {
+		t.Errorf("auth_observed = %v, want anonymous", got)
+	}
+}

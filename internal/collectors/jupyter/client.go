@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -59,6 +60,7 @@ func newHTTPClient(bounds config.Bounds, insecure bool, userAgent string) *httpC
 	}
 
 	transport := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
 		DialContext: (&net.Dialer{
 			Timeout:   connectTimeout,
 			KeepAlive: 30 * time.Second,
@@ -90,42 +92,25 @@ func (c *httpClient) Get(ctx context.Context, targetURL string) (*httpResponse, 
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
+	if req.URL.User != nil {
+		return nil, errors.New("embedded URL credentials are forbidden")
+	}
 
 	req.Header.Set("Accept", "application/json, text/html;q=0.9, */*;q=0.8")
 	req.Header.Set("User-Agent", c.userAgent)
 
 	resp, err := c.client.Do(req)
 	if err != nil {
+		if tlsInfo, ok := extractTLSErrorInfo(err, c.insecure); ok {
+			return &httpResponse{TLS: tlsInfo}, err
+		}
 		return nil, err
 	}
 	defer resp.Body.Close()
 
 	var tlsInfo TLSInfo
 	if resp.TLS != nil && len(resp.TLS.PeerCertificates) > 0 {
-		leaf := resp.TLS.PeerCertificates[0]
-		hash := sha256.Sum256(leaf.Raw)
-		var sans []string
-		sans = append(sans, leaf.DNSNames...)
-		for _, ip := range leaf.IPAddresses {
-			sans = append(sans, ip.String())
-		}
-		tlsInfo = TLSInfo{
-			Observed:           true,
-			Fingerprint:        hex.EncodeToString(hash[:]),
-			Issuer:             leaf.Issuer.String(),
-			Subject:            leaf.Subject.String(),
-			SANs:               sans,
-			ValidFrom:          leaf.NotBefore.UTC().Format(time.RFC3339),
-			ValidTo:            leaf.NotAfter.UTC().Format(time.RFC3339),
-			NegotiatedVersion:  tlsVersionString(resp.TLS.Version),
-			InsecureOverride:   c.insecure,
-			VerificationResult: "verified",
-			VerificationReason: "certificate verified successfully",
-		}
-		if c.insecure {
-			tlsInfo.VerificationResult = "insecure_override"
-			tlsInfo.VerificationReason = "tls verification disabled by policy"
-		}
+		tlsInfo = buildTLSInfo(resp.TLS.PeerCertificates[0], tlsVersionString(resp.TLS.Version), c.insecure)
 	}
 
 	limitReader := io.LimitReader(resp.Body, c.maxResponseBytes+1)
@@ -152,6 +137,65 @@ func (c *httpClient) Get(ctx context.Context, targetURL string) (*httpResponse, 
 	}, nil
 }
 
+func buildTLSInfo(leaf *x509.Certificate, negVersion string, insecure bool) TLSInfo {
+	hash := sha256.Sum256(leaf.Raw)
+	var sans []string
+	sans = append(sans, leaf.DNSNames...)
+	for _, ip := range leaf.IPAddresses {
+		sans = append(sans, ip.String())
+	}
+	info := TLSInfo{
+		Observed:           true,
+		Fingerprint:        strings.ToUpper(hex.EncodeToString(hash[:])),
+		Issuer:             leaf.Issuer.String(),
+		Subject:            leaf.Subject.String(),
+		SANs:               sans,
+		ValidFrom:          leaf.NotBefore.UTC().Format(time.RFC3339),
+		ValidTo:            leaf.NotAfter.UTC().Format(time.RFC3339),
+		NegotiatedVersion:  negVersion,
+		InsecureOverride:   insecure,
+		VerificationResult: "verified",
+		VerificationReason: "certificate verified successfully",
+	}
+	if insecure {
+		info.VerificationResult = "insecure_override"
+		info.VerificationReason = "tls verification disabled by policy"
+	}
+	return info
+}
+
+func extractTLSErrorInfo(err error, insecure bool) (TLSInfo, bool) {
+	if err == nil {
+		return TLSInfo{}, false
+	}
+	var certErr *tls.CertificateVerificationError
+	var unknownAuth x509.UnknownAuthorityError
+	var hostErr x509.HostnameError
+	var invalidErr x509.CertificateInvalidError
+	var recErr tls.RecordHeaderError
+	if errors.As(err, &certErr) {
+		var info TLSInfo
+		if len(certErr.UnverifiedCertificates) > 0 {
+			info = buildTLSInfo(certErr.UnverifiedCertificates[0], "", false)
+		} else {
+			info = TLSInfo{Observed: true}
+		}
+		info.VerificationResult = "failed"
+		info.VerificationReason = err.Error()
+		info.InsecureOverride = insecure
+		return info, true
+	}
+	if errors.As(err, &unknownAuth) || errors.As(err, &hostErr) || errors.As(err, &invalidErr) || errors.As(err, &recErr) {
+		return TLSInfo{
+			Observed:           true,
+			VerificationResult: "failed",
+			VerificationReason: err.Error(),
+			InsecureOverride:   insecure,
+		}, true
+	}
+	return TLSInfo{}, false
+}
+
 func tlsVersionString(v uint16) string {
 	switch v {
 	case tls.VersionTLS13:
@@ -172,9 +216,17 @@ func makeCheckRedirect(maxRedirects int) func(req *http.Request, via []*http.Req
 		if len(via) > maxRedirects {
 			return http.ErrUseLastResponse
 		}
-		if len(via) > 0 && req.URL.Host != via[0].URL.Host {
-			// Stop cross-scope redirects
+		if req.URL.User != nil {
 			return http.ErrUseLastResponse
+		}
+		if len(via) > 0 {
+			if strings.EqualFold(via[0].URL.Scheme, "https") && !strings.EqualFold(req.URL.Scheme, "https") {
+				return http.ErrUseLastResponse
+			}
+			if !strings.EqualFold(req.URL.Host, via[0].URL.Host) {
+				// Stop cross-scope redirects
+				return http.ErrUseLastResponse
+			}
 		}
 		loc := strings.ToLower(req.URL.Path)
 		if strings.Contains(loc, "login") || strings.Contains(loc, "tree") {

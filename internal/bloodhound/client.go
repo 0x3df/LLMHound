@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -73,6 +74,15 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	hc := cfg.HTTPClient
 	if hc == nil {
 		tr := &http.Transport{
+			Proxy: http.ProxyFromEnvironment,
+			DialContext: (&net.Dialer{
+				Timeout:   10 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ResponseHeaderTimeout: timeout,
+			MaxIdleConns:          32,
+			IdleConnTimeout:       30 * time.Second,
 			TLSClientConfig: &tls.Config{
 				InsecureSkipVerify: cfg.Insecure,
 			},
@@ -103,6 +113,13 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		now:         now,
 		bearerToken: cfg.Auth.BearerToken,
 	}, nil
+}
+
+// CloseIdleConnections closes any idle keep-alive sockets held by the CE client.
+func (c *Client) CloseIdleConnections() {
+	if c != nil && c.httpClient != nil {
+		c.httpClient.CloseIdleConnections()
+	}
 }
 
 // VersionInfo models GET /api/version.

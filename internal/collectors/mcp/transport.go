@@ -9,7 +9,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -48,8 +50,10 @@ func (r *rateLimiter) Wait(ctx context.Context) error {
 	if wait > 0 {
 		r.last = now.Add(wait)
 		r.mu.Unlock()
+		timer := time.NewTimer(wait)
+		defer timer.Stop()
 		select {
-		case <-time.After(wait):
+		case <-timer.C:
 			return nil
 		case <-ctx.Done():
 			return ctx.Err()
@@ -87,6 +91,8 @@ type trackingTransport struct {
 	userAgent        string
 	insecure         bool
 	targetHost       string
+	targetAuthority  string
+	initialScheme    string
 
 	mu             sync.Mutex
 	lastStatusCode int
@@ -97,9 +103,14 @@ type trackingTransport struct {
 	redirects      []redirectInfo
 }
 
-func newTrackingTransport(base http.RoundTripper, rate float64, maxResponseBytes int64, userAgent string, insecure bool, targetHost string) *trackingTransport {
+func newTrackingTransport(base http.RoundTripper, rate float64, maxResponseBytes int64, userAgent string, insecure bool, targetHost, canonicalURL string) *trackingTransport {
 	if base == nil {
 		base = http.DefaultTransport
+	}
+	var targetAuthority, initialScheme string
+	if u, err := url.Parse(canonicalURL); err == nil {
+		targetAuthority = canonicalAuthority(u)
+		initialScheme = strings.ToLower(u.Scheme)
 	}
 	return &trackingTransport{
 		base:             base,
@@ -108,10 +119,52 @@ func newTrackingTransport(base http.RoundTripper, rate float64, maxResponseBytes
 		userAgent:        userAgent,
 		insecure:         insecure,
 		targetHost:       targetHost,
+		targetAuthority:  targetAuthority,
+		initialScheme:    initialScheme,
 	}
 }
 
+func canonicalAuthority(u *url.URL) string {
+	if u == nil {
+		return ""
+	}
+	host := strings.ToLower(u.Hostname())
+	port := u.Port()
+	if port == "" {
+		switch strings.ToLower(u.Scheme) {
+		case "http":
+			port = "80"
+		case "https":
+			port = "443"
+		}
+	}
+	if port == "" {
+		return host
+	}
+	return net.JoinHostPort(host, port)
+}
+
 func (t *trackingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req == nil || req.URL == nil {
+		return nil, errors.New("mcp request missing URL")
+	}
+	scheme := strings.ToLower(req.URL.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return nil, fmt.Errorf("mcp unsupported URL scheme %q", req.URL.Scheme)
+	}
+	if req.URL.User != nil {
+		return nil, errors.New("mcp embedded URL credentials are forbidden")
+	}
+	if t.initialScheme == "https" && scheme != "https" {
+		return nil, errors.New("mcp https to http downgrade forbidden")
+	}
+	if t.targetHost != "" && !strings.EqualFold(req.URL.Hostname(), t.targetHost) {
+		return nil, fmt.Errorf("mcp request host %q outside authorized target %q", req.URL.Hostname(), t.targetHost)
+	}
+	if t.targetAuthority != "" && !strings.EqualFold(canonicalAuthority(req.URL), t.targetAuthority) {
+		return nil, fmt.Errorf("mcp request endpoint %q outside authorized authority %q", req.URL.Host, t.targetAuthority)
+	}
+
 	if t.limiter != nil {
 		if err := t.limiter.Wait(req.Context()); err != nil {
 			return nil, err
@@ -145,11 +198,19 @@ func (t *trackingTransport) RoundTrip(req *http.Request) (*http.Response, error)
 		t.tlsState = &clonedTLS
 	}
 
-	if resp.Body != nil && t.maxResponseBytes > 0 && !strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
+	if resp.Body != nil && t.maxResponseBytes > 0 {
+		limit := t.maxResponseBytes
+		if strings.HasPrefix(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream") {
+			// Bound SSE streams cumulatively (8x response cap, min 16 MiB) so an adversarial server cannot OOM the worker.
+			limit = t.maxResponseBytes * 8
+			if limit < 16<<20 {
+				limit = 16 << 20
+			}
+		}
 		resp.Body = &limitReadCloser{
-			r:     io.LimitReader(resp.Body, t.maxResponseBytes+1),
+			r:     io.LimitReader(resp.Body, limit+1),
 			c:     resp.Body,
-			limit: t.maxResponseBytes,
+			limit: limit,
 		}
 	}
 
@@ -223,9 +284,17 @@ func buildHTTPClient(maxRedirects int, tracker *trackingTransport) *http.Client 
 			return fmt.Errorf("stopped after %d redirects", maxRedirects)
 		}
 
-		// Recheck destination host: cross-host redirects outside target scope are prohibited
+		// Recheck destination host and scheme: cross-host or https->http downgrade redirects are prohibited
+		if req.URL.User != nil {
+			tracker.RecordRedirect(via[len(via)-1].URL.String(), req.URL.String(), statusCode, false, "redirect contains embedded credentials")
+			return http.ErrUseLastResponse
+		}
+		if strings.EqualFold(via[0].URL.Scheme, "https") && !strings.EqualFold(req.URL.Scheme, "https") {
+			tracker.RecordRedirect(via[len(via)-1].URL.String(), req.URL.String(), statusCode, false, "https to http downgrade redirect forbidden")
+			return http.ErrUseLastResponse
+		}
 		origHost := via[0].URL.Host
-		if req.URL.Host != origHost {
+		if !strings.EqualFold(req.URL.Host, origHost) {
 			tracker.RecordRedirect(via[len(via)-1].URL.String(), req.URL.String(), statusCode, false, "cross-host redirect not authorized")
 			return http.ErrUseLastResponse
 		}
@@ -250,7 +319,7 @@ type tlsObservation struct {
 	InsecureOverride   bool
 }
 
-func extractTLSObservation(state *tls.ConnectionState, tlsErr error, insecure bool) (tlsObservation, bool) {
+func extractTLSObservation(state *tls.ConnectionState, tlsErr error, targetHost string, insecure bool) (tlsObservation, bool) {
 	if state == nil && tlsErr == nil {
 		return tlsObservation{}, false
 	}
@@ -277,11 +346,16 @@ func extractTLSObservation(state *tls.ConnectionState, tlsErr error, insecure bo
 			obs.NegotiatedVersion = "TLS 1.0"
 		}
 
+		dnsName := strings.TrimSpace(targetHost)
+		if dnsName == "" {
+			dnsName = state.ServerName
+		}
+
 		if insecure {
 			obs.VerificationResult = "unverified_override"
 			if len(state.PeerCertificates) > 0 {
 				opts := x509.VerifyOptions{
-					DNSName:       state.ServerName,
+					DNSName:       dnsName,
 					Intermediates: x509.NewCertPool(),
 				}
 				for _, cert := range state.PeerCertificates[1:] {
@@ -298,10 +372,13 @@ func extractTLSObservation(state *tls.ConnectionState, tlsErr error, insecure bo
 		if len(state.PeerCertificates) > 0 {
 			leaf := state.PeerCertificates[0]
 			sum := sha256.Sum256(leaf.Raw)
-			obs.CertFingerprint = hex.EncodeToString(sum[:])
+			obs.CertFingerprint = strings.ToUpper(hex.EncodeToString(sum[:]))
 			obs.Issuer = leaf.Issuer.String()
 			obs.Subject = leaf.Subject.String()
 			obs.SANs = append([]string(nil), leaf.DNSNames...)
+			for _, ip := range leaf.IPAddresses {
+				obs.SANs = append(obs.SANs, ip.String())
+			}
 			obs.ValidFrom = leaf.NotBefore.UTC().Format(time.RFC3339)
 			obs.ValidTo = leaf.NotAfter.UTC().Format(time.RFC3339)
 		}

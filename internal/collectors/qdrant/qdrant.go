@@ -459,6 +459,10 @@ func (c *Collector) Collect(
 		infoDenied := 0
 		var infoErrors []string
 		for _, name := range collectionNames {
+			if name == "" || name == "." || name == ".." || strings.ContainsAny(name, "/\\") {
+				infoErrors = append(infoErrors, fmt.Sprintf("%q: invalid collection segment", name))
+				continue
+			}
 			infoURL := baseURL + "/collections/" + url.PathEscape(name)
 			resp, reqErr := c.transport.Get(ctx, infoURL)
 			common.AbsorbTransport(resp, &tlsInfo, &redirects)
@@ -638,6 +642,14 @@ func (c *Collector) Collect(
 		var scrollErrors []string
 
 		for _, name := range collectionNames {
+			if budget.ServiceLimitReached() {
+				budget.MarkTruncated(fmt.Sprintf("content service byte limit (%d) reached", c.cfg.Content.MaxServiceBytes))
+				break
+			}
+			if name == "" || name == "." || name == ".." || strings.ContainsAny(name, "/\\") {
+				scrollErrors = append(scrollErrors, fmt.Sprintf("%q: invalid collection segment", name))
+				continue
+			}
 			scrollURL := baseURL + "/collections/" + url.PathEscape(name) + "/points/scroll"
 			resp, reqErr := c.transport.Post(ctx, scrollURL, "application/json", reqBody)
 			common.AbsorbTransport(resp, &tlsInfo, &redirects)

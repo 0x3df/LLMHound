@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -319,7 +320,13 @@ var sensitiveKeyFragments = []string{
 	"secret",
 	"bearer",
 	"credential",
+	"private_key",
 }
+
+var (
+	evidenceURLPattern    = regexp.MustCompile(`[A-Za-z][A-Za-z0-9+.-]*://[^\s"'<>]+`)
+	evidenceBearerPattern = regexp.MustCompile(`(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/-]+=*`)
+)
 
 func isSensitiveKey(key string) bool {
 	lower := strings.ToLower(key)
@@ -358,6 +365,8 @@ func sanitizeValue(v any) any {
 	case nil, bool, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32, float64, json.Number:
 		return t
 	case string:
+		t = evidenceURLPattern.ReplaceAllStringFunc(t, SanitizeURL)
+		t = evidenceBearerPattern.ReplaceAllString(t, "${1} [REDACTED]")
 		if len(t) > MaxDetailSize {
 			cut := MaxDetailSize
 			for cut > 0 && !utf8.RuneStart(t[cut]) {

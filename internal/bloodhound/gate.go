@@ -117,9 +117,27 @@ func (c *Client) TraversablePathKinds(ctx context.Context, includeCanExecuteOn b
 		if strings.HasPrefix(e.Name, "LLMHound_") && (!includeCanExecuteOn || e.Name != "LLMHound_CanExecuteOn") {
 			continue
 		}
+		if !isSafeCypherEdgeKind(e.Name) {
+			continue
+		}
 		seen[e.Name] = true
 		out = append(out, e.Name)
 	}
 	sort.Strings(out)
 	return out, nil
+}
+
+func isSafeCypherEdgeKind(name string) bool {
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		isLetter := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+		isDigit := c >= '0' && c <= '9'
+		if i == 0 && !isLetter {
+			return false
+		}
+		if !isLetter && !isDigit && c != '_' {
+			return false
+		}
+	}
+	return len(name) > 0
 }

@@ -145,11 +145,18 @@ func edgeKey(edge graph.Edge) string {
 func (s *State) addNode(item emitter.NodeItem) {
 	id := item.Node.Identity().ID()
 	if idx, exists := s.nodeMap[id]; exists {
-		// Existing node: merge additional properties if any
+		// Newer replay record supersedes prior partial/stale observations while
+		// retaining any properties not present in the replacement item.
+		merged := make(map[string]any, len(s.nodes[idx].Properties)+len(item.Properties))
+		for k, v := range s.nodes[idx].Properties {
+			merged[k] = v
+		}
 		for k, v := range item.Properties {
-			if _, ok := s.nodes[idx].Properties[k]; !ok {
-				s.nodes[idx].Properties[k] = v
-			}
+			merged[k] = v
+		}
+		s.nodes[idx] = emitter.NodeItem{
+			Node:       item.Node,
+			Properties: merged,
 		}
 		return
 	}
@@ -159,7 +166,8 @@ func (s *State) addNode(item emitter.NodeItem) {
 
 func (s *State) addEdge(edge graph.Edge) {
 	k := edgeKey(edge)
-	if _, exists := s.edgeMap[k]; exists {
+	if idx, exists := s.edgeMap[k]; exists {
+		s.edges[idx] = edge
 		return
 	}
 	s.edgeMap[k] = len(s.edges)
@@ -181,7 +189,7 @@ func (s *State) addResult(res Result) {
 	key := targetKey(res.Target, res.Surface)
 	status := statusForCoverage(res.Observation.Coverage)
 
-	obsRec := toObservationRecord(res.Observation, DefaultMaxEntryBytes)
+	obsRec := toObservationRecord(res.Observation, DefaultMaxStringSize)
 	s.targets[key] = TargetRecord{
 		Target:      res.Target,
 		Surface:     res.Surface,
@@ -232,7 +240,10 @@ func ReplayStream(r io.Reader, handler ReplayHandler, opts ...Option) error {
 
 	for {
 		lineNum++
-		lineBytes, err := readLine(reader)
+		lineBytes, err := readLine(reader, o.maxEntryBytes)
+		if errors.Is(err, ErrEntryTooLarge) {
+			return fmt.Errorf("line %d: %w", lineNum, ErrEntryTooLarge)
+		}
 		if err != nil && len(lineBytes) == 0 {
 			if errors.Is(err, io.EOF) {
 				break
@@ -353,6 +364,10 @@ func ReplayStream(r io.Reader, handler ReplayHandler, opts ...Option) error {
 			if err := entry.Evidence.Validate(); err != nil {
 				return fmt.Errorf("line %d: invalid evidence: %w", lineNum, err)
 			}
+			if entry.Evidence.DeploymentScope != vantage.scope || entry.Evidence.VantageKey != vantage.key {
+				return fmt.Errorf("line %d: evidence scope/vantage (%q/%q) does not match journal (%q/%q)",
+					lineNum, entry.Evidence.DeploymentScope, entry.Evidence.VantageKey, vantage.scope, vantage.key)
+			}
 			if handler.OnEvidence != nil {
 				if err := handler.OnEvidence(*entry.Evidence); err != nil {
 					return fmt.Errorf("handle evidence: %w", err)
@@ -440,11 +455,14 @@ func ReplayFile(path string, opts ...Option) (*State, error) {
 	return Replay(f, opts...)
 }
 
-func readLine(r *bufio.Reader) ([]byte, error) {
+func readLine(r *bufio.Reader, maxLen int) ([]byte, error) {
 	var line []byte
 	for {
 		chunk, isPrefix, err := r.ReadLine()
 		if len(chunk) > 0 {
+			if maxLen > 0 && len(line)+len(chunk) > maxLen+256 {
+				return nil, ErrEntryTooLarge
+			}
 			line = append(line, chunk...)
 		}
 		if err != nil {

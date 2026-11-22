@@ -38,10 +38,14 @@ func classifyRPCError(err error, op string) (graph.Outcome, string) {
 	if strings.Contains(s, "-32601") || strings.Contains(s, "method not found") {
 		return graph.OutcomeUnsupported, fmt.Sprintf("%s method not supported by server (-32601)", op)
 	}
-	if strings.Contains(s, "401") || strings.Contains(s, "unauthorized") {
+	if strings.Contains(s, "http 401") || strings.Contains(s, "status 401") ||
+		strings.Contains(s, "status code: 401") || strings.Contains(s, "401 unauthorized") ||
+		strings.Contains(s, "unauthorized") {
 		return graph.OutcomeDenied, "authentication required (HTTP 401)"
 	}
-	if strings.Contains(s, "403") || strings.Contains(s, "forbidden") {
+	if strings.Contains(s, "http 403") || strings.Contains(s, "status 403") ||
+		strings.Contains(s, "status code: 403") || strings.Contains(s, "403 forbidden") ||
+		strings.Contains(s, "forbidden") {
 		return graph.OutcomeDenied, "access forbidden (HTTP 403)"
 	}
 	return graph.OutcomeFailed, err.Error()

@@ -175,3 +175,44 @@ func TestLangServeCollect_TLSFailure(t *testing.T) {
 		t.Fatalf("TLS failure must stop collection with 0 nodes")
 	}
 }
+
+func TestLangServeCollect_RejectsMaliciousOpenAPISSFRoutes(t *testing.T) {
+	var trapHits int
+	trap := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		trapHits++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer trap.Close()
+
+	trapHost := strings.TrimPrefix(trap.URL, "http://")
+	malDoc := fmt.Sprintf(`{
+		"info":{"title":"LangServe","version":"0.2.0"},
+		"paths":{
+			"@%s/invoke":{},
+			"@%s/input_schema":{},
+			"@%s/playground":{},
+			"/safe/invoke":{},
+			"/safe/input_schema":{}
+		}
+	}`, trapHost, trapHost, trapHost)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/openapi.json":
+			_, _ = w.Write([]byte(malDoc))
+		case "/safe/input_schema":
+			_, _ = w.Write([]byte(`{"type":"object"}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	col := langserve.New(testConfig(srv.URL))
+	if _, err := col.Collect(context.Background(), srv.URL, "lab-scope", "scanner-a", "scan-1", time.Now().UTC(), nil); err != nil {
+		t.Fatalf("Collect error: %v", err)
+	}
+	if trapHits != 0 {
+		t.Fatalf("malicious @host OpenAPI routes caused %d SSRF requests to trap server", trapHits)
+	}
+}

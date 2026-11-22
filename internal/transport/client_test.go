@@ -2,8 +2,14 @@ package transport_test
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"errors"
+	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -345,5 +351,118 @@ func TestTransport_CrossHostRedirectRefusedWithoutAllowlist(t *testing.T) {
 	resp, err := client.Get(context.Background(), origin.URL+"/same")
 	if err != nil || resp.StatusCode != http.StatusOK || len(resp.Redirects) != 1 {
 		t.Errorf("same-host redirect should be followed and recorded: err=%v resp=%+v", err, resp)
+	}
+}
+
+func TestTLSRejectsWrongIPCertOnIPLiteral(t *testing.T) {
+	caKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caTmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "test-ca"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		IsCA:                  true,
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
+		BasicConstraintsValid: true,
+	}
+	caDER, err := x509.CreateCertificate(rand.Reader, caTmpl, caTmpl, &caKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caCert, err := x509.ParseCertificate(caDER)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	leafKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leafTmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(2),
+		Subject:      pkix.Name{CommonName: "wrong-ip"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		IPAddresses:  []net.IP{net.ParseIP("198.51.100.1")},
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	leafDER, err := x509.CreateCertificate(rand.Reader, leafTmpl, caCert, &leafKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pool := x509.NewCertPool()
+	pool.AddCert(caCert)
+
+	ts := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	ts.TLS = &tls.Config{
+		Certificates: []tls.Certificate{{
+			Certificate: [][]byte{leafDER},
+			PrivateKey:  leafKey,
+		}},
+	}
+	ts.StartTLS()
+	defer ts.Close()
+
+	client := transport.NewClient(transport.Config{
+		Bounds:     config.Bounds{MaxResponseBytes: 1024},
+		Insecure:   false,
+		TLSRootCAs: pool,
+	})
+	resp, err := client.Get(context.Background(), ts.URL+"/api/version")
+	if err == nil {
+		t.Fatalf("expected hostname/IP SAN mismatch error on 127.0.0.1 for 198.51.100.1 cert, got %+v", resp)
+	}
+	if resp == nil || resp.TLS == nil || resp.TLS.VerificationResult != "failed" {
+		t.Fatalf("expected TLS verification failed metadata, got %+v", resp)
+	}
+}
+
+func TestDoRejectsUserinfoAndUnauthorizedInitialHost(t *testing.T) {
+	var hit bool
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hit = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	client := transport.NewClient(transport.Config{
+		Bounds:          config.Bounds{MaxResponseBytes: 1024},
+		AuthorizedHosts: []string{"allowed.example.test"},
+	})
+	if _, err := client.Get(context.Background(), strings.Replace(ts.URL, "http://", "http://user:pass@", 1)+"/api/tags"); err == nil {
+		t.Fatal("expected error when URL contains embedded userinfo")
+	}
+	if _, err := client.Get(context.Background(), ts.URL+"/api/tags"); !errors.Is(err, transport.ErrRedirectNotAuthorized) {
+		t.Fatalf("expected unauthorized initial host rejection, got %v", err)
+	}
+	if hit {
+		t.Fatal("unauthorized or credential-bearing request must not dial")
+	}
+}
+
+func TestRedirectRejectsHTTPSDowngrade(t *testing.T) {
+	plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer plain.Close()
+
+	tlsSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, plain.URL+"/downgraded", http.StatusFound)
+	}))
+	defer tlsSrv.Close()
+
+	client := transport.NewClient(transport.Config{
+		Bounds:          config.Bounds{MaxResponseBytes: 1024, MaxRedirects: 2},
+		Insecure:        true,
+		AuthorizedHosts: []string{"127.0.0.1"},
+	})
+	if _, err := client.Get(context.Background(), tlsSrv.URL+"/start"); !errors.Is(err, transport.ErrRedirectNotAuthorized) {
+		t.Fatalf("expected https->http downgrade redirect rejection, got %v", err)
 	}
 }

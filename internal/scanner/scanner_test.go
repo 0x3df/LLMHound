@@ -1339,3 +1339,45 @@ func TestScanner_ResumeSkipsCompletedAndRepairsTornTail(t *testing.T) {
 		}
 	}
 }
+
+func TestScanner_MCPMatchedPathPreserved(t *testing.T) {
+	mcpSrv := mcpsdk.NewServer(&mcpsdk.Implementation{Name: "strict-mcp", Version: "1.0.0"}, nil)
+	mcpSrv.AddTool(&mcpsdk.Tool{
+		Name:        "search",
+		Description: "Read search",
+		InputSchema: map[string]any{"type": "object"},
+	}, nil)
+	sdkHandler := mcpsdk.NewStreamableHTTPHandler(func(*http.Request) *mcpsdk.Server {
+		return mcpSrv
+	}, nil)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/mcp") {
+			sdkHandler.ServeHTTP(w, r)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	def := discovery.MCPDefinition()
+	def.DefaultPort = parsePort(srv.URL)
+
+	cfg := config.Defaults()
+	cfg.Scope = "corp"
+	cfg.VantageKey = "v1"
+	cfg.Targets = []string{"127.0.0.1"}
+	cfg.Content.Enabled = false
+
+	s, err := scanner.New(cfg, scanner.WithDefinitions([]discovery.Definition{def}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := s.Scan(context.Background(), []string{"127.0.0.1"}, t.TempDir(), "mcp-subpath")
+	if err != nil {
+		t.Fatalf("Scan failed: %v", err)
+	}
+	if !res.State.IsCompleted("127.0.0.1", "mcp") {
+		t.Fatalf("expected MCP server strictly mounted at /mcp to complete, got nodes=%d", len(res.State.Nodes()))
+	}
+}

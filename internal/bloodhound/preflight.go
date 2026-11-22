@@ -9,7 +9,6 @@ import (
 	"unicode"
 
 	"github.com/0x3df/LLMHound/internal/emitter"
-	"github.com/0x3df/LLMHound/internal/graph"
 )
 
 // PreflightChunkSize caps each Cypher objectid batch below CE's ~1,000-node cap (R7).
@@ -86,7 +85,6 @@ func (c *Client) FilterLinkingPayload(
 	baseNodeIDs map[string]bool,
 ) (emitter.Payload, []SkippedEdge, error) {
 	var toCheck []string
-	canExecKind, _ := graph.CanExecuteOn.Emitted()
 
 	needsCheck := func(id string) bool {
 		up := strings.ToUpper(strings.TrimSpace(id))
@@ -100,22 +98,8 @@ func (c *Client) FilterLinkingPayload(
 	}
 
 	for _, e := range linkingPayload.Graph.Edges {
-		if e.Kind == canExecKind {
-			if needsCheck(e.Start.Value) {
-				toCheck = append(toCheck, e.Start.Value)
-			}
-			if needsCheck(e.End.Value) {
-				toCheck = append(toCheck, e.End.Value)
-			}
-			continue
-		}
-		// ObservedAt in linking payload goes service -> native target; any
-		// endpoint not in baseNodeIDs is checked (if baseNodeIDs is nil, only
-		// check End so standalone linking files don't treat service IDs as missing).
-		if baseNodeIDs != nil {
-			if needsCheck(e.Start.Value) {
-				toCheck = append(toCheck, e.Start.Value)
-			}
+		if needsCheck(e.Start.Value) {
+			toCheck = append(toCheck, e.Start.Value)
 		}
 		if needsCheck(e.End.Value) {
 			toCheck = append(toCheck, e.End.Value)
@@ -134,20 +118,11 @@ func (c *Client) FilterLinkingPayload(
 		startUp := strings.ToUpper(strings.TrimSpace(e.Start.Value))
 		endUp := strings.ToUpper(strings.TrimSpace(e.End.Value))
 
-		if e.Kind == canExecKind {
-			if needsCheck(e.Start.Value) && !existing[startUp] {
-				missing = append(missing, "start:"+e.Start.Value)
-			}
-			if needsCheck(e.End.Value) && !existing[endUp] {
-				missing = append(missing, "end:"+e.End.Value)
-			}
-		} else {
-			if baseNodeIDs != nil && needsCheck(e.Start.Value) && !existing[startUp] {
-				missing = append(missing, "start:"+e.Start.Value)
-			}
-			if needsCheck(e.End.Value) && !existing[endUp] {
-				missing = append(missing, "end:"+e.End.Value)
-			}
+		if needsCheck(e.Start.Value) && !existing[startUp] {
+			missing = append(missing, "start:"+e.Start.Value)
+		}
+		if needsCheck(e.End.Value) && !existing[endUp] {
+			missing = append(missing, "end:"+e.End.Value)
 		}
 
 		if len(missing) > 0 {

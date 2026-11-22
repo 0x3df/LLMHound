@@ -383,8 +383,9 @@ func (f *FileJournal) Flush() error {
 }
 
 func (f *FileJournal) Close() error {
-	_ = f.Flush()
-	return f.WriterJournal.Close()
+	flushErr := f.Flush()
+	closeErr := f.WriterJournal.Close()
+	return errors.Join(flushErr, closeErr)
 }
 
 // CreateFile creates a new journal file at path, writing header as the first entry.
@@ -469,6 +470,7 @@ func OpenFile(path string, opts ...Option) (*FileJournal, error) {
 
 // repairTornTail ensures the file ends on a line boundary so appended entries never
 // join a partial line: a complete unterminated last entry is terminated, a partial one is dropped.
+// Reads backwards from EOF in bounded chunks to avoid loading the entire journal into RAM.
 func repairTornTail(f *os.File) error {
 	info, err := f.Stat()
 	if err != nil {
@@ -478,17 +480,54 @@ func repairTornTail(f *os.File) error {
 	if size == 0 {
 		return nil
 	}
-	data := make([]byte, size)
-	if _, err := f.ReadAt(data, 0); err != nil {
+	var lastByte [1]byte
+	if _, err := f.ReadAt(lastByte[:], size-1); err != nil {
 		return err
 	}
-	if data[size-1] == '\n' {
+	if lastByte[0] == '\n' {
 		return nil
 	}
-	lineStart := int64(bytes.LastIndexByte(data, '\n') + 1)
-	if json.Valid(bytes.TrimSpace(data[lineStart:])) {
-		_, err = f.Write([]byte{'\n'})
+
+	const chunkSize = int64(64 * 1024)
+	maxTail := int64(DefaultMaxEntryBytes + chunkSize)
+	minOffset := int64(0)
+	if size > maxTail {
+		minOffset = size - maxTail
+	}
+
+	lineStart := minOffset
+	pos := size
+	for pos > minOffset {
+		start := pos - chunkSize
+		if start < minOffset {
+			start = minOffset
+		}
+		buf := make([]byte, pos-start)
+		if _, err := f.ReadAt(buf, start); err != nil {
+			return err
+		}
+		if idx := bytes.LastIndexByte(buf, '\n'); idx >= 0 {
+			lineStart = start + int64(idx) + 1
+			break
+		}
+		pos = start
+	}
+
+	tailLen := size - lineStart
+	if tailLen <= int64(DefaultMaxEntryBytes) {
+		tail := make([]byte, tailLen)
+		if _, err := f.ReadAt(tail, lineStart); err != nil {
+			return err
+		}
+		if json.Valid(bytes.TrimSpace(tail)) {
+			if _, err := f.Write([]byte{'\n'}); err != nil {
+				return err
+			}
+			return f.Sync()
+		}
+	}
+	if err := f.Truncate(lineStart); err != nil {
 		return err
 	}
-	return f.Truncate(lineStart)
+	return f.Sync()
 }

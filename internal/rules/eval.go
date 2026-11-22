@@ -166,7 +166,7 @@ func Evaluate(
 			ruleObs.Surface = rule.Surface
 			ruleObs.Source = nodeObs.Source
 			ruleObs.Coverage = nodeObs.Coverage
-			ruleObs.CoverageReason = ""
+			ruleObs.CoverageReason = nodeObs.CoverageReason
 
 			for _, hostRef := range nativeHosts {
 				for _, principalRef := range principals {

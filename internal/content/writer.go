@@ -109,7 +109,7 @@ func (l *LazyFileWriter) Write(r Record) error {
 		if err != nil {
 			return fmt.Errorf("open content file: %w", err)
 		}
-		if err := os.Chmod(l.path, 0o600); err != nil {
+		if err := f.Chmod(0o600); err != nil {
 			_ = f.Close()
 			return fmt.Errorf("restrict content file permissions: %w", err)
 		}
@@ -133,8 +133,12 @@ func (l *LazyFileWriter) Close() error {
 	if l.file == nil {
 		return nil
 	}
-	err := l.file.Close()
+	syncErr := l.file.Sync()
+	closeErr := l.file.Close()
 	l.file = nil
 	l.writer = nil
-	return err
+	if syncErr != nil {
+		return syncErr
+	}
+	return closeErr
 }

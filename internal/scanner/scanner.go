@@ -938,6 +938,20 @@ func (s *Scanner) runAndEmit(
 	}
 
 	probeClient := s.probeHTTPClient()
+	defer probeClient.CloseIdleConnections()
+
+	type targetSurface struct {
+		target  string
+		surface string
+	}
+	priorHasNodes := make(map[targetSurface]bool)
+	if priorState != nil {
+		for _, prev := range priorState.Results() {
+			if len(prev.Nodes) > 0 {
+				priorHasNodes[targetSurface{target: prev.Target, surface: prev.Surface}] = true
+			}
+		}
+	}
 
 	// 5. Worker pool for bounded concurrency
 	concurrency := s.cfg.Bounds.Concurrency
@@ -962,14 +976,19 @@ func (s *Scanner) runAndEmit(
 		}
 	}
 
+targetLoop:
 	for _, tgt := range targets {
+		if ctx.Err() != nil {
+			break targetLoop
+		}
 		select {
 		case <-ctx.Done():
-			break
+			break targetLoop
 		case sem <- struct{}{}:
 		}
 		if ctx.Err() != nil {
-			break
+			<-sem
+			break targetLoop
 		}
 		targetHost := tgt
 		wg.Add(1)
@@ -994,11 +1013,8 @@ func (s *Scanner) runAndEmit(
 					continue
 				}
 				if priorState != nil && priorState.IsCompleted(host, string(def.Surface)) {
-					for _, prev := range priorState.Results() {
-						if prev.Target == host && string(prev.Surface) == string(def.Surface) && len(prev.Nodes) > 0 {
-							matchedHostPort[hostPortKey] = true
-							break
-						}
+					if priorHasNodes[targetSurface{target: host, surface: string(def.Surface)}] {
+						matchedHostPort[hostPortKey] = true
 					}
 					continue
 				}
@@ -1041,8 +1057,12 @@ func (s *Scanner) runAndEmit(
 					res.Target = host
 					record(res)
 				case discovery.SurfaceMCP:
+					mcpURL := baseURL
+					if probe.MatchedPath == "/mcp" || probe.MatchedPath == "/sse" {
+						mcpURL = strings.TrimSuffix(baseURL, "/") + probe.MatchedPath
+					}
 					mcpTarget := collectormcp.Target{
-						URL:            baseURL,
+						URL:            mcpURL,
 						OriginalTarget: host,
 						Transport:      "auto",
 					}
@@ -1304,9 +1324,12 @@ func (s *Scanner) probeHTTPClient() *http.Client {
 		responseTimeout = 10 * time.Second
 	}
 	tr := &http.Transport{
-		DialContext:           (&net.Dialer{Timeout: connectTimeout}).DialContext,
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           (&net.Dialer{Timeout: connectTimeout, KeepAlive: 30 * time.Second}).DialContext,
 		TLSHandshakeTimeout:   connectTimeout,
 		ResponseHeaderTimeout: responseTimeout,
+		MaxIdleConns:          64,
+		IdleConnTimeout:       30 * time.Second,
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: s.cfg.Insecure,
 		},

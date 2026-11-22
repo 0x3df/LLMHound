@@ -18,6 +18,8 @@ const (
 	jobStatusRunning  = 1
 	jobStatusComplete = 2
 	jobStatusCanceled = 3
+	jobStatusTimedOut = 4
+	jobStatusFailed   = 5
 	jobStatusPartial  = 8
 )
 
@@ -132,6 +134,12 @@ func (c *Client) UploadFileJob(
 			lastErr = fmt.Errorf("upload job %d was canceled (status 3)", jobID)
 			continue
 		}
+		if jobStatus == jobStatusTimedOut {
+			return lastJob, fmt.Errorf("upload job %d timed out (status 4)", jobID)
+		}
+		if jobStatus == jobStatusFailed {
+			return lastJob, fmt.Errorf("upload job %d failed (status 5)", jobID)
+		}
 		if jobStatus == jobStatusPartial {
 			return lastJob, fmt.Errorf("upload job %d finished with partial failure (status 8)", jobID)
 		}
@@ -156,8 +164,11 @@ func (c *Client) startUploadJob(ctx context.Context) (int64, error) {
 			ID int64 `json:"id"`
 		} `json:"data"`
 	}
-	if err := json.Unmarshal(body, &env); err != nil || env.Data.ID <= 0 {
+	if err := json.Unmarshal(body, &env); err != nil {
 		return 0, fmt.Errorf("decode file-upload/start response: %w", err)
+	}
+	if env.Data.ID <= 0 {
+		return 0, errors.New("decode file-upload/start response: missing positive job id")
 	}
 	return env.Data.ID, nil
 }
@@ -194,7 +205,7 @@ func (c *Client) pollUploadJob(ctx context.Context, jobID int64, interval, timeo
 			return jobStatusComplete, true, nil
 		}
 		switch jobStatus {
-		case jobStatusComplete, jobStatusCanceled, jobStatusPartial:
+		case jobStatusComplete, jobStatusCanceled, jobStatusTimedOut, jobStatusFailed, jobStatusPartial:
 			return jobStatus, false, nil
 		}
 		if time.Now().After(deadline) {
@@ -248,8 +259,8 @@ func (c *Client) UploadScan(ctx context.Context, opts UploadOptions) (*UploadRep
 	if len(opts.BasePayloadBytes) == 0 && len(opts.LinkingPayloadBytes) == 0 {
 		return nil, errors.New("upload requires at least a base payload or linking payload")
 	}
-	if opts.MaxRetries == 0 {
-		opts.MaxRetries = 2
+	if opts.MaxRetries < 0 {
+		opts.MaxRetries = 0
 	}
 
 	report := &UploadReport{}

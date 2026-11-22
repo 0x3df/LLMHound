@@ -278,6 +278,38 @@ func TestSchemaWithCanExecuteOn(t *testing.T) {
 	}
 }
 
+func TestEvaluate_PartialCoveragePreservesCoverageReason(t *testing.T) {
+	nodes, edges, evs, obs := makeServiceAndHost(t, graph.JupyterServer, "jupyter", "http://127.0.0.1:8888", map[string]any{
+		"software_version": "2.14.0",
+		"auth_required":    false,
+		"anon_operations":  []string{"jupyter_sessions"},
+	}, true, []string{"jupyter_sessions"})
+
+	partObs := nodes[0].Node.Observation()
+	partObs.Coverage = graph.CoveragePartial
+	partObs.CoverageReason = "root directory listing skipped nested subdirectories"
+	partNode, err := graph.NewNode(nodes[0].Node.Identity(), partObs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodes[0].Node = partNode
+
+	cfg := config.PathQualification{
+		EnabledRules:           []string{"jupyter-auth-disabled"},
+		AssumedReachPrincipals: []config.ReachPrincipal{{ObjectID: "S-1-5-21-1-2-3-513", Kind: "Group"}},
+	}
+	outEdges, outEvs, err := rules.Evaluate(cfg, nodes, edges, evs, obs)
+	if err != nil {
+		t.Fatalf("Evaluate failed on partial-coverage service: %v", err)
+	}
+	if len(outEdges) != 1 || len(outEvs) != 1 {
+		t.Fatalf("expected 1 CanExecuteOn edge and 1 evidence record, got %d / %d", len(outEdges), len(outEvs))
+	}
+	if outEdges[0].Observation().Coverage != graph.CoveragePartial || outEdges[0].Observation().CoverageReason == "" {
+		t.Fatalf("expected partial coverage reason preserved, got %+v", outEdges[0].Observation())
+	}
+}
+
 func contains(s, sub string) bool {
 	return len(sub) > 0 && len(s) >= len(sub) && (func() bool {
 		for i := 0; i <= len(s)-len(sub); i++ {

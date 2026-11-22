@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/0x3df/LLMHound/internal/checkpoint"
+	"github.com/0x3df/LLMHound/internal/collectors/internal/common"
 	"github.com/0x3df/LLMHound/internal/config"
 	"github.com/0x3df/LLMHound/internal/content"
 	"github.com/0x3df/LLMHound/internal/correlate"
@@ -233,6 +234,8 @@ func (c *Collector) Collect(
 	var totalTransportFailures int
 	var totalDeniedCount int
 
+	var tlsFailed bool
+
 	// 1. Check: Runtime Version (GET /api/version)
 	{
 		checkID := CheckVersion
@@ -241,7 +244,22 @@ func (c *Collector) Collect(
 		resp, reqErr := c.transport.Get(ctx, verURL)
 		absorb(resp)
 
-		if reqErr != nil {
+		if common.IsTLSFailure(tlsInfo, c.cfg.Insecure) {
+			tlsFailed = true
+			versionCheckErr = reqErr
+			reason := common.SanitizeError(reqErr)
+			if reason == "" {
+				reason = "TLS certificate verification failed: " + tlsInfo.VerificationReason
+			}
+			checkResults = append(checkResults, graph.CheckResult{
+				CheckID:   checkID,
+				Operation: op,
+				TargetID:  srvID.ID(),
+				Outcome:   graph.OutcomeFailed,
+				Reason:    reason,
+			})
+			checkDetails[checkID] = map[string]any{"tls_error": tlsInfo.VerificationReason}
+		} else if reqErr != nil {
 			versionCheckErr = reqErr
 			totalTransportFailures++
 			reason := sanitizeError(reqErr)
@@ -328,14 +346,41 @@ func (c *Collector) Collect(
 	}
 
 	// 2. Check: Model Catalog (GET /api/tags)
-	{
+	if tlsFailed {
+		checkResults = append(checkResults, graph.CheckResult{
+			CheckID:   CheckTags,
+			Operation: "ollama_tags",
+			TargetID:  srvID.ID(),
+			Outcome:   graph.OutcomeSkipped,
+			Reason:    "prerequisite failed: TLS verification failed",
+		})
+		checkResults = append(checkResults, graph.CheckResult{
+			CheckID:   CheckPS,
+			Operation: "ollama_ps",
+			TargetID:  srvID.ID(),
+			Outcome:   graph.OutcomeSkipped,
+			Reason:    "prerequisite failed: TLS verification failed",
+		})
+	} else {
 		checkID := CheckTags
 		op := "ollama_tags"
 		tagsURL := baseURL + "/api/tags"
 		resp, reqErr := c.transport.Get(ctx, tagsURL)
 		absorb(resp)
 
-		if reqErr != nil {
+		if common.IsTLSFailure(tlsInfo, c.cfg.Insecure) {
+			tlsFailed = true
+			tagsCheckErr = reqErr
+			reason := common.SanitizeError(reqErr)
+			checkResults = append(checkResults, graph.CheckResult{
+				CheckID:   checkID,
+				Operation: op,
+				TargetID:  srvID.ID(),
+				Outcome:   graph.OutcomeFailed,
+				Reason:    reason,
+			})
+			checkDetails[checkID] = map[string]any{"tls_error": tlsInfo.VerificationReason}
+		} else if reqErr != nil {
 			tagsCheckErr = reqErr
 			totalTransportFailures++
 			reason := sanitizeError(reqErr)
@@ -434,7 +479,7 @@ func (c *Collector) Collect(
 	}
 
 	// 3. Check: Running Models (GET /api/ps)
-	{
+	if !tlsFailed {
 		checkID := CheckPS
 		op := "ollama_ps"
 		psURL := baseURL + "/api/ps"
@@ -563,6 +608,10 @@ func (c *Collector) Collect(
 			}
 			showAttempts := 0
 			for _, m := range catalogModels {
+				if budget.ServiceLimitReached() {
+					budget.MarkTruncated(fmt.Sprintf("content service byte limit (%d) reached", c.cfg.Content.MaxServiceBytes))
+					break
+				}
 				modelName := strings.TrimSpace(m.Name)
 				if modelName == "" {
 					modelName = strings.TrimSpace(m.Model)
@@ -602,8 +651,8 @@ func (c *Collector) Collect(
 					continue
 				}
 				sp := redactProvenance(ShowProvenance{Details: showResp.Details, License: showResp.License})
-				provenance[m.Name] = sp
-				showProvenance[m.Name] = map[string]any{
+				provenance[modelName] = sp
+				showProvenance[modelName] = map[string]any{
 					"parent_model": sp.Details.ParentModel,
 					"family":       sp.Details.Family,
 					"license":      sp.License,
@@ -746,7 +795,15 @@ func (c *Collector) Collect(
 		}
 	}
 
-	if totalTransportFailures >= 2 && !verSuccess && !tagsSuccess {
+	if tlsFailed {
+		finalCoverage = graph.CoverageFailed
+		finalStatus = checkpoint.TargetStatusFailed
+		if versionCheckErr != nil {
+			finalCoverageReason = fmt.Sprintf("target unreachable: %s", sanitizeError(versionCheckErr))
+		} else {
+			finalCoverageReason = "TLS certificate verification failed"
+		}
+	} else if totalTransportFailures >= 2 && !verSuccess && !tagsSuccess {
 		// Complete transport failure (target unreachable)
 		finalCoverage = graph.CoverageFailed
 		finalStatus = checkpoint.TargetStatusFailed
@@ -935,7 +992,7 @@ func (c *Collector) Collect(
 			if m.ModifiedAt != "" {
 				modelProps["modified_at"] = m.ModifiedAt
 			}
-			if sp, ok := provenance[m.Name]; ok {
+			if sp, ok := provenance[modelName]; ok {
 				if sp.Details.ParentModel != "" {
 					modelProps["parent_model"] = sp.Details.ParentModel
 				}
@@ -1150,18 +1207,7 @@ func normalizeVersion(raw string) string {
 }
 
 func sanitizeError(err error) string {
-	if err == nil {
-		return ""
-	}
-	msg := err.Error()
-	// Strip userinfo or query strings if present
-	if strings.Contains(msg, "@") || strings.Contains(msg, "?") {
-		msg = evidence.SanitizeURL(msg)
-	}
-	for len(msg) > 0 && (msg[len(msg)-1] == '\n' || msg[len(msg)-1] == '\r') {
-		msg = msg[:len(msg)-1]
-	}
-	return msg
+	return common.SanitizeError(err)
 }
 
 func generateEvidenceID(scanID, targetID string, t time.Time) string {

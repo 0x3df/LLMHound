@@ -1,0 +1,5 @@
+{
+  "name": "LLMHound I2: MCP servers with anonymously listable tools",
+  "description": "MCP servers where mcp_tools_list succeeded anonymously and enumerated tool descriptors.",
+  "query": "MATCH (m:LLMHound_MCPServer)-[:LLMHound_ProvidesTool]->(t:LLMHound_MCPTool)\nWHERE 'mcp_tools_list' IN m.anon_operations\nRETURN m, t\nLIMIT 500"
+}

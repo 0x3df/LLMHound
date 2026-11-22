@@ -1,0 +1,5 @@
+{
+  "name": "LLMHound I1: anonymous access to AI services",
+  "description": "Inventory of AI services whose enumeration endpoints answered anonymously or with mixed auth outcomes.",
+  "query": "MATCH (s:LLMHound_AIService)\nWHERE s.auth_observed IN ['anonymous', 'mixed']\nRETURN s\nLIMIT 500"
+}

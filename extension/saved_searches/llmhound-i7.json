@@ -1,0 +1,5 @@
+{
+  "name": "LLMHound I7: AI services grouped by product and software version",
+  "description": "Product and software_version counts for downstream CVE joins (unknown versions stay null).",
+  "query": "MATCH (s:LLMHound_AIService)\nRETURN s.product, s.software_version, count(s)\nORDER BY count(s) DESC\nLIMIT 100"
+}

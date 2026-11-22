@@ -63,6 +63,7 @@ func (w *Writer) Write(r Record) error {
 type LazyFileWriter struct {
 	mu     sync.Mutex
 	path   string
+	append bool
 	file   *os.File
 	writer *Writer
 	count  int
@@ -71,6 +72,12 @@ type LazyFileWriter struct {
 
 func NewLazyFileWriter(path string) *LazyFileWriter {
 	return &LazyFileWriter{path: path}
+}
+
+// NewAppendLazyFileWriter opens an existing content file for appending on resume,
+// or creates it with mode 0600 on the first write.
+func NewAppendLazyFileWriter(path string) *LazyFileWriter {
+	return &LazyFileWriter{path: path, append: true}
 }
 
 func (l *LazyFileWriter) Path() string { return l.path }
@@ -94,7 +101,11 @@ func (l *LazyFileWriter) Write(r Record) error {
 		if err := os.MkdirAll(filepath.Dir(l.path), 0o750); err != nil {
 			return fmt.Errorf("create content output directory: %w", err)
 		}
-		f, err := os.OpenFile(l.path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		flags := os.O_CREATE | os.O_EXCL | os.O_WRONLY
+		if l.append {
+			flags = os.O_CREATE | os.O_APPEND | os.O_WRONLY
+		}
+		f, err := os.OpenFile(l.path, flags, 0o600)
 		if err != nil {
 			return fmt.Errorf("open content file: %w", err)
 		}

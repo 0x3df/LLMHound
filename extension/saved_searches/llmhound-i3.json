@@ -1,0 +1,5 @@
+{
+  "name": "LLMHound I3: Jupyter servers with anonymous API or contents access",
+  "description": "Jupyter servers where jupyter_contents or jupyter_sessions succeeded anonymously (version metadata never counts).",
+  "query": "MATCH (j:LLMHound_JupyterServer)\nWHERE 'jupyter_contents' IN j.anon_operations\n   OR 'jupyter_sessions' IN j.anon_operations\nOPTIONAL MATCH (j)-[:LLMHound_Contains]->(f:LLMHound_WorkspaceFile)\nRETURN j, f\nLIMIT 500"
+}

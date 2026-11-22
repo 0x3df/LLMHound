@@ -1,0 +1,5 @@
+{
+  "name": "LLMHound P7: MCP tools with high-risk capability hints on reachable hosts",
+  "description": "Advertised MCP tools whose descriptions/schemas match high-risk capability hints (declared heuristic, not proof of behavior).",
+  "query": "MATCH (m:LLMHound_MCPServer)-[:LLMHound_ProvidesTool]->(t:LLMHound_MCPTool)\nWHERE any(x IN t.capability_hint WHERE x IN ['shell','filesystem','secrets','code'])\nMATCH (m)-[:LLMHound_ObservedAt]->(h)\nWHERE NOT h:LLMHound_NetworkEndpoint\nRETURN m, t, h\nLIMIT 100"
+}

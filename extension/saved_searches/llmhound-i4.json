@@ -1,0 +1,5 @@
+{
+  "name": "LLMHound I4: model runtimes with anonymously listed models",
+  "description": "AI model servers or gateways advertising models anonymously.",
+  "query": "MATCH (s:LLMHound_AIService)-[:LLMHound_ProvidesModel]->(m:LLMHound_AIModel)\nWHERE s.auth_observed IN ['anonymous', 'mixed']\nRETURN s, m\nLIMIT 500"
+}

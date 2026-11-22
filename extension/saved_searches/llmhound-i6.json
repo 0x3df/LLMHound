@@ -1,0 +1,5 @@
+{
+  "name": "LLMHound I6: AI services with TLS verification failures",
+  "description": "AI services where TLS certificate verification failed during observation.",
+  "query": "MATCH (s:LLMHound_AIService)\nWHERE s.tls_verification = 'failed'\nRETURN s\nLIMIT 500"
+}

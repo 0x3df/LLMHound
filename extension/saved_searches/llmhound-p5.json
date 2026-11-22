@@ -1,0 +1,5 @@
+{
+  "name": "LLMHound P5: gateways and UIs with backends on different hosts",
+  "description": "Gateways or frontends reporting a backend service attached to a different existing BloodHound host.",
+  "query": "MATCH (s:LLMHound_AIService)-[:LLMHound_UsesBackend]->(b:LLMHound_AIService)\nMATCH (s)-[:LLMHound_ObservedAt]->(hs), (b)-[:LLMHound_ObservedAt]->(hb)\nWHERE hs <> hb AND NOT hs:LLMHound_NetworkEndpoint AND NOT hb:LLMHound_NetworkEndpoint\nRETURN s, hs, b, hb\nLIMIT 100"
+}

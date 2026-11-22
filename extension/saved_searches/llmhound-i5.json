@@ -1,0 +1,5 @@
+{
+  "name": "LLMHound I5: vector stores and registries exposing inventory",
+  "description": "Vector collections, registered model artifacts, and artifact store roots associated with AI services.",
+  "query": "MATCH (s:LLMHound_AIService)-[:LLMHound_Contains]->(r)\nWHERE r:LLMHound_VectorCollection OR r:LLMHound_ModelArtifact OR r:LLMHound_ArtifactStore\nRETURN s, r\nLIMIT 500"
+}

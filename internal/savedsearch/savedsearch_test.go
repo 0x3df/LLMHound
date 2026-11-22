@@ -40,7 +40,11 @@ func TestShippedFilesAreCurrent(t *testing.T) {
 }
 
 func TestQueriesUseEmittedKindsAndTypedPaths(t *testing.T) {
-	for _, q := range Generate(loadKinds(t)) {
+	all := Generate(loadKinds(t))
+	if len(all) != 15 {
+		t.Fatalf("expected 15 saved queries (P1-P8, I1-I7), got %d", len(all))
+	}
+	for _, q := range all {
 		for _, bad := range []string{"[*", ":AIService", ":ObservedAt", ":NetworkEndpoint", "IN n.system_tags"} {
 			if strings.Contains(q.Query, bad) {
 				t.Errorf("%s contains %q", q.Name, bad)
@@ -49,6 +53,10 @@ func TestQueriesUseEmittedKindsAndTypedPaths(t *testing.T) {
 		if strings.Contains(q.Query, "shortestPath") && strings.Contains(q.Query, "LLMHound_CanExecuteOn") {
 			t.Errorf("%s must not follow rule edges by default", q.Name)
 		}
+	}
+	withRules := GenerateWithOptions(loadKinds(t), GenerateOptions{IncludeCanExecuteOn: true})
+	if !strings.Contains(withRules[0].Query, "LLMHound_CanExecuteOn") {
+		t.Errorf("IncludeCanExecuteOn should add LLMHound_CanExecuteOn to path kinds")
 	}
 }
 

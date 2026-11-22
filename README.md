@@ -6,17 +6,33 @@
 |_____|_____|_|  |_|_| |_|\___/ \__,_|_| |_|\__,_|
 ```
 
-**Map exposed LLM & agentic-AI infrastructure directly onto your BloodHound attack paths.**
+# LLMHound: A collector to map exposed LLM & agentic-AI infrastructure in BloodHound
 
-`Go 1.27+` · `Apache-2.0` · `Anonymous & Read-Only` · `15 AI Surfaces` · `BloodHound CE v9.7.1`
+![Applies to BloodHound Enterprise and CE](https://mintlify.s3.us-west-1.amazonaws.com/specterops/assets/enterprise-AND-community-edition-pill-tag.svg)
 
----
+![Go 1.27+](https://badgen.net/badge/Go/1.27%2B/blue)
+[![Apache 2.0 License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
 
-LLMHound remotely inventories LLM gateways, MCP servers, A2A agents, model runners,
-notebooks, AI UIs, and vector databases from a single scanner host. It **only reads**,
-**never sends or guesses credentials**, and attaches discovered services to the hosts you
-already track in [BloodHound](https://bloodhound.specterops.io/) (from SharpHound and
-AzureHound) so the graph can answer:
+## Table of Contents
+
+- [Overview](#overview)
+- [Why LLMHound](#why-llmhound)
+- [Architecture & pipeline](#architecture--pipeline)
+- [Supported surfaces](#supported-surfaces)
+- [Quick start](#quick-start)
+- [Responsible use](#responsible-use)
+- [Documentation](#documentation)
+- [Contributing & verification](#contributing--verification)
+- [Licensing](#licensing)
+
+# Overview
+
+LLMHound extends BloodHound CE with OpenGraph-format coverage across 15 LLM and
+agentic-AI surfaces—gateways, MCP servers, A2A agents, model runners, notebooks,
+AI UIs, and vector databases—from a single scanner host. It **only reads**,
+**never sends or guesses credentials**, and attaches discovered services to the
+hosts you already track in [BloodHound](https://bloodhound.specterops.io/) (from
+SharpHound and AzureHound) so the graph can answer:
 
 > *Which hosts along an attack path to tier 0 are running AI services, and which of those are open to anyone?*
 

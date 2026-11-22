@@ -58,6 +58,12 @@ type ContentSummary struct {
 	SecretTypes []string
 	// SecretConfirmedAt is the scan observation time of the detection.
 	SecretConfirmedAt time.Time
+
+	// Exposed public principal identifiers associated with structure-verified
+	// secret findings. Never contains secret material itself.
+	ExposedAZAppIDs     []string
+	ExposedAWSKeyIDs    []string
+	ExposedPubKeySHA256 []string
 }
 
 // ServiceFacts is the shared input for the flat service property contract
@@ -102,6 +108,11 @@ type ServiceFacts struct {
 
 	// Content is nil when content-tier reads were disabled or did not run.
 	Content *ContentSummary
+
+	// EntraTenantID and EntraClientID record passively observed Microsoft Entra
+	// OAuth/OIDC identifiers from anonymous endpoints or login redirects.
+	EntraTenantID string
+	EntraClientID string
 }
 
 // Properties returns the flat, CE-compatible service properties. Collectors
@@ -189,6 +200,21 @@ func (f ServiceFacts) Properties() map[string]any {
 			p["secret_types"] = types
 			p["secret_last_confirmed"] = f.Content.SecretConfirmedAt.UTC().Format(time.RFC3339)
 		}
+		if ids := uniqueSorted(f.Content.ExposedAZAppIDs); len(ids) > 0 {
+			p["exposed_azapp_ids"] = ids
+		}
+		if ids := uniqueSorted(f.Content.ExposedAWSKeyIDs); len(ids) > 0 {
+			p["exposed_aws_key_ids"] = ids
+		}
+		if digests := uniqueSorted(f.Content.ExposedPubKeySHA256); len(digests) > 0 {
+			p["exposed_pubkey_sha256"] = digests
+		}
+	}
+	if f.EntraTenantID != "" {
+		p["entra_tenant_id"] = strings.ToLower(strings.TrimSpace(f.EntraTenantID))
+	}
+	if f.EntraClientID != "" {
+		p["entra_client_id"] = strings.ToUpper(strings.TrimSpace(f.EntraClientID))
 	}
 	for k, v := range f.tlsProperties() {
 		p[k] = v

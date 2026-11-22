@@ -67,14 +67,14 @@ New to the project? Read the five-minute **[Executive Summary](docs/00-executive
   +----------------------------------+-----------------------------------+
                                      |
                                      v
-                        BloodHound CE + 17 Saved Queries
+                        BloodHound CE + 19 Saved Queries
 ```
 
 1. **Discover fast.** Stage 1 concurrent TCP sweep (`--tcp-concurrency 512`) eliminates closed ports before HTTP probing, reuses cached responses across shared ports (`8000`, `8080`, `3000`), and auto-upgrades HTTP-to-HTTPS (`--scheme auto`). Default `--profile attack-path` focuses on the 10 highest-value execution, gateway, credential, and store surfaces (`--profile rce-only` narrows to 5; `--profile full` runs all 15).
-2. **Keep BloodHound signal-dense.** Default `--graph-mode attack-path` emits `AIService` nodes (with `risk_signals`), cross-host `UsesBackend` edges (`P5`), and high-risk `MCPTool` nodes (`capability_hint` for `P7`), keeping verbose child inventories in `.evidence.jsonl` (`--graph-mode full` emits all child nodes). Target inputs also support `--endpoints-file` (`host:port` lists) and `--prioritize-from-bh` to scan Tier-0-adjacent hosts first.
-3. **Redact, never store secrets.** Default `--content-mode secrets-only` scans high-yield configs and notebooks **in memory** with zero `.content.jsonl` disk bloat while flagging `has_exposed_secret = true` (`P8`); `--content-mode full` writes bounded bodies to `0600` `.content.jsonl` with `[secret:<type>]` redaction.
+2. **Keep BloodHound signal-dense.** Default `--graph-mode attack-path` emits `AIService` nodes (with `risk_signals`), cross-host `UsesBackend` edges (`P5`), non-traversable `ExposesCredentialFor` / `AuthenticatesVia` links to native Entra `AZApp` nodes (`P11`–`P12`), and high-risk `MCPTool` nodes (`capability_hint` for `P7`), keeping verbose child inventories in `.evidence.jsonl` (`--graph-mode full` emits all child nodes). Target inputs also support `--endpoints-file` (`host:port` lists) and `--prioritize-from-bh` to scan Tier-0-adjacent hosts first.
+3. **Redact, never store secrets.** Default `--content-mode secrets-only` scans high-yield configs and notebooks **in memory** (`private_key`, `github_token`, `aws_access_key`, `azure_client_secret`) with zero `.content.jsonl` disk bloat while flagging `has_exposed_secret = true` and public identity IDs (`exposed_azapp_ids`, `exposed_aws_key_ids`, `exposed_pubkey_sha256`, never raw secret values); `--content-mode full` writes bounded bodies to `0600` `.content.jsonl` with `[secret:<type>]` redaction.
 4. **Attach.** Mapped targets emit `ObservedAt` edges to existing native BloodHound nodes in a separate **sourceless** linking payload; unmapped targets fall back to `NetworkEndpoint` (or omit with `--mapped-only`).
-5. **Opt-in path rules (off by default).** Traversable `CanExecuteOn` edges require explicit per-rule opt-in (`jupyter-auth-disabled`, `ray-anonymous-jobs`, `langflow-unauthenticated-exec`, `flowise-unauthenticated-exec`), verified native mapping, and assumed-reach principals.
+5. **Opt-in path rules (off by default).** Traversable `CanExecuteOn` and `CanAssumePrincipal` edges require explicit per-rule opt-in (`jupyter-auth-disabled`, `ray-anonymous-jobs` with worker fan-out, `langflow-unauthenticated-exec`, `flowise-unauthenticated-exec`, `openwebui-auth-disabled`, `azure-exposed-client-secret`, `entra-sso-code-exec`), verified native mapping, and global `assumed_reach_principals` or zone-scoped `vantage_principals`.
 
 ## Supported surfaces
 

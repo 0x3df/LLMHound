@@ -1,0 +1,21 @@
+{
+  "id": "entra-sso-code-exec",
+  "version": "1.0.0",
+  "capability_class": "host_code_execution",
+  "edge_kind": "CanExecuteOn",
+  "surface": "*",
+  "node_kind": "*",
+  "version_range": "*",
+  "required_exec_surfaces_any": [
+    "code_kernel",
+    "job_submit",
+    "code_eval"
+  ],
+  "start_from_property": "entra_client_id",
+  "start_kind": "AZApp",
+  "docs": [
+    "https://learn.microsoft.com/en-us/entra/identity-platform/v2-protocols-oidc"
+  ],
+  "confidence": "medium",
+  "exec_identity": "service_process"
+}

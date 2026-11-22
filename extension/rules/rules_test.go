@@ -10,17 +10,20 @@ import (
 )
 
 type ruleDoc struct {
-	ID                string         `json:"id"`
-	Version           string         `json:"version"`
-	CapabilityClass   string         `json:"capability_class"`
-	Surface           string         `json:"surface"`
-	NodeKind          string         `json:"node_kind"`
-	VersionRange      string         `json:"version_range"`
-	RequiredChecksAny []string       `json:"required_checks_any"`
-	RequiredNodeProps map[string]any `json:"required_node_props"`
-	Docs              []string       `json:"docs"`
-	Confidence        string         `json:"confidence"`
-	ExecIdentity      string         `json:"exec_identity"`
+	ID                      string         `json:"id"`
+	Version                 string         `json:"version"`
+	CapabilityClass         string         `json:"capability_class"`
+	EdgeKind                string         `json:"edge_kind"`
+	Surface                 string         `json:"surface"`
+	NodeKind                string         `json:"node_kind"`
+	VersionRange            string         `json:"version_range"`
+	RequiredChecksAny       []string       `json:"required_checks_any"`
+	RequiredNodeProps       map[string]any `json:"required_node_props"`
+	RequiredExecSurfacesAny []string       `json:"required_exec_surfaces_any"`
+	TargetFromProperty      string         `json:"target_from_property"`
+	Docs                    []string       `json:"docs"`
+	Confidence              string         `json:"confidence"`
+	ExecIdentity            string         `json:"exec_identity"`
 }
 
 func TestEmbeddedRuleFiles(t *testing.T) {
@@ -28,8 +31,8 @@ func TestEmbeddedRuleFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read embedded rules dir: %v", err)
 	}
-	if len(entries) != 4 {
-		t.Fatalf("expected 4 embedded rule files, got %d", len(entries))
+	if len(entries) != 7 {
+		t.Fatalf("expected 7 embedded rule files, got %d", len(entries))
 	}
 	seenIDs := map[string]bool{}
 	for _, ent := range entries {
@@ -48,14 +51,14 @@ func TestEmbeddedRuleFiles(t *testing.T) {
 			t.Errorf("duplicate rule id %q", doc.ID)
 		}
 		seenIDs[doc.ID] = true
-		if doc.CapabilityClass != "host_code_execution" {
-			t.Errorf("%s capability_class = %q, want host_code_execution", ent.Name(), doc.CapabilityClass)
+		if doc.CapabilityClass != "host_code_execution" && doc.CapabilityClass != "principal_assumption" {
+			t.Errorf("%s capability_class = %q, want host_code_execution or principal_assumption", ent.Name(), doc.CapabilityClass)
 		}
-		if !graph.Kind(doc.NodeKind).IsService() {
+		if doc.NodeKind != "*" && !graph.Kind(doc.NodeKind).IsService() {
 			t.Errorf("%s node_kind %q is not a service kind", ent.Name(), doc.NodeKind)
 		}
-		if len(doc.RequiredChecksAny) == 0 {
-			t.Errorf("%s must require at least one check", ent.Name())
+		if len(doc.RequiredChecksAny) == 0 && len(doc.RequiredNodeProps) == 0 && len(doc.RequiredExecSurfacesAny) == 0 && doc.TargetFromProperty == "" {
+			t.Errorf("%s must require at least one qualifying gate", ent.Name())
 		}
 		if doc.ID == "jupyter-auth-disabled" {
 			for _, chk := range doc.RequiredChecksAny {

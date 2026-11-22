@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/0x3df/LLMHound/internal/config"
+	"github.com/0x3df/LLMHound/internal/correlate"
 	"github.com/0x3df/LLMHound/internal/emitter"
 	"github.com/0x3df/LLMHound/internal/evidence"
 	"github.com/0x3df/LLMHound/internal/graph"
@@ -109,8 +110,8 @@ func TestBuiltinRulesAndSemver(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuiltinRules: %v", err)
 	}
-	if len(loaded) != 4 {
-		t.Fatalf("expected 4 rules, got %d", len(loaded))
+	if len(loaded) != 7 {
+		t.Fatalf("expected 7 rules, got %d", len(loaded))
 	}
 
 	for _, tc := range []struct {
@@ -308,6 +309,150 @@ func TestEvaluate_PartialCoveragePreservesCoverageReason(t *testing.T) {
 	if outEdges[0].Observation().Coverage != graph.CoveragePartial || outEdges[0].Observation().CoverageReason == "" {
 		t.Fatalf("expected partial coverage reason preserved, got %+v", outEdges[0].Observation())
 	}
+}
+
+func TestEvaluate_NewTraversalExtensions(t *testing.T) {
+	globalPrincipals := []config.ReachPrincipal{{ObjectID: "S-1-5-21-1-2-3-513", Kind: "Group"}}
+
+	t.Run("openwebui_auth_disabled_positive_and_negative", func(t *testing.T) {
+		n, ed, ev, ob := makeServiceAndHost(t, graph.OpenWebUIInstance, "open_webui", "http://127.0.0.1:3000", map[string]any{
+			"auth_advertised": "none",
+			"exec_surface":    []string{graph.ExecCodeEval},
+			"anon_operations": []string{"open_webui_models"},
+		}, true, []string{"open_webui_models"})
+		cfg := config.PathQualification{
+			EnabledRules:           []string{"openwebui-auth-disabled"},
+			AssumedReachPrincipals: globalPrincipals,
+		}
+		out, _, err := rules.Evaluate(cfg, n, ed, ev, ob)
+		if err != nil || len(out) != 1 || out[0].Kind() != graph.CanExecuteOn {
+			t.Fatalf("expected 1 CanExecuteOn edge, got %d (%v)", len(out), err)
+		}
+
+		// Negative: auth required fails closed.
+		nAuth, edAuth, evAuth, obAuth := makeServiceAndHost(t, graph.OpenWebUIInstance, "open_webui", "http://127.0.0.1:3000", map[string]any{
+			"auth_advertised": "required",
+			"anon_operations": []string{"open_webui_models"},
+		}, true, []string{"open_webui_models"})
+		outNeg, _, _ := rules.Evaluate(cfg, nAuth, edAuth, evAuth, obAuth)
+		if len(outNeg) != 0 {
+			t.Fatalf("expected 0 edges for auth=required Open WebUI, got %d", len(outNeg))
+		}
+	})
+
+	t.Run("vantage_scoped_principals_and_fallback", func(t *testing.T) {
+		nA, edA, evA, obA := makeServiceAndHost(t, graph.JupyterServer, "jupyter", "http://127.0.0.1:8888", map[string]any{
+			"vantage_key":      "vpn-zone-a",
+			"software_version": "2.14.0",
+			"auth_required":    false,
+			"anon_operations":  []string{"jupyter_sessions"},
+		}, true, []string{"jupyter_sessions"})
+		nB, edB, evB, _ := makeServiceAndHost(t, graph.JupyterServer, "jupyter", "http://127.0.0.2:8888", map[string]any{
+			"vantage_key":      "unlisted-zone",
+			"software_version": "2.14.0",
+			"auth_required":    false,
+			"anon_operations":  []string{"jupyter_sessions"},
+		}, true, []string{"jupyter_sessions"})
+
+		cfg := config.PathQualification{
+			EnabledRules:           []string{"jupyter-auth-disabled"},
+			AssumedReachPrincipals: globalPrincipals,
+			VantagePrincipals: map[string][]config.ReachPrincipal{
+				"vpn-zone-a": {{ObjectID: "S-1-5-21-9-9-9-777", Kind: "Group"}},
+			},
+		}
+		out, _, err := rules.Evaluate(cfg, append(nA, nB...), append(edA, edB...), append(evA, evB...), obA)
+		if err != nil || len(out) != 2 {
+			t.Fatalf("expected 2 edges across vantages, got %d (%v)", len(out), err)
+		}
+		if out[0].Start().ID() != "S-1-5-21-9-9-9-777" {
+			t.Errorf("zone-a edge start = %s, want vantage-scoped principal", out[0].Start().ID())
+		}
+		if out[1].Start().ID() != "S-1-5-21-1-2-3-513" {
+			t.Errorf("fallback edge start = %s, want global AssumedReachPrincipal", out[1].Start().ID())
+		}
+	})
+
+	t.Run("ray_worker_fanout_and_fail_closed_unmapped_workers", func(t *testing.T) {
+		rNodes, rEdges, rEvs, rObs := makeServiceAndHost(t, graph.RayDashboard, "ray", "http://10.0.1.10:8265", map[string]any{
+			"software_version": "2.37.0",
+			"anon_operations":  []string{"ray_jobs"},
+			"worker_hosts":     []string{"10.0.1.11", "10.0.1.99"}, // .99 unmapped
+		}, true, []string{"ray_jobs"})
+
+		resolver, err := correlate.New([]correlate.Mapping{
+			{Target: "10.0.1.11", ObjectID: "S-1-5-21-1-2-3-2001", Kind: graph.Computer},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg := config.PathQualification{
+			EnabledRules:           []string{"ray-anonymous-jobs"},
+			AssumedReachPrincipals: globalPrincipals,
+		}
+		out, _, err := rules.EvaluateWithResolver(cfg, rNodes, rEdges, rEvs, rObs, resolver)
+		if err != nil || len(out) != 3 {
+			t.Fatalf("expected 3 edges (principal->head, principal->worker11, head->worker11), got %d (%v)", len(out), err)
+		}
+		for _, e := range out {
+			if e.End().ID() == "10.0.1.99" || !e.End().IsNative() {
+				t.Errorf("unmapped worker leaked into CanExecuteOn: %+v", e.End())
+			}
+		}
+	})
+
+	t.Run("azure_exposed_client_secret_CanAssumePrincipal", func(t *testing.T) {
+		azApp := "11112222-3333-4444-5555-666677778888"
+		// Deliberately unmapped NetworkEndpoint to verify cloud secret assumption works without host AD mapping.
+		nodes, edges, evs, obs := makeServiceAndHost(t, graph.LangflowInstance, "langflow", "http://10.20.30.40:7860", map[string]any{
+			"has_exposed_secret": true,
+			"exposed_azapp_ids":  []string{azApp},
+		}, false, []string{"langflow_flows"})
+		cfg := config.PathQualification{
+			EnabledRules:           []string{"azure-exposed-client-secret"},
+			AssumedReachPrincipals: globalPrincipals,
+		}
+		out, _, err := rules.Evaluate(cfg, nodes, edges, evs, obs)
+		if err != nil || len(out) != 1 {
+			t.Fatalf("expected 1 CanAssumePrincipal edge, got %d (%v)", len(out), err)
+		}
+		e := out[0]
+		if e.Kind() != graph.CanAssumePrincipal || !e.IsTraversable() || !e.TouchesNative() || e.SourceKind() != "" {
+			t.Fatalf("unexpected edge metadata: %+v", e)
+		}
+		if e.Start().ID() != "S-1-5-21-1-2-3-513" || e.End().Kind() != graph.Kind("AZApp") || e.End().ID() != azApp {
+			t.Fatalf("unexpected endpoints: %+v -> %+v", e.Start(), e.End())
+		}
+	})
+
+	t.Run("entra_sso_code_exec_positive_and_non_exec_negative", func(t *testing.T) {
+		azClient := "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE"
+		nodes, edges, evs, obs := makeServiceAndHost(t, graph.JupyterServer, "jupyter", "http://10.0.0.5:8888", map[string]any{
+			"auth_required":   true,
+			"exec_surface":    []string{graph.ExecCodeKernel},
+			"entra_client_id": azClient,
+		}, true, []string{})
+		cfg := config.PathQualification{
+			EnabledRules:           []string{"entra-sso-code-exec"},
+			AssumedReachPrincipals: globalPrincipals,
+		}
+		out, _, err := rules.Evaluate(cfg, nodes, edges, evs, obs)
+		if err != nil || len(out) != 1 {
+			t.Fatalf("expected 1 Entra SSO CanExecuteOn edge, got %d (%v)", len(out), err)
+		}
+		if out[0].Start().Kind() != graph.Kind("AZApp") || out[0].Start().ID() != azClient || out[0].End().ID() != "S-1-5-21-1-2-3-1103" {
+			t.Fatalf("unexpected Entra SSO edge endpoints: %+v -> %+v", out[0].Start(), out[0].End())
+		}
+
+		// Negative: non-exec service (Ollama) fails closed even if entra_client_id is set.
+		oNodes, oEdges, oEvs, oObs := makeServiceAndHost(t, graph.OllamaInstance, "ollama", "http://10.0.0.6:11434", map[string]any{
+			"entra_client_id": azClient,
+		}, true, nil)
+		outNeg, _, _ := rules.Evaluate(cfg, oNodes, oEdges, oEvs, oObs)
+		if len(outNeg) != 0 {
+			t.Fatalf("non-exec surface with entra_client_id must fail closed, got %d", len(outNeg))
+		}
+	})
 }
 
 func contains(s, sub string) bool {

@@ -1,0 +1,5 @@
+{
+  "name": "LLMHound P12: AI services with Entra SSO AZApp and host execution surface",
+  "description": "Execution-capable AI services delegating authentication to an Entra AZApp, highlighting SSO-reachable compute hosts.",
+  "query": "MATCH (s:LLMHound_AIService)-[:LLMHound_AuthenticatesVia]->(a:AZApp)\nMATCH (s)-[:LLMHound_ObservedAt]->(h)\nWHERE NOT h:LLMHound_NetworkEndpoint\n  AND any(e IN coalesce(s.exec_surface, []) WHERE e IN ['code_kernel', 'job_submit', 'code_eval'])\nRETURN s, a, h\nLIMIT 100"
+}

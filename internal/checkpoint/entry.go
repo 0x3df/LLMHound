@@ -482,9 +482,15 @@ func fromEdgeRecord(r EdgeRecord, vantage vantageContext) (graph.Edge, error) {
 		}
 		return graph.NewObservedAtEdge(start, end, obs, corr)
 	}
-	if kind == graph.CanExecuteOn {
+	if kind == graph.ExposesCredentialFor {
+		return graph.NewExposesCredentialForEdge(start, end, obs)
+	}
+	if kind == graph.AuthenticatesVia {
+		return graph.NewAuthenticatesViaEdge(start, end, obs)
+	}
+	if kind == graph.CanExecuteOn || kind == graph.CanAssumePrincipal {
 		if r.RuleProvenance == nil {
-			return graph.Edge{}, errors.New("CanExecuteOn edge requires rule_provenance")
+			return graph.Edge{}, fmt.Errorf("%s edge requires rule_provenance", kind)
 		}
 		prov := graph.RuleProvenance{
 			RuleID:          r.RuleProvenance.RuleID,
@@ -497,6 +503,9 @@ func fromEdgeRecord(r EdgeRecord, vantage vantageContext) (graph.Edge, error) {
 			ServiceID:       r.RuleProvenance.ServiceID,
 			Operations:      append([]string(nil), r.RuleProvenance.Operations...),
 			EvidenceIDs:     append([]string(nil), r.RuleProvenance.EvidenceIDs...),
+		}
+		if kind == graph.CanAssumePrincipal {
+			return graph.NewCanAssumePrincipalEdge(start, end, obs, prov)
 		}
 		return graph.NewCanExecuteOnEdge(start, end, obs, prov)
 	}

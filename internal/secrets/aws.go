@@ -1,6 +1,9 @@
 package secrets
 
-import "regexp"
+import (
+	"regexp"
+	"strings"
+)
 
 const awsKeyName = "aws_access_key"
 
@@ -68,8 +71,10 @@ func (awsDetector) Find(body string) []Match {
 		}
 		used[best] = true
 		matches = append(matches, Match{
-			Type:  awsKeyName,
-			Spans: []Span{{Start: id[0], End: id[1]}, cands[best]},
+			Type:          awsKeyName,
+			Spans:         []Span{{Start: id[0], End: id[1]}, cands[best]},
+			PrincipalKind: "AWSKey",
+			PrincipalID:   strings.ToUpper(body[id[0]:id[1]]),
 		})
 	}
 	return matches

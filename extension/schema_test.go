@@ -155,18 +155,23 @@ func TestSchemaWithCanExecuteOn(t *testing.T) {
 	if err := json.Unmarshal(aug, &def); err != nil {
 		t.Fatalf("parse augmented schema: %v", err)
 	}
-	var foundRuleEdge bool
+	foundRuleEdges := map[string]bool{}
 	for _, rk := range def.RelationshipKinds {
-		if rk.Name == "LLMHound_CanExecuteOn" {
-			foundRuleEdge = true
+		switch rk.Name {
+		case "LLMHound_CanExecuteOn", "LLMHound_CanAssumePrincipal":
+			foundRuleEdges[rk.Name] = true
 			if !rk.IsTraversable {
-				t.Errorf("LLMHound_CanExecuteOn must be traversable in augmented schema")
+				t.Errorf("%s must be traversable in augmented schema", rk.Name)
 			}
-		} else if rk.IsTraversable {
-			t.Errorf("base relationship kind %s must remain non-traversable", rk.Name)
+		default:
+			if rk.IsTraversable {
+				t.Errorf("base relationship kind %s must remain non-traversable", rk.Name)
+			}
 		}
 	}
-	if !foundRuleEdge {
-		t.Errorf("LLMHound_CanExecuteOn missing from augmented schema")
+	for _, want := range []string{"LLMHound_CanExecuteOn", "LLMHound_CanAssumePrincipal"} {
+		if !foundRuleEdges[want] {
+			t.Errorf("%s missing from augmented schema", want)
+		}
 	}
 }

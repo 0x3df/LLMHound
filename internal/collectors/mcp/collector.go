@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/0x3df/LLMHound/internal/checkpoint"
+	"github.com/0x3df/LLMHound/internal/collectors/internal/common"
 	"github.com/0x3df/LLMHound/internal/config"
 	"github.com/0x3df/LLMHound/internal/content"
 	"github.com/0x3df/LLMHound/internal/correlate"
@@ -683,8 +684,21 @@ func (c *Collector) collectInternal(
 	}
 	access := graph.SummarizeAccess(accessEvidence)
 
+	entraInputs := make([]string, 0, len(tracker.Redirects())*2+3)
+	for _, r := range tracker.Redirects() {
+		entraInputs = append(entraInputs, r.FromURL, r.ToURL)
+	}
+	if h := tracker.LastHeaders(); len(h) > 0 {
+		entraInputs = append(entraInputs, h.Values("Location")...)
+		entraInputs = append(entraInputs, h.Values("Www-Authenticate")...)
+	}
+	if initResult != nil && initResult.Instructions != "" {
+		entraInputs = append(entraInputs, initResult.Instructions)
+	}
+	entraTenant, entraClient := common.ExtractEntraOIDC(entraInputs...)
+
 	// 1. Server node
-	srvNode, err := buildServerNode(srvID, ep, finalObs, initResult, tlsObs, access, contentSummary)
+	srvNode, err := buildServerNode(srvID, ep, finalObs, initResult, tlsObs, access, contentSummary, entraTenant, entraClient)
 	if err != nil {
 		return nil, fmt.Errorf("build MCPServer node: %w", err)
 	}
@@ -1143,11 +1157,14 @@ func (c *Collector) readMCPResources(
 	var summary *graph.ContentSummary
 	if attempted > 0 || len(budget.Records()) > 0 || budget.Truncated() {
 		summary = &graph.ContentSummary{
-			Collected:         true,
-			Bytes:             budget.Bytes(),
-			Truncated:         budget.Truncated(),
-			SecretTypes:       budget.SecretTypes(),
-			SecretConfirmedAt: obsTime,
+			Collected:           true,
+			Bytes:               budget.Bytes(),
+			Truncated:           budget.Truncated(),
+			SecretTypes:         budget.SecretTypes(),
+			SecretConfirmedAt:   obsTime,
+			ExposedAZAppIDs:     budget.ExposedAZAppIDs(),
+			ExposedAWSKeyIDs:    budget.ExposedAWSKeyIDs(),
+			ExposedPubKeySHA256: budget.ExposedPubKeySHA256(),
 		}
 	}
 

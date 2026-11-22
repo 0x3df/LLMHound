@@ -104,12 +104,13 @@ func (p ReachPrincipal) EffectiveKind() graph.Kind {
 	return graph.Kind(k)
 }
 
-// PathQualification configures opt-in, rule-gated traversable CanExecuteOn
+// PathQualification configures opt-in, rule-gated traversable
 // edges (M2d). Rules ship disabled and require explicit operator opt-in plus
-// assumed_reach_principals.
+// assumed_reach_principals and/or vantage_principals.
 type PathQualification struct {
-	EnabledRules           []string         `yaml:"enabled_rules"`
-	AssumedReachPrincipals []ReachPrincipal `yaml:"assumed_reach_principals"`
+	EnabledRules           []string                    `yaml:"enabled_rules"`
+	AssumedReachPrincipals []ReachPrincipal            `yaml:"assumed_reach_principals"`
+	VantagePrincipals      map[string][]ReachPrincipal `yaml:"vantage_principals"`
 }
 
 var knownRuleIDs = loadKnownRuleIDs()
@@ -147,7 +148,7 @@ type Secrets struct {
 }
 
 // SecretDetectorNames is the closed list of detector names (sorted).
-var SecretDetectorNames = []string{"aws_access_key", "github_token", "private_key"}
+var SecretDetectorNames = []string{"aws_access_key", "azure_client_secret", "github_token", "private_key"}
 
 // IsKnownSecretDetector reports whether name is one of the built-in detectors.
 func IsKnownSecretDetector(name string) bool {
@@ -679,8 +680,22 @@ func (c Config) Validate() error {
 		}
 		seenRules[ruleID] = true
 	}
-	if len(c.PathQualification.EnabledRules) > 0 && len(c.PathQualification.AssumedReachPrincipals) == 0 {
-		return fmt.Errorf("path_qualification.assumed_reach_principals is required when path-qualification rules are enabled")
+	hasPrincipals := len(c.PathQualification.AssumedReachPrincipals) > 0
+	for vk, list := range c.PathQualification.VantagePrincipals {
+		if strings.TrimSpace(vk) == "" {
+			return fmt.Errorf("path_qualification.vantage_principals cannot contain an empty vantage key")
+		}
+		if len(list) > 0 {
+			hasPrincipals = true
+		}
+		for i, p := range list {
+			if _, err := graph.ExistingNodeByID(p.EffectiveKind(), p.ObjectID); err != nil {
+				return fmt.Errorf("path_qualification.vantage_principals[%q][%d]: %w", vk, i, err)
+			}
+		}
+	}
+	if len(c.PathQualification.EnabledRules) > 0 && !hasPrincipals {
+		return fmt.Errorf("path_qualification.assumed_reach_principals or vantage_principals is required when path-qualification rules are enabled")
 	}
 	for i, p := range c.PathQualification.AssumedReachPrincipals {
 		if _, err := graph.ExistingNodeByID(p.EffectiveKind(), p.ObjectID); err != nil {

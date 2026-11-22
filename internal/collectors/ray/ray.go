@@ -10,6 +10,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/netip"
+	"sort"
 	"strings"
 	"time"
 
@@ -37,6 +39,7 @@ const (
 	CheckClusterStatus = "ray_cluster_status"
 	CheckJobs          = "ray_jobs"
 	CheckActors        = "ray_actors"
+	CheckNodes         = "ray_nodes"
 	CheckJobContent    = "ray_job_content"
 )
 
@@ -77,6 +80,19 @@ type actorsResponse struct {
 			Result json.RawMessage `json:"result,omitempty"`
 		} `json:"result,omitempty"`
 		Actors map[string]json.RawMessage `json:"actors,omitempty"`
+	} `json:"data"`
+}
+
+type nodesSummaryResponse struct {
+	Result bool `json:"result"`
+	Data   struct {
+		Summary *[]struct {
+			IP         string `json:"ip"`
+			NodeIP     string `json:"nodeIp"`
+			NodeIPAlt  string `json:"node_ip"`
+			IsHeadNode *bool  `json:"isHeadNode,omitempty"`
+			State      string `json:"state,omitempty"`
+		} `json:"summary,omitempty"`
 	} `json:"data"`
 }
 
@@ -168,6 +184,7 @@ func (c *Collector) Collect(
 	var jobs []jobEntry
 	var jobsSuccess, jobsDenied, jobsTruncated bool
 	var jobsErr error
+	var workerHosts []string
 
 	var actorsSuccess, actorsDenied bool
 	var actorCount *int
@@ -197,6 +214,7 @@ func (c *Collector) Collect(
 				common.CheckEntry{CheckID: CheckClusterStatus, Operation: CheckClusterStatus, Outcome: graph.OutcomeSkipped, Reason: "prerequisite failed: TLS verification failed", OperationKind: graph.EnumerationOperation},
 				common.CheckEntry{CheckID: CheckJobs, Operation: CheckJobs, Outcome: graph.OutcomeSkipped, Reason: "prerequisite failed: TLS verification failed", OperationKind: graph.EnumerationOperation},
 				common.CheckEntry{CheckID: CheckActors, Operation: CheckActors, Outcome: graph.OutcomeSkipped, Reason: "prerequisite failed: TLS verification failed", OperationKind: graph.EnumerationOperation},
+				common.CheckEntry{CheckID: CheckNodes, Operation: CheckNodes, Outcome: graph.OutcomeSkipped, Reason: "prerequisite failed: TLS verification failed", OperationKind: graph.EnumerationOperation},
 				common.CheckEntry{CheckID: CheckJobContent, Operation: CheckJobContent, Outcome: graph.OutcomeSkipped, Reason: "prerequisite failed: TLS verification failed", OperationKind: graph.ResourceReadOperation},
 			)
 			return c.buildFailedResult(target, scope, vantageKey, scanID, obsTime, evID, baseURL+"/api/version", srvID, reason, checks, tlsInfo, redirects)
@@ -309,6 +327,7 @@ func (c *Collector) Collect(
 				},
 				common.CheckEntry{CheckID: CheckJobs, Operation: CheckJobs, Outcome: graph.OutcomeSkipped, Reason: "prerequisite failed: TLS verification failed", OperationKind: graph.EnumerationOperation},
 				common.CheckEntry{CheckID: CheckActors, Operation: CheckActors, Outcome: graph.OutcomeSkipped, Reason: "prerequisite failed: TLS verification failed", OperationKind: graph.EnumerationOperation},
+				common.CheckEntry{CheckID: CheckNodes, Operation: CheckNodes, Outcome: graph.OutcomeSkipped, Reason: "prerequisite failed: TLS verification failed", OperationKind: graph.EnumerationOperation},
 				common.CheckEntry{CheckID: CheckJobContent, Operation: CheckJobContent, Outcome: graph.OutcomeSkipped, Reason: "prerequisite failed: TLS verification failed", OperationKind: graph.ResourceReadOperation},
 			)
 			return c.buildFailedResult(target, scope, vantageKey, scanID, obsTime, evID, baseURL+"/api/cluster_status", srvID, reason, checks, tlsInfo, redirects)
@@ -414,6 +433,7 @@ func (c *Collector) Collect(
 					Details: map[string]any{"tls_error": common.BoundString(tlsInfo.VerificationReason, 200)},
 				},
 				common.CheckEntry{CheckID: CheckActors, Operation: CheckActors, Outcome: graph.OutcomeSkipped, Reason: "prerequisite failed: TLS verification failed", OperationKind: graph.EnumerationOperation},
+				common.CheckEntry{CheckID: CheckNodes, Operation: CheckNodes, Outcome: graph.OutcomeSkipped, Reason: "prerequisite failed: TLS verification failed", OperationKind: graph.EnumerationOperation},
 				common.CheckEntry{CheckID: CheckJobContent, Operation: CheckJobContent, Outcome: graph.OutcomeSkipped, Reason: "prerequisite failed: TLS verification failed", OperationKind: graph.ResourceReadOperation},
 			)
 			return c.buildFailedResult(target, scope, vantageKey, scanID, obsTime, evID, sourceURL, srvID, reason, checks, tlsInfo, redirects)
@@ -589,6 +609,63 @@ func (c *Collector) Collect(
 					Reason:        fmt.Sprintf("HTTP %d unexpected status", resp.StatusCode),
 					OperationKind: graph.EnumerationOperation,
 					Details:       map[string]any{"http_status": resp.StatusCode},
+				})
+			}
+		}
+	}
+
+	// 4b. Check: GET /nodes?view=summary (read-only cluster worker IP discovery).
+	if !rayConfirmed {
+		checks = append(checks, common.CheckEntry{
+			CheckID: CheckNodes, Operation: CheckNodes, Outcome: graph.OutcomeSkipped,
+			Reason: "prerequisite failed: Ray Dashboard identity not established", OperationKind: graph.EnumerationOperation,
+		})
+	} else {
+		resp, reqErr := c.transport.Get(ctx, baseURL+"/nodes?view=summary")
+		common.AbsorbTransport(resp, &tlsInfo, &redirects)
+		if reqErr != nil {
+			reason := common.SanitizeError(reqErr)
+			checks = append(checks, common.CheckEntry{
+				CheckID: CheckNodes, Operation: CheckNodes, Outcome: graph.OutcomeFailed,
+				Reason: reason, OperationKind: graph.EnumerationOperation,
+				Details: map[string]any{"error": reason},
+			})
+		} else {
+			switch resp.StatusCode {
+			case http.StatusOK:
+				var nResp nodesSummaryResponse
+				if err := json.Unmarshal(resp.Body, &nResp); err != nil || nResp.Data.Summary == nil {
+					checks = append(checks, common.CheckEntry{
+						CheckID: CheckNodes, Operation: CheckNodes, Outcome: graph.OutcomeUnsupported,
+						Reason: "Ray /nodes?view=summary endpoint did not return node summary array", OperationKind: graph.EnumerationOperation,
+						Details: map[string]any{"http_status": resp.StatusCode},
+					})
+				} else {
+					workerHosts = extractWorkerHosts(nResp, ep.Host())
+					checks = append(checks, common.CheckEntry{
+						CheckID: CheckNodes, Operation: CheckNodes, Outcome: graph.OutcomeSuccess,
+						Reason:    fmt.Sprintf("Ray cluster node summary retrieved (%d worker host(s))", len(workerHosts)),
+						Anonymous: true, OperationKind: graph.EnumerationOperation, CountForAccess: false,
+						Details: map[string]any{"http_status": resp.StatusCode, "worker_count": len(workerHosts)},
+					})
+				}
+			case http.StatusUnauthorized, http.StatusForbidden:
+				checks = append(checks, common.CheckEntry{
+					CheckID: CheckNodes, Operation: CheckNodes, Outcome: graph.OutcomeDenied,
+					Reason: fmt.Sprintf("HTTP %d: authentication or authorization required", resp.StatusCode), OperationKind: graph.EnumerationOperation,
+					Details: map[string]any{"http_status": resp.StatusCode},
+				})
+			case http.StatusNotFound, http.StatusMethodNotAllowed:
+				checks = append(checks, common.CheckEntry{
+					CheckID: CheckNodes, Operation: CheckNodes, Outcome: graph.OutcomeUnsupported,
+					Reason: fmt.Sprintf("HTTP %d (/nodes?view=summary unsupported on this Ray version)", resp.StatusCode), OperationKind: graph.EnumerationOperation,
+					Details: map[string]any{"http_status": resp.StatusCode},
+				})
+			default:
+				checks = append(checks, common.CheckEntry{
+					CheckID: CheckNodes, Operation: CheckNodes, Outcome: graph.OutcomeUnsupported,
+					Reason: fmt.Sprintf("HTTP %d from /nodes?view=summary", resp.StatusCode), OperationKind: graph.EnumerationOperation,
+					Details: map[string]any{"http_status": resp.StatusCode},
 				})
 			}
 		}
@@ -796,6 +873,9 @@ func (c *Collector) Collect(
 		if actorCount != nil {
 			srvProps["actor_count"] = *actorCount
 		}
+		if len(workerHosts) > 0 {
+			srvProps["worker_hosts"] = workerHosts
+		}
 
 		srvNode, err := graph.NewNode(srvID, obs)
 		if err != nil {
@@ -964,4 +1044,40 @@ func rayTruncationReason(jobsTrunc, respTrunc bool, contentReasons []string) str
 	}
 	parts = append(parts, contentReasons...)
 	return strings.Join(parts, "; ")
+}
+
+func extractWorkerHosts(nResp nodesSummaryResponse, headHost string) []string {
+	if nResp.Data.Summary == nil {
+		return nil
+	}
+	seen := make(map[string]bool)
+	var workers []string
+	headNorm := strings.TrimSpace(headHost)
+	for _, n := range *nResp.Data.Summary {
+		if n.IsHeadNode != nil && *n.IsHeadNode {
+			continue
+		}
+		if st := strings.TrimSpace(n.State); st != "" && !strings.EqualFold(st, "ALIVE") {
+			continue
+		}
+		rawIP := strings.TrimSpace(n.IP)
+		if rawIP == "" {
+			rawIP = strings.TrimSpace(n.NodeIP)
+		}
+		if rawIP == "" {
+			rawIP = strings.TrimSpace(n.NodeIPAlt)
+		}
+		addr, err := netip.ParseAddr(rawIP)
+		if err != nil || !addr.IsValid() || addr.IsUnspecified() || addr.IsLoopback() {
+			continue
+		}
+		ipStr := addr.String()
+		if ipStr == headNorm || seen[ipStr] {
+			continue
+		}
+		seen[ipStr] = true
+		workers = append(workers, ipStr)
+	}
+	sort.Strings(workers)
+	return workers
 }

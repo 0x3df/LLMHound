@@ -1,0 +1,23 @@
+{
+  "id": "openwebui-auth-disabled",
+  "version": "1.0.0",
+  "capability_class": "host_code_execution",
+  "edge_kind": "CanExecuteOn",
+  "surface": "open_webui",
+  "node_kind": "OpenWebUIInstance",
+  "version_range": "*",
+  "required_checks_any": [
+    "open_webui_models"
+  ],
+  "required_node_props": {
+    "auth_advertised": "none"
+  },
+  "required_exec_surfaces_any": [
+    "code_eval"
+  ],
+  "docs": [
+    "https://docs.openwebui.com/getting-started/env-configuration/#webui_auth"
+  ],
+  "confidence": "high",
+  "exec_identity": "unknown"
+}

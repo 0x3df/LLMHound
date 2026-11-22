@@ -51,9 +51,10 @@ secrets:
 correlation:
   mapping_file: ""
 
-# Opt-in traversable CanExecuteOn path-qualification rules (disabled by default).
-# Enabling a rule requires non-empty assumed_reach_principals and a verified native
-# mapping_file host (NetworkEndpoint targets always fail closed).
+# Opt-in traversable CanExecuteOn / CanAssumePrincipal rules (disabled by default).
+# Enabling a rule requires non-empty assumed_reach_principals or vantage_principals
+# and a verified native mapping_file host (or AZApp client UUID).
 path_qualification:
   enabled_rules: []
   assumed_reach_principals: []
+  vantage_principals: {}

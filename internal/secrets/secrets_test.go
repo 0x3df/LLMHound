@@ -382,7 +382,7 @@ func TestRedactorRespectsConfig(t *testing.T) {
 	}
 
 	allDisabled := config.Secrets{Detectors: map[string]bool{
-		"aws_access_key": false, "github_token": false, "private_key": false,
+		"aws_access_key": false, "azure_client_secret": false, "github_token": false, "private_key": false,
 	}}
 	if NewRedactor(allDisabled) != nil {
 		t.Fatal("fully disabled config must return a nil redactor")

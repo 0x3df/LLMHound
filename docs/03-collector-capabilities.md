@@ -98,7 +98,7 @@ operation inventories and fixtures.
 | Surface | Default metadata checks | Version distinctions and content-tier reads |
 |---|---|---|
 | OpenAI-compatible (generic) | API shape fingerprint; served model list; any explicitly reported server identity/version headers or fields | Used only when no specific product is proven; never inferred as vLLM/llama.cpp/TGI from shape alone. No inference, embedding, or completion requests. |
-| Ray dashboard | Reported Ray version; cluster/node summary and job/actor listings metadata where anonymously exposed | Job submission and any mutating endpoints are never called. Job entrypoints and environment are content-tier reads; a high-precision secret match sets only a presence flag. |
+| Ray dashboard | Reported Ray version; cluster/node summary (`GET /nodes?view=summary` for worker IPs) and job/actor listings metadata where anonymously exposed | Job submission and any mutating endpoints are never called. Job entrypoints and environment are content-tier reads; a high-precision secret match sets only a presence flag (plus public identity IDs). |
 | Langflow | Reported version; flow/component inventory metadata where anonymously exposed; auto-login posture | Flow execution and code-validation endpoints are never called. Flow bodies are content-tier reads. |
 | Flowise | Reported version; chatflow inventory metadata and public-chatflow flags where anonymously exposed | Prediction endpoints are never called. Flow configuration is a content-tier read. |
 | ChromaDB | Reported version/heartbeat; tenant/database/collection inventory and counts | Collection documents are content-tier bounded samples; embeddings are never fetched. |
@@ -115,19 +115,19 @@ All rules are disabled by default and require explicit opt-in in `llmhound.yaml`
 
 | Surface | Execution surface to classify | Other path-relevant facts | Opt-in rule |
 |---|---|---|---|
-| MCP | `tool_invocation` (declared); per-tool `capability_hint` (`shell`, `filesystem`, `secrets`, `code`, `database`, `network`) | Transport and auth model, OAuth authorization-server references, resource URI schemes, whether tools list anonymously | No (advertisement is not evidence) |
+| MCP | `tool_invocation` (declared); per-tool `capability_hint` (`shell`, `filesystem`, `secrets`, `code`, `database`, `network`) | Transport and auth model, OAuth authorization-server references / passive Entra OIDC IDs, resource URI schemes, whether tools list anonymously | `entra-sso-code-exec` (opt-in if host execution applies) |
 | A2A | `tool_invocation` (declared) from skills/interfaces | Advertised security schemes, linked agents and interfaces (recorded, not followed) | No |
 | Ollama | `model_mutation` (pull/delete exposed anonymously is not host execution) | Model catalog, digests, bind/exposure hints, version | No |
 | vLLM | none expected | Served models, aliases, version | No |
-| LiteLLM | `workflow_exec` only if exposed | Backend/provider references (redacted), key-management endpoints listed in the OpenAPI document (never called), version | No |
+| LiteLLM | `workflow_exec` only if exposed | Backend/provider references (redacted), key-management endpoints listed in the OpenAPI document (never called), version | `azure-exposed-client-secret` (opt-in on secret exposure) |
 | Qdrant | none expected | Collections, counts, storage/snapshot endpoints present, API-key requirement | No |
 | MLflow | `model_mutation` | Artifact-store references, registry stages, version | No (revisit with documented semantics) |
-| Jupyter | `code_kernel`, `terminal` | Whether the API requires a token, kernel/session listings, contents listing, version | Yes (`jupyter-auth-disabled`, opt-in) |
-| Open WebUI | none expected | Backend references, signup/auth settings exposed, version | No |
+| Jupyter | `code_kernel`, `terminal` | Whether the API requires a token, passive Entra OIDC IDs, kernel/session listings, contents listing, version | Yes (`jupyter-auth-disabled`, `entra-sso-code-exec`, opt-in) |
+| Open WebUI | `code_eval` (`inferred` when `WEBUI_AUTH=False` / `auth_advertised=none`) | Backend references, signup/auth settings exposed, passive Entra OIDC IDs, version | Yes (`openwebui-auth-disabled`, `entra-sso-code-exec`, opt-in) |
 | LangServe | `code_eval` only if documented for the route | Routes, schemas, playground exposure | No |
-| Ray dashboard | `job_submit` | Cluster/node summary, job listing, version | Yes (`ray-anonymous-jobs`, opt-in) |
-| Langflow | `workflow_exec`, `code_eval` | Auto-login posture, version | Yes (`langflow-unauthenticated-exec`, opt-in) |
-| Flowise | `workflow_exec` | Public-chatflow flags, version | Yes (`flowise-unauthenticated-exec`, opt-in) |
+| Ray dashboard | `job_submit` | Cluster/node summary (`worker_hosts`), job listing, version | Yes (`ray-anonymous-jobs` + worker fan-out, opt-in) |
+| Langflow | `workflow_exec`, `code_eval` | Auto-login posture, version | Yes (`langflow-unauthenticated-exec`, `azure-exposed-client-secret`, opt-in) |
+| Flowise | `workflow_exec` | Public-chatflow flags, version | Yes (`flowise-unauthenticated-exec`, `azure-exposed-client-secret`, opt-in) |
 | ChromaDB | none expected | Tenants/databases/collections, auth provider | No |
 | OpenAI-compatible | none expected | Served models, identity headers | No |
 

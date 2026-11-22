@@ -102,7 +102,8 @@ func (c *Client) ValidateAdapter(ctx context.Context, allowUnvalidated bool) (*G
 }
 
 // TraversablePathKinds returns sorted traversable relationship kind names from
-// GET /api/v2/extensions-edges, optionally including LLMHound_CanExecuteOn.
+// GET /api/v2/extensions-edges, optionally including opt-in rule edges
+// (LLMHound_CanExecuteOn and LLMHound_CanAssumePrincipal).
 func (c *Client) TraversablePathKinds(ctx context.Context, includeCanExecuteOn bool) ([]string, error) {
 	edges, err := c.ListExtensionEdges(ctx)
 	if err != nil {
@@ -114,7 +115,7 @@ func (c *Client) TraversablePathKinds(ctx context.Context, includeCanExecuteOn b
 		if !e.IsTraversable || e.Name == "" || seen[e.Name] {
 			continue
 		}
-		if strings.HasPrefix(e.Name, "LLMHound_") && (!includeCanExecuteOn || e.Name != "LLMHound_CanExecuteOn") {
+		if strings.HasPrefix(e.Name, "LLMHound_") && (!includeCanExecuteOn || (e.Name != "LLMHound_CanExecuteOn" && e.Name != "LLMHound_CanAssumePrincipal")) {
 			continue
 		}
 		if !isSafeCypherEdgeKind(e.Name) {

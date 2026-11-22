@@ -201,12 +201,48 @@ func (b *Budget) SecretTypes() []string {
 	return types
 }
 
-// ExposureDetails renders findings for evidence details: type, location, and
-// line. It never carries a secret value.
+// ExposedAZAppIDs returns sorted, de-duplicated Azure AD application (client) UUIDs
+// associated with detected Entra client secret exposures. Never contains secrets.
+func (b *Budget) ExposedAZAppIDs() []string {
+	return b.principalIDsByKind("AZApp")
+}
+
+// ExposedAWSKeyIDs returns sorted, de-duplicated public AWS access key IDs
+// (AKIA.../ASIA...) associated with detected AWS credential pairs.
+func (b *Budget) ExposedAWSKeyIDs() []string {
+	return b.principalIDsByKind("AWSKey")
+}
+
+// ExposedPubKeySHA256 returns sorted, de-duplicated lowercase SHA-256 SPKI
+// fingerprints of exposed private keys.
+func (b *Budget) ExposedPubKeySHA256() []string {
+	return b.principalIDsByKind("PubKeySHA256")
+}
+
+func (b *Budget) principalIDsByKind(kind string) []string {
+	seen := make(map[string]bool)
+	var out []string
+	for _, f := range b.findings {
+		if f.PrincipalKind == kind && f.PrincipalID != "" && !seen[f.PrincipalID] {
+			seen[f.PrincipalID] = true
+			out = append(out, f.PrincipalID)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// ExposureDetails renders findings for evidence details: type, location, line, and
+// optional public principal identifier. It never carries a secret value.
 func ExposureDetails(findings []Finding) []any {
 	details := make([]any, 0, len(findings))
 	for _, f := range findings {
-		details = append(details, map[string]any{"type": f.Type, "location": f.Location, "line": f.Line})
+		entry := map[string]any{"type": f.Type, "location": f.Location, "line": f.Line}
+		if f.PrincipalKind != "" && f.PrincipalID != "" {
+			entry["principal_kind"] = f.PrincipalKind
+			entry["principal_id"] = f.PrincipalID
+		}
+		details = append(details, entry)
 	}
 	return details
 }

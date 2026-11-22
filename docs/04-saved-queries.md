@@ -1,6 +1,6 @@
 # Starter saved queries
 
-> **Status: All 17 queries (`P1`–`P10` and `I1`–`I7`) are implemented, generated** (`extension/saved_searches/`, via `tools/gensearches`),
+> **Status: All 19 queries (`P1`–`P12` and `I1`–`I7`) are implemented, generated** (`extension/saved_searches/`, via `tools/gensearches`),
 > validated for syntax and schema kinds, and importable via `llmhound upload --import-queries`. Core queries (`P1`, `P2`, `P4`, `P6`)
 > were additionally validated live against CE 9.7.1 (`lab/scripts/run-d2-checks.sh`, [R2](05-ce-compatibility.md#follow-up-answers-for-the-tier-0-redesign-r1r9));
 > kind and property names follow the [graph model](02-graph-model.md) and the
@@ -28,9 +28,9 @@
   client-side (its query parameters are ignored) to the traversable kinds
   (107 on the pinned lab, AD and Azure included). A pattern with all 107 ran in
   about 60 ms ([R2](05-ce-compatibility.md#follow-up-answers-for-the-tier-0-redesign-r1r9)).
-  `LLMHound_CanExecuteOn` appears in that list only when it is registered
-  traversable, i.e. when a [path-qualification](02-graph-model.md#path-qualification-traversable-edges)
-  rule is enabled. The lab fixture has no `AdminTo`, so do not hard-code any
+  `LLMHound_CanExecuteOn` and `LLMHound_CanAssumePrincipal` appear in that list only when registered
+  traversable, i.e. when [path-qualification](02-graph-model.md#path-qualification-traversable-edges)
+  rules are enabled (`IncludeCanExecuteOn`). The lab fixture has no `AdminTo`, so do not hard-code any
   specific AD edge.
 - **Shipped form.** The shipped files differ from the readable examples below: no
   `NOT h:NetworkEndpoint` host filter is needed because the `ObservedAt` pattern predicate
@@ -179,6 +179,26 @@ LIMIT 100
 MATCH p = shortestPath((o:Tag_Owned)-[:<PATH_KINDS>*1..]->(h))
 WHERE (h)<-[:ObservedAt]-(:AIService)
 RETURN p
+LIMIT 100
+```
+
+### P11. AI services exposing Entra credentials linked to AZApp
+
+```cypher
+MATCH (s:AIService)-[:ExposesCredentialFor]->(a:AZApp)
+OPTIONAL MATCH p = (a)-[:<PATH_KINDS>*1..4]->(t:Tag_Tier_Zero)
+RETURN s, a, p
+LIMIT 100
+```
+
+### P12. AI services with Entra SSO AZApp and host execution surface
+
+```cypher
+MATCH (s:AIService)-[:AuthenticatesVia]->(a:AZApp)
+MATCH (s)-[:ObservedAt]->(h)
+WHERE NOT h:NetworkEndpoint
+  AND any(e IN coalesce(s.exec_surface, []) WHERE e IN ['code_kernel', 'job_submit', 'code_eval'])
+RETURN s, a, h
 LIMIT 100
 ```
 

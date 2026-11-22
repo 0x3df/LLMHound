@@ -220,12 +220,14 @@ These values are parsed/validated. Scan collectors apply TLS, User-Agent, the
   detector is enabled unless explicitly set to `false`. Valid keys:
   `private_key` (parse-verified PEM, unencrypted), `github_token`
   (classic `ghp_/gho_/ghu_/ghs_/ghr_` tokens with a valid CRC32 checksum),
-  `aws_access_key` (key id and paired secret in the same item). There is no
+  `aws_access_key` (key id and paired secret in the same item), and
+  `azure_client_secret` (paired Entra client UUID + client secret). There is no
   CLI flag and no global off switch: disabling the content tier disables
   detection with it. A match is replaced by `[secret:<type>]` in
   `.content.jsonl`, recorded by type and location in the sidecar
   (`detected_exposures`), and flagged on the graph
-  (`has_exposed_secret`, `secret_types`, `secret_last_confirmed`); the value
+  (`has_exposed_secret`, `secret_types`, `secret_last_confirmed`, plus public
+  identity IDs `exposed_azapp_ids`, `exposed_aws_key_ids`, `exposed_pubkey_sha256`); the value
   is never stored.
 - `correlation.mapping_file` (`--mapping-file`): the asset mapping supplied by your
   external asset-inventory or normalization pipeline, which maps a target to an
@@ -260,12 +262,17 @@ links because an edge to a missing objectid creates an empty stub node.
 Top-level YAML key `path_qualification` (disabled by default):
 
 - `enabled_rules`: list of rule IDs to enable (`jupyter-auth-disabled`,
-  `ray-anonymous-jobs`, `langflow-unauthenticated-exec`, `flowise-unauthenticated-exec`). Must be empty unless
-  `assumed_reach_principals` is non-empty.
-- `assumed_reach_principals`: list of `{object_id, kind}` existing BloodHound
-  principals (e.g. Domain Users `S-1-5-21-...-513`) used as `CanExecuteOn` start nodes.
-  Rules always fail closed when target is unmapped (`NetworkEndpoint`), version is
-  unknown/out-of-range, or required check evidence is missing.
+  `ray-anonymous-jobs`, `langflow-unauthenticated-exec`,
+  `flowise-unauthenticated-exec`, `openwebui-auth-disabled`,
+  `azure-exposed-client-secret`, `entra-sso-code-exec`). Must be empty unless
+  `assumed_reach_principals` or `vantage_principals` is non-empty.
+- `assumed_reach_principals`: fallback list of `{object_id, kind}` existing
+  BloodHound principals (e.g. Domain Users `S-1-5-21-...-513`) used as rule start nodes.
+- `vantage_principals`: optional map of `vantage_key -> [{object_id, kind}]`
+  overriding `assumed_reach_principals` per scanner network vantage.
+  Host execution rules always fail closed when target is unmapped
+  (`NetworkEndpoint`), version is unknown/out-of-range (where checked), or
+  required check evidence is missing.
 
 ### `llmhound resume` and `llmhound upload`
 

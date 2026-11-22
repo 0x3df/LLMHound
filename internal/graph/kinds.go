@@ -78,28 +78,31 @@ func (k Kind) Emitted() (string, error) {
 type EdgeKind string
 
 const (
-	ObservedAt       EdgeKind = "ObservedAt"
-	RunsOn           EdgeKind = "RunsOn" // Reserved: not inferred from network observations.
-	ProvidesTool     EdgeKind = "ProvidesTool"
-	ProvidesResource EdgeKind = "ProvidesResource"
-	ProvidesPrompt   EdgeKind = "ProvidesPrompt"
-	ProvidesModel    EdgeKind = "ProvidesModel"
-	AdvertisesSkill  EdgeKind = "AdvertisesSkill"
-	UsesBackend      EdgeKind = "UsesBackend"
-	Contains         EdgeKind = "Contains"
-	CanExecuteOn     EdgeKind = "CanExecuteOn" // Opt-in rule-gated attack transition (M2d).
+	ObservedAt           EdgeKind = "ObservedAt"
+	RunsOn               EdgeKind = "RunsOn" // Reserved: not inferred from network observations.
+	ProvidesTool         EdgeKind = "ProvidesTool"
+	ProvidesResource     EdgeKind = "ProvidesResource"
+	ProvidesPrompt       EdgeKind = "ProvidesPrompt"
+	ProvidesModel        EdgeKind = "ProvidesModel"
+	AdvertisesSkill      EdgeKind = "AdvertisesSkill"
+	UsesBackend          EdgeKind = "UsesBackend"
+	Contains             EdgeKind = "Contains"
+	ExposesCredentialFor EdgeKind = "ExposesCredentialFor" // Non-traversable credential exposure link to native identity node.
+	AuthenticatesVia     EdgeKind = "AuthenticatesVia"     // Non-traversable passive OAuth/OIDC app link to native AZApp node.
+	CanExecuteOn         EdgeKind = "CanExecuteOn"         // Opt-in rule-gated attack transition (M2d).
+	CanAssumePrincipal   EdgeKind = "CanAssumePrincipal"   // Opt-in rule-gated secret-to-principal transition.
 )
 
 // EdgeKinds returns the default non-traversable base relationship kinds declared
 // in extension/schema.json.
 func EdgeKinds() []EdgeKind {
 	return []EdgeKind{ObservedAt, RunsOn, ProvidesTool, ProvidesResource, ProvidesPrompt,
-		ProvidesModel, AdvertisesSkill, UsesBackend, Contains}
+		ProvidesModel, AdvertisesSkill, UsesBackend, Contains, ExposesCredentialFor, AuthenticatesVia}
 }
 
 // RuleEdgeKinds returns opt-in traversable relationship kinds gated by path-qualification rules.
 func RuleEdgeKinds() []EdgeKind {
-	return []EdgeKind{CanExecuteOn}
+	return []EdgeKind{CanExecuteOn, CanAssumePrincipal}
 }
 
 func (k EdgeKind) Emitted() (string, error) {
@@ -116,6 +119,8 @@ func (k EdgeKind) Emitted() (string, error) {
 	return "", errors.New("unknown edge kind")
 }
 
-// IsTraversable is false for all base, reserved, and unknown kinds. Only the
-// opt-in rule-gated CanExecuteOn kind is traversable.
-func (k EdgeKind) IsTraversable() bool { return k == CanExecuteOn }
+// IsTraversable is false for all base, reserved, and unknown kinds. Only opt-in
+// rule-gated transition kinds (CanExecuteOn, CanAssumePrincipal) are traversable.
+func (k EdgeKind) IsTraversable() bool {
+	return k == CanExecuteOn || k == CanAssumePrincipal
+}

@@ -740,6 +740,9 @@ func (c *Collector) Collect(
 				ConfigCollected:     cfgPtr,
 				SecretTypes:         budget.SecretTypes(),
 				SecretConfirmedAt:   obsTime,
+				ExposedAZAppIDs:     budget.ExposedAZAppIDs(),
+				ExposedAWSKeyIDs:    budget.ExposedAWSKeyIDs(),
+				ExposedPubKeySHA256: budget.ExposedPubKeySHA256(),
 			}
 
 			if successCount > 0 {

@@ -394,6 +394,9 @@ func ContentSummaryFromBudget(budget *content.Budget, obsTime time.Time, sysProm
 		ConfigCollected:     cfgCollected,
 		SecretTypes:         budget.SecretTypes(),
 		SecretConfirmedAt:   obsTime,
+		ExposedAZAppIDs:     budget.ExposedAZAppIDs(),
+		ExposedAWSKeyIDs:    budget.ExposedAWSKeyIDs(),
+		ExposedPubKeySHA256: budget.ExposedPubKeySHA256(),
 	}
 }
 

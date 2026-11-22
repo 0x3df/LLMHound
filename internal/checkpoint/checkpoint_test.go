@@ -425,8 +425,37 @@ func TestDeterministicReplayAndPayloadEquivalence(t *testing.T) {
 		t.Fatalf("create correlation record: %v", err)
 	}
 
+	// ExposesCredentialFor, AuthenticatesVia, and opt-in CanAssumePrincipal round-trip.
+	azRef, err := graph.ExistingNodeByID(graph.Kind("AZApp"), "11112222-3333-4444-5555-666677778888")
+	if err != nil {
+		t.Fatalf("create azRef: %v", err)
+	}
+	edgeExposeCred, err := graph.NewExposesCredentialForEdge(serviceNode.Node.Identity().Reference(), azRef, obs)
+	if err != nil {
+		t.Fatalf("create edgeExposeCred: %v", err)
+	}
+	edgeAuthVia, err := graph.NewAuthenticatesViaEdge(serviceNode.Node.Identity().Reference(), azRef, obs)
+	if err != nil {
+		t.Fatalf("create edgeAuthVia: %v", err)
+	}
+	edgeAssume, err := graph.NewCanAssumePrincipalEdge(compRef, azRef, obs, graph.RuleProvenance{
+		RuleID:          "azure-exposed-client-secret",
+		RuleVersion:     "1.0.0",
+		Basis:           graph.BasisInferred,
+		Confidence:      "high",
+		CapabilityClass: "principal_assumption",
+		ReachBasis:      "scanner_vantage",
+		ExecIdentity:    "azapp",
+		ServiceID:       serviceNode.Node.Identity().ID(),
+		Operations:      []string{"content_secret_scan"},
+		EvidenceIDs:     []string{"ev-check-001"},
+	})
+	if err != nil {
+		t.Fatalf("create edgeAssume: %v", err)
+	}
+
 	origNodes := []emitter.NodeItem{serviceNode, modelNode1, modelNode2}
-	origEdges := []graph.Edge{edgeModel1, edgeModel2, edgeObservedAt, edgeFallback}
+	origEdges := []graph.Edge{edgeModel1, edgeModel2, edgeObservedAt, edgeFallback, edgeExposeCred, edgeAuthVia, edgeAssume}
 	origEvidence := []evidence.Record{evCheck, evFingerprint, evTLS, evRedirect, evCorrelation}
 
 	// 2. Write to Journal

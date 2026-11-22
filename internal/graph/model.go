@@ -2,6 +2,7 @@ package graph
 
 import (
 	"errors"
+	"fmt"
 	"sort"
 	"strings"
 )
@@ -133,11 +134,15 @@ func (p RuleProvenance) Validate() error {
 	if !validStableText(p.Confidence) {
 		return errors.New("rule provenance requires confidence")
 	}
-	if p.CapabilityClass != "host_code_execution" {
-		return errors.New("rule capability_class must be host_code_execution")
+	switch p.CapabilityClass {
+	case "host_code_execution", "principal_assumption":
+	default:
+		return errors.New("rule capability_class must be host_code_execution or principal_assumption")
 	}
-	if p.ReachBasis != "scanner_vantage" {
-		return errors.New("rule reach_basis must be scanner_vantage")
+	switch p.ReachBasis {
+	case "scanner_vantage", "vantage_scoped_principal", "ray_cluster_fanout", "ray_head_to_worker", "entra_sso_app":
+	default:
+		return errors.New("rule reach_basis must be scanner_vantage, vantage_scoped_principal, ray_cluster_fanout, ray_head_to_worker, or entra_sso_app")
 	}
 	if !validStableText(p.ExecIdentity) {
 		return errors.New("rule provenance requires exec_identity")
@@ -209,10 +214,20 @@ func (e Edge) RuleProvenance() (RuleProvenance, bool) {
 }
 
 // NewCanExecuteOnEdge constructs a rule-qualified, traversable CanExecuteOn edge
-// from an assumed-reach native principal to an existing mapped native host node.
+// from an assumed-reach native principal or OIDC app to an existing mapped native host node.
 func NewCanExecuteOnEdge(start, end Reference, observation Observation, prov RuleProvenance) (Edge, error) {
+	return newRuleEdge(CanExecuteOn, start, end, observation, prov)
+}
+
+// NewCanAssumePrincipalEdge constructs a rule-qualified, traversable CanAssumePrincipal edge
+// from an assumed-reach native principal to an exposed native principal node (for example AZApp).
+func NewCanAssumePrincipalEdge(start, end Reference, observation Observation, prov RuleProvenance) (Edge, error) {
+	return newRuleEdge(CanAssumePrincipal, start, end, observation, prov)
+}
+
+func newRuleEdge(kind EdgeKind, start, end Reference, observation Observation, prov RuleProvenance) (Edge, error) {
 	if !start.IsNative() || !end.IsNative() {
-		return Edge{}, errors.New("CanExecuteOn requires verified native start principal and native target node")
+		return Edge{}, fmt.Errorf("%s requires verified native start principal and native target node", kind)
 	}
 	if start.ID() == "" || end.ID() == "" {
 		return Edge{}, errors.New("CanExecuteOn requires non-empty endpoint IDs")
@@ -225,7 +240,7 @@ func NewCanExecuteOnEdge(start, end Reference, observation Observation, prov Rul
 	}
 	cloned := cloneRuleProvenance(prov)
 	return Edge{
-		kind:           CanExecuteOn,
+		kind:           kind,
 		start:          start,
 		end:            end,
 		observation:    observation,
@@ -293,4 +308,23 @@ func NewTopologyEdge(kind EdgeKind, start, end Reference, observation Observatio
 		return Edge{}, errors.New("invalid topology direction, kind or resource owner")
 	}
 	return newEdge(kind, start, end, observation)
+}
+
+// NewExposesCredentialForEdge records a non-traversable link from a service node
+// whose public/unauthenticated content exposed structure-verified credentials for
+// a native cloud/directory identity (e.g. AZApp).
+func NewExposesCredentialForEdge(service, target Reference, observation Observation) (Edge, error) {
+	if !service.Kind().IsService() || !target.IsNative() {
+		return Edge{}, errors.New("ExposesCredentialFor requires a service node and a verified native target node")
+	}
+	return newEdge(ExposesCredentialFor, service, target, observation)
+}
+
+// NewAuthenticatesViaEdge records a non-traversable passive OAuth/OIDC relationship
+// from a service node to a native cloud application node (e.g. AZApp).
+func NewAuthenticatesViaEdge(service, target Reference, observation Observation) (Edge, error) {
+	if !service.Kind().IsService() || !target.IsNative() {
+		return Edge{}, errors.New("AuthenticatesVia requires a service node and a verified native target node")
+	}
+	return newEdge(AuthenticatesVia, service, target, observation)
 }

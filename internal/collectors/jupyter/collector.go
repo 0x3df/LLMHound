@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/0x3df/LLMHound/internal/checkpoint"
+	"github.com/0x3df/LLMHound/internal/collectors/internal/common"
 	"github.com/0x3df/LLMHound/internal/config"
 	"github.com/0x3df/LLMHound/internal/content"
 	"github.com/0x3df/LLMHound/internal/correlate"
@@ -189,10 +190,20 @@ func (c *Collector) collect(ctx context.Context, rawTarget string, probeFirst bo
 	var failedChecks []string
 	var authRequired bool
 	var anyReachable bool
+	var entraTenantID, entraClientID string
+	absorbEntra := func(t, c string) {
+		if entraTenantID == "" && t != "" {
+			entraTenantID = t
+		}
+		if entraClientID == "" && c != "" {
+			entraClientID = c
+		}
+	}
 
 	// 1. Version Check: GET /api
 	verCheck := c.executeVersionCheck(ctx, baseURL, srvID.ID())
 	checks = append(checks, verCheck.exec)
+	absorbEntra(verCheck.entraTenantID, verCheck.entraClientID)
 	if verCheck.reachable {
 		anyReachable = true
 	}
@@ -246,6 +257,7 @@ func (c *Collector) collect(ctx context.Context, rawTarget string, probeFirst bo
 		// 2. Session Metadata Check: GET /api/sessions
 		sessCheck := c.executeSessionsCheck(ctx, baseURL, srvID.ID(), maxItems)
 		checks = append(checks, sessCheck.exec)
+		absorbEntra(sessCheck.entraTenantID, sessCheck.entraClientID)
 		if sessCheck.reachable {
 			anyReachable = true
 		}
@@ -264,6 +276,7 @@ func (c *Collector) collect(ctx context.Context, rawTarget string, probeFirst bo
 		// 3. Workspace Listing Check: GET /api/contents
 		contCheck := c.executeContentsCheck(ctx, baseURL, srvID.ID(), maxItems)
 		checks = append(checks, contCheck.exec)
+		absorbEntra(contCheck.entraTenantID, contCheck.entraClientID)
 		if contCheck.reachable {
 			anyReachable = true
 		}
@@ -462,7 +475,9 @@ func (c *Collector) collect(ctx context.Context, rawTarget string, probeFirst bo
 		Product: "Jupyter Server", Vendor: "Project Jupyter", VantageKey: c.cfg.VantageKey, Access: access,
 		// Kernel execution is the product's purpose; inferred from identity, not run.
 		ExecSurface: []string{graph.ExecCodeKernel}, ExecSurfaceBasis: graph.BasisInferred,
-		Content: contentSummary,
+		Content:       contentSummary,
+		EntraTenantID: entraTenantID,
+		EntraClientID: entraClientID,
 	}
 	if observedTLS.Observed {
 		facts.TLS = &graph.TLSSummary{
@@ -663,11 +678,13 @@ func (c *Collector) CollectToJournal(ctx context.Context, j checkpoint.Journal, 
 }
 
 type versionCheckResult struct {
-	exec         checkExecution
-	version      VersionInfo
-	tls          TLSInfo
-	authRequired bool
-	reachable    bool
+	exec          checkExecution
+	version       VersionInfo
+	tls           TLSInfo
+	authRequired  bool
+	reachable     bool
+	entraTenantID string
+	entraClientID string
 }
 
 func (c *Collector) executeVersionCheck(ctx context.Context, baseURL, targetID string) versionCheckResult {
@@ -692,9 +709,12 @@ func (c *Collector) executeVersionCheck(ctx context.Context, baseURL, targetID s
 		}
 	}
 
+	entraT, entraC := extractJupyterEntra(resp)
 	res := versionCheckResult{
-		reachable: true,
-		tls:       resp.TLS,
+		reachable:     true,
+		tls:           resp.TLS,
+		entraTenantID: entraT,
+		entraClientID: entraC,
 		exec: checkExecution{
 			checkID:       CheckIDVersion,
 			operation:     OpVersion,
@@ -754,12 +774,14 @@ func (c *Collector) executeVersionCheck(ctx context.Context, baseURL, targetID s
 }
 
 type sessionsCheckResult struct {
-	exec         checkExecution
-	sessions     []CollectedSession
-	tls          TLSInfo
-	authRequired bool
-	reachable    bool
-	truncated    bool
+	exec          checkExecution
+	sessions      []CollectedSession
+	tls           TLSInfo
+	authRequired  bool
+	reachable     bool
+	truncated     bool
+	entraTenantID string
+	entraClientID string
 }
 
 func (c *Collector) executeSessionsCheck(ctx context.Context, baseURL, targetID string, maxItems int) sessionsCheckResult {
@@ -779,9 +801,12 @@ func (c *Collector) executeSessionsCheck(ctx context.Context, baseURL, targetID 
 		}
 	}
 
+	entraT, entraC := extractJupyterEntra(resp)
 	res := sessionsCheckResult{
-		reachable: true,
-		tls:       resp.TLS,
+		reachable:     true,
+		tls:           resp.TLS,
+		entraTenantID: entraT,
+		entraClientID: entraC,
 		exec: checkExecution{
 			checkID:       CheckIDSessions,
 			operation:     OpSessions,
@@ -851,13 +876,15 @@ func (c *Collector) executeSessionsCheck(ctx context.Context, baseURL, targetID 
 }
 
 type contentsCheckResult struct {
-	exec         checkExecution
-	files        []CollectedFile
-	tls          TLSInfo
-	authRequired bool
-	reachable    bool
-	truncated    bool
-	skippedDirs  int
+	exec          checkExecution
+	files         []CollectedFile
+	tls           TLSInfo
+	authRequired  bool
+	reachable     bool
+	truncated     bool
+	skippedDirs   int
+	entraTenantID string
+	entraClientID string
 }
 
 func (c *Collector) executeContentsCheck(ctx context.Context, baseURL, targetID string, maxItems int) contentsCheckResult {
@@ -877,9 +904,12 @@ func (c *Collector) executeContentsCheck(ctx context.Context, baseURL, targetID 
 		}
 	}
 
+	entraT, entraC := extractJupyterEntra(resp)
 	res := contentsCheckResult{
-		reachable: true,
-		tls:       resp.TLS,
+		reachable:     true,
+		tls:           resp.TLS,
+		entraTenantID: entraT,
+		entraClientID: entraC,
 		exec: checkExecution{
 			checkID:       CheckIDContents,
 			operation:     OpContents,
@@ -1100,11 +1130,14 @@ func (c *Collector) executeFileContentCheck(ctx context.Context, baseURL string,
 	var summary *graph.ContentSummary
 	if itemsRead > 0 || budget.Truncated() {
 		summary = &graph.ContentSummary{
-			Collected:         true,
-			Bytes:             budget.Bytes(),
-			Truncated:         budget.Truncated(),
-			SecretTypes:       budget.SecretTypes(),
-			SecretConfirmedAt: obsTime,
+			Collected:           true,
+			Bytes:               budget.Bytes(),
+			Truncated:           budget.Truncated(),
+			SecretTypes:         budget.SecretTypes(),
+			SecretConfirmedAt:   obsTime,
+			ExposedAZAppIDs:     budget.ExposedAZAppIDs(),
+			ExposedAWSKeyIDs:    budget.ExposedAWSKeyIDs(),
+			ExposedPubKeySHA256: budget.ExposedPubKeySHA256(),
 		}
 	}
 
@@ -1228,6 +1261,21 @@ func isLoginPage(status int, body []byte, redirectURL string) bool {
 		return true
 	}
 	return false
+}
+
+func extractJupyterEntra(resp *httpResponse) (string, string) {
+	if resp == nil {
+		return "", ""
+	}
+	t1, c1 := common.ExtractEntraFromHeaders(resp.Header)
+	t2, c2 := common.ExtractEntraOIDC(resp.RedirectURL, string(resp.Body))
+	if t1 == "" {
+		t1 = t2
+	}
+	if c1 == "" {
+		c1 = c2
+	}
+	return t1, c1
 }
 
 func cleanErrorString(err error) string {

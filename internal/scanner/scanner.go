@@ -1316,6 +1316,16 @@ endpointLoop:
 		edges = append(edges, backendEdges...)
 	}
 
+	// 7a2. Link exposed credentials and Entra SSO identities to native AZApp nodes (populates P11/P12).
+	idEdges, idEvs, err := ResolveIdentityEdges(s.cfg.Scope, nodes, evalObs)
+	if err != nil {
+		return nil, fmt.Errorf("resolve identity edges: %w", err)
+	}
+	if len(idEdges) > 0 {
+		edges = append(edges, idEdges...)
+		evRecords = append(evRecords, idEvs...)
+	}
+
 	// 7b. Derive flat risk_signals on AIService nodes (populates P9 & rapid triage).
 	EnrichRiskSignals(nodes, edges)
 
@@ -1325,7 +1335,7 @@ endpointLoop:
 		ruleObs.EvidenceID = "ev-rules"
 		ruleObs.Source = "path_qualification"
 		ruleObs.Surface = "rules"
-		ruleEdges, ruleEv, err := rules.Evaluate(s.cfg.PathQualification, nodes, edges, evRecords, ruleObs)
+		ruleEdges, ruleEv, err := rules.EvaluateWithResolver(s.cfg.PathQualification, nodes, edges, evRecords, ruleObs, resolver)
 		if err != nil {
 			return nil, fmt.Errorf("evaluate path-qualification rules: %w", err)
 		}

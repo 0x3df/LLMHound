@@ -1199,8 +1199,8 @@ func TestUploadCLIWithMockCE(t *testing.T) {
 	if !strings.HasSuffix(uploadedFileNames[0], ".zip") || !strings.HasSuffix(uploadedFileNames[1], ".zip") {
 		t.Fatalf("expected default .zip uploads, got names: %v", uploadedFileNames)
 	}
-	if !strings.Contains(out, "Imported 17 saved queries") {
-		t.Fatalf("expected 17 imported saved queries, got: %q", out)
+	if !strings.Contains(out, "Imported 19 saved queries") {
+		t.Fatalf("expected 19 imported saved queries, got: %q", out)
 	}
 
 	// 3. Unpinned CE version fails closed unless --allow-unvalidated-ce is set.

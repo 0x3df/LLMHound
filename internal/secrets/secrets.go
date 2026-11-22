@@ -23,8 +23,10 @@ type Span struct {
 // Match is one verified secret: the detector type and every span holding
 // secret material (an AWS pair has two).
 type Match struct {
-	Type  string
-	Spans []Span
+	Type          string
+	Spans         []Span
+	PrincipalKind string
+	PrincipalID   string
 }
 
 // Detector scans one body for secrets of a single type.
@@ -37,6 +39,7 @@ type Detector interface {
 func Detectors() []Detector {
 	return []Detector{
 		newAWSDetector(),
+		newAzureDetector(),
 		newGitHubDetector(),
 		newPrivateKeyDetector(),
 	}
@@ -74,8 +77,10 @@ func redact(body string, enabled []Detector) (string, []content.Finding) {
 				continue
 			}
 			findings = append(findings, content.Finding{
-				Type: m.Type,
-				Line: 1 + strings.Count(body[:m.Spans[0].Start], "\n"),
+				Type:          m.Type,
+				Line:          1 + strings.Count(body[:m.Spans[0].Start], "\n"),
+				PrincipalKind: m.PrincipalKind,
+				PrincipalID:   m.PrincipalID,
 			})
 			matches = append(matches, m)
 		}

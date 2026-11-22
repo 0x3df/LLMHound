@@ -116,6 +116,9 @@ func TestOpenWebUICollect_CompleteAndSecrets(t *testing.T) {
 	if !reflect.DeepEqual(props["anon_operations"], []string{"open_webui_models"}) {
 		t.Errorf("anon_operations = %v", props["anon_operations"])
 	}
+	if !reflect.DeepEqual(props["exec_surface"], []string{graph.ExecCodeEval}) || props["exec_surface_basis"] != graph.BasisInferred {
+		t.Errorf("exec_surface = %v (%v), want [code_eval] (inferred)", props["exec_surface"], props["exec_surface_basis"])
+	}
 	if !reflect.DeepEqual(props["backend_refs"], []string{"http://ollama.internal:11434", "https://api.corp.internal/v1"}) {
 		t.Errorf("backend_refs = %v", props["backend_refs"])
 	}
@@ -182,5 +185,52 @@ func TestOpenWebUICollect_DeniedAndOptOutAndTLS(t *testing.T) {
 	}
 	if resTLS.Observation.Coverage != graph.CoverageFailed || len(resTLS.Nodes) != 0 {
 		t.Fatalf("TLS failure must stop collection with 0 nodes")
+	}
+}
+
+func TestOpenWebUICollect_EntraOIDCAndAuthRequiredNoExecSurface(t *testing.T) {
+	tenant := "11111111-2222-3333-4444-555555555555"
+	client := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/version":
+			_, _ = w.Write([]byte(`{"version":"0.4.8"}`))
+		case "/api/config":
+			_, _ = w.Write([]byte(fmt.Sprintf(`{
+				"status":true,
+				"name":"Open WebUI",
+				"version":"0.4.8",
+				"features":{"auth":true},
+				"oauth":{"providers":{"microsoft":"Microsoft"},"microsoft_tenant_id":"%s","microsoft_client_id":"%s"}
+			}`, tenant, client)))
+		case "/api/models":
+			w.WriteHeader(http.StatusUnauthorized)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	col := openwebui.New(testConfig(srv.URL))
+	res, err := col.Collect(context.Background(), srv.URL, "lab-scope", "scanner-a", "scan-1", time.Now().UTC(), nil)
+	if err != nil {
+		t.Fatalf("Collect error: %v", err)
+	}
+	var svcItem *emitter.NodeItem
+	for i := range res.Nodes {
+		if res.Nodes[i].Node.Identity().Kind() == graph.OpenWebUIInstance {
+			svcItem = &res.Nodes[i]
+		}
+	}
+	if svcItem == nil {
+		t.Fatal("missing OpenWebUIInstance node")
+	}
+	props := svcItem.Properties
+	if _, hasExec := props["exec_surface"]; hasExec {
+		t.Errorf("auth=true instance must not claim exec_surface: %+v", props["exec_surface"])
+	}
+	if props["entra_tenant_id"] != tenant || props["entra_client_id"] != strings.ToUpper(client) {
+		t.Errorf("entra props = (%v, %v), want (%s, %s)", props["entra_tenant_id"], props["entra_client_id"], tenant, strings.ToUpper(client))
 	}
 }

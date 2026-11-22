@@ -79,6 +79,12 @@ func EnrichRiskSignals(nodes []emitter.NodeItem, edges []graph.Edge) {
 		if b, _ := item.Properties["has_exposed_secret"].(bool); b {
 			signals["exposed_secret"] = true
 		}
+		if len(toStringSlice(item.Properties["exposed_azapp_ids"])) > 0 || len(toStringSlice(item.Properties["exposed_aws_key_ids"])) > 0 {
+			signals["exposed_cloud_identity"] = true
+		}
+		if cid, _ := item.Properties["entra_client_id"].(string); strings.TrimSpace(cid) != "" {
+			signals["entra_sso_linked"] = true
+		}
 		if hasHighRiskTool[id] {
 			signals["high_risk_mcp_tool"] = true
 		}

@@ -41,8 +41,8 @@ func TestShippedFilesAreCurrent(t *testing.T) {
 
 func TestQueriesUseEmittedKindsAndTypedPaths(t *testing.T) {
 	all := Generate(loadKinds(t))
-	if len(all) != 17 {
-		t.Fatalf("expected 17 saved queries (P1-P10, I1-I7), got %d", len(all))
+	if len(all) != 19 {
+		t.Fatalf("expected 19 saved queries (P1-P12, I1-I7), got %d", len(all))
 	}
 	for _, q := range all {
 		for _, bad := range []string{"[*", ":AIService", ":ObservedAt", ":NetworkEndpoint", "IN n.system_tags"} {
@@ -50,13 +50,13 @@ func TestQueriesUseEmittedKindsAndTypedPaths(t *testing.T) {
 				t.Errorf("%s contains %q", q.Name, bad)
 			}
 		}
-		if strings.Contains(q.Query, "shortestPath") && strings.Contains(q.Query, "LLMHound_CanExecuteOn") {
+		if strings.Contains(q.Query, "shortestPath") && (strings.Contains(q.Query, "LLMHound_CanExecuteOn") || strings.Contains(q.Query, "LLMHound_CanAssumePrincipal")) {
 			t.Errorf("%s must not follow rule edges by default", q.Name)
 		}
 	}
 	withRules := GenerateWithOptions(loadKinds(t), GenerateOptions{IncludeCanExecuteOn: true})
-	if !strings.Contains(withRules[0].Query, "LLMHound_CanExecuteOn") {
-		t.Errorf("IncludeCanExecuteOn should add LLMHound_CanExecuteOn to path kinds")
+	if !strings.Contains(withRules[0].Query, "LLMHound_CanExecuteOn") || !strings.Contains(withRules[0].Query, "LLMHound_CanAssumePrincipal") {
+		t.Errorf("IncludeCanExecuteOn should add rule edge kinds to path kinds")
 	}
 }
 

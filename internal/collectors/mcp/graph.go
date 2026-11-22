@@ -72,14 +72,22 @@ func extractCapabilities(caps *mcpsdk.ServerCapabilities) []string {
 	return out
 }
 
-func buildServerNode(srvID graph.Identity, ep graph.Endpoint, obs graph.Observation, initResult *mcpsdk.InitializeResult, tlsObs *tlsObservation, access graph.Access, contentSummary *graph.ContentSummary) (emitter.NodeItem, error) {
+func buildServerNode(srvID graph.Identity, ep graph.Endpoint, obs graph.Observation, initResult *mcpsdk.InitializeResult, tlsObs *tlsObservation, access graph.Access, contentSummary *graph.ContentSummary, entraTenantID, entraClientID string) (emitter.NodeItem, error) {
 	node, err := graph.NewNode(srvID, obs)
 	if err != nil {
 		return emitter.NodeItem{}, fmt.Errorf("create MCPServer node: %w", err)
 	}
 
 	displayName := fmt.Sprintf("MCP · %s:%d%s", ep.Host(), ep.Port(), ep.BasePath())
-	facts := graph.ServiceFacts{Endpoint: ep, Name: displayName, VantageKey: obs.VantageKey, Access: access, Content: contentSummary}
+	facts := graph.ServiceFacts{
+		Endpoint:      ep,
+		Name:          displayName,
+		VantageKey:    obs.VantageKey,
+		Access:        access,
+		Content:       contentSummary,
+		EntraTenantID: entraTenantID,
+		EntraClientID: entraClientID,
+	}
 	if tlsObs != nil {
 		facts.TLS = &graph.TLSSummary{
 			Result: tlsObs.VerificationResult, Reason: tlsObs.VerificationReason,

@@ -26,31 +26,37 @@ type relKindDoc struct {
 }
 
 // SchemaWithCanExecuteOn augments the default non-traversable extension schema
-// with the opt-in traversable LLMHound_CanExecuteOn relationship kind without
-// making any base edge kind traversable.
+// with the opt-in traversable relationship kinds (LLMHound_CanExecuteOn and
+// LLMHound_CanAssumePrincipal) without making any base edge kind traversable.
 func SchemaWithCanExecuteOn(baseSchemaJSON []byte) ([]byte, error) {
 	var doc schemaDoc
 	if err := json.Unmarshal(baseSchemaJSON, &doc); err != nil {
 		return nil, fmt.Errorf("parse base schema: %w", err)
 	}
-	emitted, err := graph.CanExecuteOn.Emitted()
-	if err != nil {
-		return nil, err
+	ruleDescs := map[graph.EdgeKind]string{
+		graph.CanExecuteOn:       "Opt-in rule-gated host code execution transition from assumed-reach principals to a mapped native host node.",
+		graph.CanAssumePrincipal: "Opt-in rule-gated principal assumption transition from an assumed-reach principal to a cloud/directory identity whose credential was exposed.",
 	}
-	found := false
-	for i, rk := range doc.RelationshipKinds {
-		if rk.Name == emitted {
-			doc.RelationshipKinds[i].IsTraversable = true
-			found = true
-			break
+	for _, k := range graph.RuleEdgeKinds() {
+		emitted, err := k.Emitted()
+		if err != nil {
+			return nil, err
 		}
-	}
-	if !found {
-		doc.RelationshipKinds = append(doc.RelationshipKinds, relKindDoc{
-			Name:          emitted,
-			Description:   "Opt-in rule-gated host code execution transition from assumed-reach principals to a mapped native host node.",
-			IsTraversable: true,
-		})
+		found := false
+		for i, rk := range doc.RelationshipKinds {
+			if rk.Name == emitted {
+				doc.RelationshipKinds[i].IsTraversable = true
+				found = true
+				break
+			}
+		}
+		if !found {
+			doc.RelationshipKinds = append(doc.RelationshipKinds, relKindDoc{
+				Name:          emitted,
+				Description:   ruleDescs[k],
+				IsTraversable: true,
+			})
+		}
 	}
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)

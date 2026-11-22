@@ -158,6 +158,7 @@ func (c *Collector) Collect(
 	var cfgErr error
 	var cfgBody []byte
 	var authAdvertised string
+	var oidcInputs []string
 	var signupEnabled *bool
 	backendSet := make(map[string]bool)
 
@@ -199,6 +200,9 @@ func (c *Collector) Collect(
 				Details: map[string]any{"error": reason},
 			})
 		} else {
+			if t, cID := common.ExtractEntraFromHeaders(resp.Header); t != "" || cID != "" {
+				oidcInputs = append(oidcInputs, resp.Header.Get("Location"), resp.Header.Get("Www-Authenticate"))
+			}
 			if hasOpenWebUIHeaders(resp.Header) {
 				openWebUIConfirmed = true
 			}
@@ -308,6 +312,15 @@ func (c *Collector) Collect(
 				Details: map[string]any{"error": reason},
 			})
 		} else {
+			if loc := resp.Header.Get("Location"); loc != "" {
+				oidcInputs = append(oidcInputs, loc)
+			}
+			if www := resp.Header.Get("Www-Authenticate"); www != "" {
+				oidcInputs = append(oidcInputs, www)
+			}
+			if len(resp.Body) > 0 {
+				oidcInputs = append(oidcInputs, string(resp.Body))
+			}
 			if hasOpenWebUIHeaders(resp.Header) {
 				openWebUIConfirmed = true
 			}
@@ -689,6 +702,24 @@ func (c *Collector) Collect(
 		}
 		sort.Strings(backendRefs)
 
+		entraTenant, entraClient := common.ExtractEntraOIDC(oidcInputs...)
+		if t, cID := common.ExtractEntraFromRedirects(redirects); (entraTenant == "" && t != "") || (entraClient == "" && cID != "") {
+			if entraTenant == "" {
+				entraTenant = t
+			}
+			if entraClient == "" {
+				entraClient = cID
+			}
+		}
+		var execSurface []string
+		var execSurfaceBasis string
+		if authAdvertised == "none" {
+			// Anonymous access with WEBUI_AUTH=False exposes Open WebUI Admin/Functions
+			// /Pipelines Python execution surfaces. Kept BasisInferred so rule opt-in decides traversal.
+			execSurface = []string{graph.ExecCodeEval}
+			execSurfaceBasis = graph.BasisInferred
+		}
+
 		facts := graph.ServiceFacts{
 			Endpoint:         ep,
 			Name:             fmt.Sprintf("Open WebUI · %s:%d", ep.Host(), ep.Port()),
@@ -697,10 +728,14 @@ func (c *Collector) Collect(
 			VantageKey:       vantageKey,
 			Access:           access,
 			AuthAdvertised:   authAdvertised,
+			ExecSurface:      execSurface,
+			ExecSurfaceBasis: execSurfaceBasis,
 			BackendRefs:      backendRefs,
 			BackendRefsBasis: graph.BasisDeclared,
 			TLS:              common.TLSSummary(tlsInfo),
 			Content:          contentSummary,
+			EntraTenantID:    entraTenant,
+			EntraClientID:    entraClient,
 		}
 		if modelsSuccess {
 			facts.ModelCount = common.IntPtr(len(models))

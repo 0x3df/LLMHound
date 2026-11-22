@@ -141,3 +141,43 @@ func TestRayCollect_RejectsOllamaVersionOnlyAndTLSFailure(t *testing.T) {
 		t.Fatalf("TLS failure must stop collection")
 	}
 }
+
+func TestRayCollect_NodesWorkerSummary(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.RequestURI {
+		case "/api/version":
+			_, _ = w.Write([]byte(`{"ray_version":"2.37.0"}`))
+		case "/api/cluster_status":
+			_, _ = w.Write([]byte(`{"result":true,"data":{"clusterStatus":{"active_nodes":{"ray-head":1,"ray-worker":2}}}}`))
+		case "/api/jobs/":
+			_, _ = w.Write([]byte(`[]`))
+		case "/api/v0/actors":
+			_, _ = w.Write([]byte(`{"result":true,"data":{"actors":{}}}`))
+		case "/nodes?view=summary":
+			_, _ = w.Write([]byte(`{"result":true,"data":{"summary":[
+				{"ip":"10.0.1.10","isHeadNode":true,"state":"ALIVE"},
+				{"ip":"10.0.1.12","isHeadNode":false,"state":"ALIVE"},
+				{"ip":"10.0.1.11","isHeadNode":false,"state":"ALIVE"},
+				{"ip":"10.0.1.13","isHeadNode":false,"state":"DEAD"},
+				{"ip":"not-an-ip","isHeadNode":false,"state":"ALIVE"}
+			]}}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	col := ray.New(testConfig(srv.URL))
+	res, err := col.Collect(context.Background(), srv.URL, "lab-scope", "scanner-a", "scan-1", time.Now().UTC(), nil)
+	if err != nil {
+		t.Fatalf("Collect error: %v", err)
+	}
+	if len(res.Nodes) == 0 {
+		t.Fatal("missing RayDashboard node")
+	}
+	got, _ := res.Nodes[0].Properties["worker_hosts"].([]string)
+	want := []string{"10.0.1.11", "10.0.1.12"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("worker_hosts = %v, want %v", got, want)
+	}
+}

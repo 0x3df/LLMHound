@@ -8,6 +8,7 @@
   "required_checks_any": [
     "ray_jobs"
   ],
+  "fanout_host_property": "worker_hosts",
   "docs": [
     "https://docs.ray.io/en/latest/cluster/running-applications/job-submission/rest.html"
   ],

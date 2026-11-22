@@ -69,7 +69,7 @@ access summary · `internal/rules` & `extension/rules` opt-in traversable rule e
    Property names are flat, lowercase, primitive (or homogeneous primitive arrays). CE upper-cases
    node ids and `name`, so case-sensitive data never goes in `name`.
 7. Nothing is traversable unless an opt-in rule clears the six-point bar in the graph model.
-   `CanExecuteOn` is the only traversable edge kind (`EdgeKind.IsTraversable()`), gated behind `path_qualification.enabled_rules` (empty by default).
+   `CanExecuteOn` and `CanAssumePrincipal` are the only traversable edge kinds (`EdgeKind.IsTraversable()`), gated behind `path_qualification.enabled_rules` (empty by default).
 8. Attach to **existing** nodes by objectid and native kind only, from the asset mapping. No DNS,
    suffix, or CE-side guessing. Never emit or modify a native-kind node. Native IDs are verbatim.
 9. **Two payloads.** Owned nodes/edges carry `source_kind: LLMHound`. Edges touching native nodes go

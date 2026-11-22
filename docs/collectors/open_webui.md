@@ -44,8 +44,10 @@ backend endpoints.
 - **Nodes:**
   - `OpenWebUIInstance` (with `AIService` umbrella label), carrying the shared
     [service property contract](../02-graph-model.md#property-contract)
-    (endpoint, access, `auth_advertised`, `backend_refs`, `model_count`,
-    content summary, TLS), `software_version`, `software_version_raw`, and
+    (endpoint, access, `auth_advertised`, `exec_surface: ["code_eval"]` inferred when
+    `features.auth == false`, passive `entra_tenant_id` / `entra_client_id`,
+    `backend_refs`, `model_count`, content summary, TLS), `software_version`,
+    `software_version_raw`, and
     `signup_enabled`.
   - `AIModel` nodes (bounded by `bounds.max_items`), carrying `model_id`,
     `display_name`, and `owned_by`.

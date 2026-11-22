@@ -240,6 +240,16 @@
       "name": "LLMHound_Contains",
       "description": "Collection, workspace file, model artifact, or reported artifact store association.",
       "is_traversable": false
+    },
+    {
+      "name": "LLMHound_ExposesCredentialFor",
+      "description": "Service content exposed structure-verified credentials associated with a native identity.",
+      "is_traversable": false
+    },
+    {
+      "name": "LLMHound_AuthenticatesVia",
+      "description": "Service delegates anonymous authentication or OAuth/OIDC sign-in to a native application.",
+      "is_traversable": false
     }
   ]
 }

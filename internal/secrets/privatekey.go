@@ -7,9 +7,11 @@ import (
 	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
 	"math/big"
 	"regexp"
 	"strings"
@@ -45,10 +47,16 @@ func (privateKeyDetector) Find(body string) []Match {
 			continue
 		}
 		end := loc[1] + rel + len(endMarker)
-		if !privateKeyBodyParses(label, body[loc[1]:loc[1]+rel]) {
+		pubDigest, ok := privateKeyBodyParses(label, body[loc[1]:loc[1]+rel])
+		if !ok {
 			continue
 		}
-		matches = append(matches, Match{Type: privateKeyName, Spans: []Span{{Start: loc[0], End: end}}})
+		m := Match{Type: privateKeyName, Spans: []Span{{Start: loc[0], End: end}}}
+		if pubDigest != "" {
+			m.PrincipalKind = "PubKeySHA256"
+			m.PrincipalID = pubDigest
+		}
+		matches = append(matches, m)
 	}
 	return matches
 }
@@ -57,9 +65,9 @@ func (privateKeyDetector) Find(body string) []Match {
 // escapes and line wrapping from a serialized notebook or an indented RFC
 // listing), requires clean base64, and parses the key by label. Legacy
 // encryption headers fail the match before parsing.
-func privateKeyBodyParses(label, inner string) bool {
+func privateKeyBodyParses(label, inner string) (string, bool) {
 	if strings.Contains(inner, "Proc-Type:") || strings.Contains(inner, "DEK-Info:") {
-		return false
+		return "", false
 	}
 	compact := strings.ReplaceAll(inner, `\n`, "")
 	compact = strings.ReplaceAll(compact, `\r`, "")
@@ -77,43 +85,62 @@ func privateKeyBodyParses(label, inner string) bool {
 		case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z', c >= '0' && c <= '9',
 			c == '+', c == '/', c == '=':
 		default:
-			return false
+			return "", false
 		}
 	}
 	der, err := base64.StdEncoding.DecodeString(compact)
 	if err != nil {
-		return false
+		return "", false
 	}
 
 	switch label {
 	case "RSA PRIVATE KEY":
 		k, err := x509.ParsePKCS1PrivateKey(der)
-		if err != nil {
-			return false
+		if err != nil || isKnownExampleSPKI(&k.PublicKey) {
+			return "", false
 		}
-		return !isKnownExampleSPKI(&k.PublicKey)
+		return pubKeySHA256(&k.PublicKey), true
 	case "EC PRIVATE KEY":
 		k, err := x509.ParseECPrivateKey(der)
-		if err != nil {
-			return false
+		if err != nil || isKnownExampleSPKI(&k.PublicKey) {
+			return "", false
 		}
-		return !isKnownExampleSPKI(&k.PublicKey)
+		return pubKeySHA256(&k.PublicKey), true
 	case "PRIVATE KEY":
 		k, err := x509.ParsePKCS8PrivateKey(der)
 		if err != nil {
-			return false
+			return "", false
 		}
 		if pub := pkixPublicOf(k); pub != nil {
-			return !isKnownExampleSPKI(pub)
+			if isKnownExampleSPKI(pub) {
+				return "", false
+			}
+			return pubKeySHA256(pub), true
 		}
-		return true
+		return "", true
 	case "OPENSSH PRIVATE KEY":
-		// OpenSSH keys skip the example denylist: the container format wraps
-		// the key material, so the SPKI digest is not available without a
-		// full SSH wire parser.
-		return parseOpenSSHUnencrypted(der)
+		pub, ok := parseOpenSSHUnencrypted(der)
+		if !ok {
+			return "", false
+		}
+		if pub != nil {
+			if isKnownExampleSPKI(pub) {
+				return "", false
+			}
+			return pubKeySHA256(pub), true
+		}
+		return "", true
 	}
-	return false
+	return "", false
+}
+
+func pubKeySHA256(pub any) string {
+	der, err := x509.MarshalPKIXPublicKey(pub)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(der)
+	return hex.EncodeToString(sum[:])
 }
 
 func pkixPublicOf(priv any) crypto.PublicKey {
@@ -132,40 +159,43 @@ func pkixPublicOf(priv any) crypto.PublicKey {
 // consistent openssh-key-v1 container for exactly one unencrypted private key
 // of a supported type. Every SSH string is bounds checked before slicing; the
 // public and private halves must agree cryptographically.
-func parseOpenSSHUnencrypted(der []byte) bool {
+func parseOpenSSHUnencrypted(der []byte) (crypto.PublicKey, bool) {
 	const magic = "openssh-key-v1\x00"
 	if len(der) < len(magic) || !bytes.Equal(der[:len(magic)], []byte(magic)) {
-		return false
+		return nil, false
 	}
 	d := der[len(magic):]
 
 	var ok bool
 	if d, ok = sshStringEquals(d, "none"); !ok {
-		return false
+		return nil, false
 	}
 	if d, ok = sshStringEquals(d, "none"); !ok {
-		return false
+		return nil, false
 	}
 	var options []byte
 	if options, d, ok = sshTakeString(d); !ok || len(options) != 0 {
-		return false
+		return nil, false
 	}
 
 	var nkeys uint32
 	if nkeys, d, ok = sshTakeUint32(d); !ok || nkeys != 1 {
-		return false
+		return nil, false
 	}
 
 	var publicBlob, privateBlock []byte
 	if publicBlob, d, ok = sshTakeString(d); !ok || len(publicBlob) == 0 {
-		return false
+		return nil, false
 	}
 	if privateBlock, d, ok = sshTakeString(d); !ok || len(privateBlock) == 0 || len(d) != 0 {
-		return false
+		return nil, false
 	}
 
 	pub, ok := parseSSHPublicKey(publicBlob)
-	return ok && parseSSHPrivateBlock(privateBlock, pub)
+	if !ok || !parseSSHPrivateBlock(privateBlock, pub) {
+		return nil, false
+	}
+	return pub.cryptoPublic(), true
 }
 
 type sshPublicKey struct {
@@ -175,6 +205,26 @@ type sshPublicKey struct {
 	rsaN    *big.Int
 	curve   string
 	point   []byte
+}
+
+func (p sshPublicKey) cryptoPublic() crypto.PublicKey {
+	switch p.keyType {
+	case "ssh-ed25519":
+		return ed25519.PublicKey(p.ed25519)
+	case "ssh-rsa":
+		return &rsa.PublicKey{N: p.rsaN, E: p.rsaE}
+	case "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521":
+		curve, ok, supported := sshECDSACurve(p.keyType, p.curve)
+		if !ok || !supported {
+			return nil
+		}
+		x, y := elliptic.Unmarshal(curve, p.point)
+		if x == nil || y == nil {
+			return nil
+		}
+		return &ecdsa.PublicKey{Curve: curve, X: x, Y: y}
+	}
+	return nil
 }
 
 func parseSSHPublicKey(blob []byte) (sshPublicKey, bool) {

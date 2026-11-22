@@ -29,8 +29,9 @@ const CutoffPlaceholder = "<CUTOFF_ISO8601>"
 
 // GenerateOptions controls optional extensions to generated saved searches.
 type GenerateOptions struct {
-	// IncludeCanExecuteOn includes LLMHound_CanExecuteOn in PATH_KINDS when
-	// path-qualification rules are enabled on the target CE instance.
+	// IncludeCanExecuteOn includes opt-in rule edge kinds (LLMHound_CanExecuteOn
+	// and LLMHound_CanAssumePrincipal) in PATH_KINDS when path-qualification
+	// rules are enabled on the target CE instance.
 	IncludeCanExecuteOn bool
 }
 
@@ -97,20 +98,22 @@ func Generate(pathKinds []string) []Query {
 	return GenerateWithOptions(pathKinds, GenerateOptions{})
 }
 
-// GenerateWithOptions renders every shipped query (P1–P8 and I1–I7).
+// GenerateWithOptions renders every shipped query (P1–P12 and I1–I7).
 func GenerateWithOptions(pathKinds []string, opts GenerateOptions) []Query {
 	kinds := append([]string(nil), pathKinds...)
 	if opts.IncludeCanExecuteOn {
-		canExec := mustEmitEdge(graph.CanExecuteOn)
-		found := false
-		for _, k := range kinds {
-			if k == canExec {
-				found = true
-				break
+		for _, rk := range graph.RuleEdgeKinds() {
+			ruleEdge := mustEmitEdge(rk)
+			found := false
+			for _, k := range kinds {
+				if k == ruleEdge {
+					found = true
+					break
+				}
 			}
-		}
-		if !found {
-			kinds = append(kinds, canExec)
+			if !found {
+				kinds = append(kinds, ruleEdge)
+			}
 		}
 	}
 	pk := strings.Join(kinds, "|")
@@ -130,6 +133,8 @@ func GenerateWithOptions(pathKinds []string, opts GenerateOptions) []Query {
 	providesTool := mustEmitEdge(graph.ProvidesTool)
 	providesModel := mustEmitEdge(graph.ProvidesModel)
 	contains := mustEmitEdge(graph.Contains)
+	exposesCred := mustEmitEdge(graph.ExposesCredentialFor)
+	authVia := mustEmitEdge(graph.AuthenticatesVia)
 
 	return []Query{
 		{
@@ -200,6 +205,18 @@ func GenerateWithOptions(pathKinds []string, opts GenerateOptions) []Query {
 			Description: "Shortest traversable paths from Owned principals (Tag_Owned) to any mapped host running an AI service.",
 			Query: fmt.Sprintf("MATCH p = shortestPath((o:Tag_Owned)-[:%s*1..]->(h))\n"+
 				"WHERE (h)<-[:%s]-(:%s)\nRETURN p\nLIMIT 100", pk, obs, svc),
+		},
+		{
+			Name:        "LLMHound P11: AI services exposing Entra credentials linked to AZApp",
+			Description: "AI services that exposed paired Entra client credentials (without storing secrets), linked to native AZApp nodes and downstream Tier 0 paths.",
+			Query: fmt.Sprintf("MATCH (s:%s)-[:%s]->(a:AZApp)\n"+
+				"OPTIONAL MATCH p = (a)-[:%s*1..4]->(t:Tag_Tier_Zero)\nRETURN s, a, p\nLIMIT 100", svc, exposesCred, pk),
+		},
+		{
+			Name:        "LLMHound P12: AI services with Entra SSO AZApp and host execution surface",
+			Description: "Execution-capable AI services delegating authentication to an Entra AZApp, highlighting SSO-reachable compute hosts.",
+			Query: fmt.Sprintf("MATCH (s:%s)-[:%s]->(a:AZApp)\n"+
+				"MATCH (s)-[:%s]->(h)\nWHERE NOT h:%s\n  AND any(e IN coalesce(s.exec_surface, []) WHERE e IN ['code_kernel', 'job_submit', 'code_eval'])\nRETURN s, a, h\nLIMIT 100", svc, authVia, obs, nep),
 		},
 		{
 			Name:        "LLMHound I1: anonymous access to AI services",

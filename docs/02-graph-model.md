@@ -1,6 +1,6 @@
 # LLMHound graph model
 
-> **Status: v1 graph model, 15 collectors, MCP `capability_hint`, cross-host `UsesBackend`, `risk_signals`, opt-in `CanExecuteOn` rules, `mapping_source` provenance, 17 saved queries (`P1`–`P10`, `I1`–`I7`), compact attack-path defaults, and two-step ZIP upload are implemented.**
+> **Status: v1 graph model, 15 collectors, MCP `capability_hint`, cross-host `UsesBackend`, offline credential/Entra OIDC `AZApp` correlation, `risk_signals`, opt-in `CanExecuteOn` & `CanAssumePrincipal` rules, `mapping_source` provenance, 19 saved queries (`P1`–`P12`, `I1`–`I7`), compact attack-path defaults, and two-step ZIP upload are implemented.**
 > Companion to [design](01-design.md). See the
 > [Implementation status](#implementation-status) table for remaining optional
 > property fields (`image_digest`, etc.) and CE behavior in
@@ -186,7 +186,8 @@ LLMHound does not attribute targets itself. Attribution is an input:
   cleanup then deletes them. So each scan uploads in two steps:
   (1) the LLMHound-owned subgraph with `source_kind: LLMHound` (including
   edges to `NetworkEndpoint`), then (2) a **linking payload without
-  `source_kind`** holding `ObservedAt` (and any opt-in `CanExecuteOn`) edges to
+  `source_kind`** holding `ObservedAt`, `ExposesCredentialFor`, `AuthenticatesVia`
+  (and any opt-in `CanExecuteOn` / `CanAssumePrincipal`) edges referencing
   existing native nodes. Linking edges are therefore sourceless data, not
   removed by source cleanup; the external pipeline owns their lifecycle.
 
@@ -206,6 +207,8 @@ All edges are non-traversable unless emitted by an enabled
 | `AdvertisesSkill` | A2AAgent → A2ASkill | Skill advertised, not invoked |
 | `UsesBackend` | service → service | Dependency reported by the source, not proof of backend access |
 | `Contains` | service → typed resource | Collection, workspace, model artifact, or artifact store association |
+| `ExposesCredentialFor` | service → native identity (`AZApp`) | Service content exposed structure-verified credentials bound to this public identity ID (non-traversable) |
+| `AuthenticatesVia` | service → native app (`AZApp`) | Service passively delegates authentication/OIDC to this Entra application (non-traversable) |
 
 Edges to existing native nodes are emitted in the sourceless linking payload
 described under [Attachment](#attachment-to-existing-nodes).
@@ -244,10 +247,10 @@ work named in the [roadmap](06-roadmap.md):
 | Product | `product`, `vendor` *(built)*; `software_version`, `software_version_raw`, `api_version`, `protocol_version`, `build_id`, `commit` (`build_id` and `commit` emitted where reported, e.g. Qdrant and Ray). Specified, not built: `image_digest`, and per-field `*_source` / `*_basis` labels |
 | Auth *(built)* | `auth_observed` (`anonymous`/`denied`/`mixed`/`unknown`, `observed`), `anon_operations` (sorted array of succeeded `check_id`s only). `auth_advertised` (`none`/`required`/`mixed`, `declared`, with `auth_advertised_basis`) is built in `graph.ServiceFacts` and emitted by A2A, Open WebUI, and Langflow. Jupyter also keeps `auth_required` |
 | Execution surface *(built)* | `exec_surface` (sorted array: `code_kernel`, `terminal`, `job_submit`, `code_eval`, `workflow_exec`, `tool_invocation`, `model_mutation`; only positively identified surfaces are listed, never `unknown`), `exec_surface_basis` (`observed`/`declared`/`inferred`). Emitted across Jupyter, Ollama, MCP, A2A, MLflow, Ray, Langflow, and Flowise where identified. It says a surface exists, not that anything was run |
-| Dependencies *(built)* | `backend_refs` (sanitized array), `store_refs` (sanitized array), `backend_refs_basis` (supported by `graph.ServiceFacts`; `backend_refs` emitted by A2A, LiteLLM, and Open WebUI; `store_refs` emitted by MLflow; unique same-scope host:port or mapped ObjectID matches emit `UsesBackend` edges) |
-| Risk triage *(built)* | `risk_signals` (sorted string array of deterministic triage tags: `anon_exec_surface`, `exposed_secret`, `high_risk_mcp_tool`, `cross_host_backend`, `anon_signup_enabled`, `cloud_artifact_store`; omitted when empty) |
+| Dependencies *(built)* | `backend_refs` (sanitized array), `store_refs` (sanitized array), `backend_refs_basis` (supported by `graph.ServiceFacts`; `backend_refs` emitted by A2A, LiteLLM, and Open WebUI; `store_refs` emitted by MLflow; unique same-scope host:port or mapped ObjectID matches emit `UsesBackend` edges); `worker_hosts` (unique alive non-head Ray worker IPs); `entra_tenant_id`, `entra_client_id` (passively observed Entra OIDC app metadata) |
+| Risk triage *(built)* | `risk_signals` (sorted string array of deterministic triage tags: `anon_exec_surface`, `exposed_secret`, `exposed_cloud_identity`, `entra_sso_linked`, `high_risk_mcp_tool`, `cross_host_backend`, `anon_signup_enabled`, `cloud_artifact_store`; omitted when empty) |
 | Inventory *(built)* | `model_count`, `tool_count`, `resource_count`, `collection_count`, `skill_count` (supported by `graph.ServiceFacts`; emitted where enumerated, including vLLM, Qdrant, A2A, LiteLLM, MLflow, Open WebUI, OpenAI-compatible, and ChromaDB) |
-| Content *(built)* | `system_prompt_present`, `config_collected`, `content_bytes`, `content_truncated`, `has_exposed_secret` (`true` or unset), `secret_last_confirmed`, `secret_types` (sorted array of detector names); bodies and secret values never appear in the graph, see [Content and secrets](#content-and-secrets) |
+| Content *(built)* | `system_prompt_present`, `config_collected`, `content_bytes`, `content_truncated`, `has_exposed_secret` (`true` or unset), `secret_last_confirmed`, `secret_types` (sorted array of detector names), `exposed_azapp_ids`, `exposed_aws_key_ids`, `exposed_pubkey_sha256` (public IDs/hashes only; raw secret values never appear in the graph), see [Content and secrets](#content-and-secrets) |
 | TLS *(built)* | `tls_verification` (`ok`/`failed`/`insecure_override`/`n_a`; `n_a` for plain `http`, absent when no handshake was observed), `tls_failure_reason` (bounded; kept under `insecure_override` when the certificate would not have verified), `tls_leaf_sha256` (lower-case hex), `tls_issuer`, `tls_not_after`, `tls_negotiated_version` |
 | Provenance | `vantage_key`, `scan_id`, `evidence_id`, `coverage`, `observed_at`, `mapping_source` *(built)*; specified, not built: `schema_version`, `first_observed`, `coverage_reason` (sidecar/observation carry them; not flattened onto graph nodes) |
 
@@ -316,7 +319,8 @@ disabled globally or per surface in `llmhound.yaml`.
   shareable evidence sidecar. The graph carries only flags, sizes, and hashes
   (`system_prompt_present`, `config_collected`, `content_bytes`,
   `content_truncated`, `has_exposed_secret`, `secret_last_confirmed`,
-  `secret_types`).
+  `secret_types`, and public identity IDs `exposed_azapp_ids`,
+  `exposed_aws_key_ids`, `exposed_pubkey_sha256`).
 - **Secrets are a boolean, never a value.** A matched secret is recorded as
   presence only: type and location (path/field/line) in the evidence sidecar,
   and `has_exposed_secret = true` plus `secret_types` on the graph node. The raw
@@ -364,21 +368,18 @@ enabled per rule in `llmhound.yaml`.
 | 1 | **Capability class from a closed list.** v1 rules may claim only **code execution on the host**. File read and secret disclosure are reserved classes that would need their own edge kinds and a separate decision. Not "tool exists", "model served", or "port open" |
 | 2 | **Positive evidence:** at least one observed anonymous success of a read-only check whose success is, per documented product semantics, only possible when the capability is open (e.g. auth is disabled). Advertisements, tool descriptions, and version banners alone never qualify. LLMHound never executes the capability to prove it |
 | 3 | **Documented rule:** a rule ID and version, the product and version range it holds for, the official documentation cited, and the check IDs it depends on. Unknown or out-of-range versions do not qualify |
-| 4 | **Verified attachment:** the end node is an existing node from the mapping file. Never a `NetworkEndpoint` |
-| 5 | **Explicit start population:** the edge starts at operator-configured `assumed_reach_principals` (e.g. Domain Users or Authenticated Users). Network reachability is observed from the scan vantage only; the edge records `reach_basis = scanner_vantage` so consumers can see the assumption |
-| 6 | **Provenance:** edge carries `rule_id`, `rule_version`, `basis` (`inferred`), `confidence`, `operations`, `evidence_ids`, and `exec_identity = unknown` unless observed |
+| 4 | **Verified attachment:** for host execution rules (`CanExecuteOn`), the end node is an existing node from the mapping file (never `NetworkEndpoint`), including Ray worker hosts mapped via `worker_hosts`. For principal-assumption rules (`CanAssumePrincipal`), the target node is a structure-verified native identity (`AZApp` client UUID) extracted alongside a secret |
+| 5 | **Explicit start population:** edges start at zone-scoped `vantage_principals[<vantage_key>]` when configured, otherwise global `assumed_reach_principals` (or the linked `entra_client_id` `AZApp` for `entra-sso-code-exec`), recording explicit `reach_basis` (`scanner_vantage`, `vantage_scoped_principal`, `ray_cluster_fanout`, `ray_head_to_worker`, or `entra_sso_app`) |
+| 6 | **Provenance:** edge carries `rule_id`, `rule_version`, `basis` (`inferred`), `confidence`, `operations`, `evidence_ids`, and `exec_identity` (`unknown` unless observed or service/cloud role scoped) |
 
-Reserved edge kind: `CanExecuteOn` (principal group → existing node), emitted
-only by a rule. The service remains the evidence node; the edge is the
-transition. Execution identity is not guessed: an edge to the host means "code
-execution on this host as the service's account", which may not be privileged.
+Reserved traversable edge kinds: `CanExecuteOn` (principal group or `AZApp` → existing host node; also `head host -> worker host` when `ray-anonymous-jobs` fans out to mapped `worker_hosts`) and `CanAssumePrincipal` (assumed-reach principal → exposed `AZApp`), emitted only by an enabled rule. The service remains the evidence node; the edge is the transition. Execution identity is not guessed: an edge to the host means "code execution on this host as the service's account", which may not be privileged.
 
 **Implemented rules** (disabled by default in `llmhound.yaml`; require `path_qualification.enabled_rules`
-and non-empty `path_qualification.assumed_reach_principals` + verified native host mapping):
+and non-empty `assumed_reach_principals` or `vantage_principals`):
 `jupyter-auth-disabled` (Jupyter with authentication disabled), `ray-anonymous-jobs` (Ray
-dashboard with anonymous jobs API), `langflow-unauthenticated-exec` (Langflow with
-anonymous auto-login / open flow access), and `flowise-unauthenticated-exec` (Flowise
-with anonymous chatflow API access).
+dashboard with anonymous jobs API and optional worker fan-out via `ray_nodes`), `langflow-unauthenticated-exec` (Langflow with
+anonymous auto-login / open flow access), `flowise-unauthenticated-exec` (Flowise
+with anonymous chatflow API access), `openwebui-auth-disabled` (Open WebUI with `WEBUI_AUTH=False` exposing Python function/pipeline evaluation), `azure-exposed-client-secret` (`CanAssumePrincipal` when paired Entra `client_id` + `client_secret` are exposed), and `entra-sso-code-exec` (`CanExecuteOn` from Entra SSO `AZApp` to mapped execution-capable host).
 
 **Do not qualify:** advertised MCP/A2A tools or skills, anonymous model
 listing, vector-store or registry inventory, any state based on a login page, a
@@ -413,18 +414,18 @@ backlog, in the order the [roadmap](06-roadmap.md) schedules it.
 
 | Area | Where |
 |---|---|
-| Scoped identity, canonical endpoints, kind mapping (`LLMHound_<Kind>`), non-traversable default edges, opt-in `CanExecuteOn` edge | `internal/graph` |
+| Scoped identity, canonical endpoints, kind mapping (`LLMHound_<Kind>`), non-traversable default edges (`ExposesCredentialFor`, `AuthenticatesVia`), opt-in `CanExecuteOn` & `CanAssumePrincipal` edges | `internal/graph` |
 | Mapping-file attachment to an existing native node of any kind (with `mapping_source` provenance); `NetworkEndpoint` fallback; nil resolver is an empty mapping | `internal/correlate` |
 | Shared service property contract (`graph.ServiceFacts`: endpoint, access, `auth_advertised`, `exec_surface`, `build_id`/`commit`, dependencies, inventory counts, content summary, TLS) | `internal/graph/serviceprops.go`, all collectors |
 | Anonymous access as flat properties (`auth_observed`, `anon_operations`, `vantage_key`) derived from operation evidence | `internal/graph/access.go`, collectors |
 | Default-on, bounded content tier (`content.*` config, binary exclusion, 0600 `.content.jsonl` isolation) across content-capable surfaces | `internal/content`, `internal/config`, collectors, `internal/scanner` |
-| High-precision secret detection over content bodies (`private_key` parse-verified PEM, `github_token` CRC32-verified, `aws_access_key` id+secret pair), `[secret:<type>]` redaction, `detected_exposures` sidecar details | `internal/secrets`, `internal/content`, collectors, `internal/scanner` |
+| High-precision secret detection over content bodies (`private_key` parse-verified PEM + SPKI `exposed_pubkey_sha256`, `github_token` CRC32-verified, `aws_access_key` id+secret pair + `exposed_aws_key_ids`, `azure_client_secret` Entra secret+client UUID pair + `exposed_azapp_ids`), `[secret:<type>]` redaction, `detected_exposures` sidecar details | `internal/secrets`, `internal/content`, collectors, `internal/scanner` |
 | Base payload (`source_kind`) and sourceless linking payload; evidence sidecar | `internal/emitter`, `internal/evidence` |
 | Checkpoint journal, deterministic replay, torn-tail repair, and `llmhound resume` | `internal/checkpoint`, `internal/scanner`, `cmd/llmhound` |
 | All 15 collectors (Jupyter, MCP, Ollama, A2A, vLLM, Qdrant, LiteLLM, MLflow, Open WebUI, LangServe, Generic OpenAI-compatible, Ray, Langflow, Flowise, ChromaDB); Stage 1 TCP-first sweep, shared-port probe cache, HTTPS auto-upgrade; `MCPTool.capability_hint`, cross-host `UsesBackend`, and `risk_signals` | `internal/collectors`, `internal/discovery`, `internal/scanner` |
-| Opt-in `CanExecuteOn` path-qualification rule engine (`jupyter-auth-disabled`, `ray-anonymous-jobs`, `langflow-unauthenticated-exec`, `flowise-unauthenticated-exec`) | `internal/rules`, `extension/rules`, `internal/config`, `internal/scanner` |
+| Opt-in `CanExecuteOn` & `CanAssumePrincipal` path-qualification rule engine (7 rules: `jupyter-auth-disabled`, `ray-anonymous-jobs` + worker fan-out, `langflow-unauthenticated-exec`, `flowise-unauthenticated-exec`, `openwebui-auth-disabled`, `azure-exposed-client-secret`, `entra-sso-code-exec`) & `vantage_principals` scoping | `internal/rules`, `extension/rules`, `internal/config`, `internal/scanner` |
 | BloodHound CE API client, `v9.7.1` adapter validation gate, M0 Q5 two-step ZIP/chunked upload with parallel read-only Cypher pre-flight, schema registration, Tier-0-adjacent seed query, and saved-query import (`llmhound upload`) | `internal/bloodhound`, `cmd/llmhound`, `lab/scripts/run-m3-gate.sh` |
-| Shipped BloodHound CE saved queries (`P1`–`P10`, `I1`–`I7`) and generator | `internal/savedsearch`, `extension/saved_searches/`, `tools/gensearches` |
+| Shipped BloodHound CE saved queries (`P1`–`P12`, `I1`–`I7`) and generator | `internal/savedsearch`, `extension/saved_searches/`, `tools/gensearches` |
 | Attack-path-first compact graph emission (`attack-path` default vs `full`) and compact JSON formatting | `internal/emitter`, `internal/config` |
 
 **Specified, not yet built**

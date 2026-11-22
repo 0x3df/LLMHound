@@ -34,9 +34,11 @@ const (
 
 // Finding describes a redacted secret location without retaining its value.
 type Finding struct {
-	Type     string `json:"type"`
-	Location string `json:"location,omitempty"`
-	Line     int    `json:"line,omitempty"`
+	Type          string `json:"type"`
+	Location      string `json:"location,omitempty"`
+	Line          int    `json:"line,omitempty"`
+	PrincipalKind string `json:"principal_kind,omitempty"`
+	PrincipalID   string `json:"principal_id,omitempty"`
 }
 
 // Redactor replaces secret spans in a content body before persistence (D4).

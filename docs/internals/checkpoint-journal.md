@@ -1,17 +1,16 @@
 # Checkpoint Journal Reference
 
-> **Status: M2a checkpoint journal implemented.** Companion to
-> [design](../01-design.md)
+> **Status: implemented (`internal/checkpoint`, wired to `llmhound scan` and `llmhound resume`).**
+> Companion to [design](../01-design.md)
 > and [graph model](../02-graph-model.md).
-> Implemented in `internal/checkpoint`.
 
 The checkpoint journal is an append-only JSON Lines stream (`.journal.jsonl`)
 consumed by collectors during scanning to incrementally record targets,
 graph nodes, edges, access evidence, and sidecar records.
 
 The journal serves as the crash-resilience and resume foundation for LLMHound:
-interrupted scans can resume without rescanning completed work, while preserving
-exact original observation provenance. Full CLI resume commands belong to M3.
+interrupted scans can resume via `llmhound resume` without rescanning completed
+work, while preserving exact original observation provenance.
 
 ## Collector Journal Interface
 
@@ -87,8 +86,9 @@ rather than refreshing stale evidence as newly observed:
 
 `checkpoint.Replay(r io.Reader, opts ...Option)` reconstructs the accumulated scan `*State`:
 
-- **Deterministic Ordering**: Nodes, edges, and evidence records are replayed in deterministic order
-  with duplicate deduplication (by Node ID, Edge signature `kind:start:end`, and Evidence ID).
+- **Deterministic Ordering**: Nodes, edges, and evidence records are replayed in deterministic order;
+  duplicate node IDs or edge signatures supersede prior partial/stale observations with the newer
+  record, while keeping any unreplaced properties.
 - **Domain Validation**: Replayed nodes, edges, and references are reconstituted through domain constructors
   (`graph.NewNode`, `graph.NewObservedAtEdge`, `graph.NewTopologyEdge`),
   validating kind transitions and non-traversability rules.
@@ -99,7 +99,7 @@ rather than refreshing stale evidence as newly observed:
   coverage, a nil observation, or a surface-less record never count, and an explicit status never overrides
   observed coverage. `State.IsCompleted(target, surface)` reports this per surface; `State.CompletedTargets()`
   means only "every recorded surface is completed". The journal records what happened and cannot attest
-  surfaces that were never recorded, so the M3 resume command must derive the expected surface set from
-  config/targets and check `IsCompleted` per surface instead of skipping targets via `CompletedTargets()`.
+  surfaces that were never recorded, so `llmhound resume` derives the expected surface set from
+  config/targets and checks `IsCompleted` per surface instead of skipping targets via `CompletedTargets()`.
 - **Crash Recovery**: If a scan process terminates abruptly mid-write, the incomplete trailing line at EOF
   is detected as `*TruncatedEntryError`. Replay preserves all successfully committed records prior to the crash.

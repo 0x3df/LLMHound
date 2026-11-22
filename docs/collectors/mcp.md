@@ -1,6 +1,6 @@
 # MCP collector
 
-> **Status: M2a + D3 + D4 MCP collector implemented.** Anonymous, read-only enumeration of
+> **Status: Implemented — anonymous, read-only, bounded.** Enumeration of
 > Model Context Protocol servers over network transports. Package: `internal/collectors/mcp`.
 > Contract: the MCP row of the [capability matrix](../03-collector-capabilities.md).
 

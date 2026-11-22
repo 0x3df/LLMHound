@@ -34,8 +34,9 @@
   specific AD edge.
 - **Shipped form.** The shipped files differ from the readable examples below: no
   `NOT h:NetworkEndpoint` host filter is needed because the `ObservedAt` pattern predicate
-  and an unlabeled `shortestPath` endpoint work for any native host kind, and P2's start is
-  the `<START_OBJECTID>` placeholder. See `extension/saved_searches/README.md`.
+  and an unlabeled `shortestPath` endpoint work for any native host kind, P2's start is
+  the `<START_OBJECTID>` placeholder, and P8's timestamp filter uses `<CUTOFF_ISO8601>`.
+  See `extension/saved_searches/README.md`.
 - **Query shapes that work on CE 9.7.1.** (R2) `shortestPath` endpoints must be
   inline in the pattern with the filter in a trailing `WHERE`; endpoints bound by
   an earlier `MATCH` fail with HTTP 500. To require a service on the target host,
@@ -139,7 +140,9 @@ RETURN m, t, h
 ```
 
 `capability_hint` is a heuristic over advertised descriptions (`declared`); it
-prioritizes review, it is not evidence of behavior.
+prioritizes review, it is not evidence of behavior. (*Note: `MCPTool.capability_hint`
+is specified in the schema and query `P7`, and is not yet populated by
+`internal/collectors/mcp`, so `P7` returns empty until a future update adds the classifier.*)
 
 ### P8. AI hosts with an exposed secret, on a path
 

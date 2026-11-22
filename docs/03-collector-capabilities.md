@@ -9,7 +9,7 @@ against official product/protocol documentation and recorded in collector tests.
 Live CLI coverage vs package-only tests: [scan coverage](internals/scan-coverage.md);
 per-collector behavior: [`collectors/`](collectors/).
 Default-on, bounded content-tier reads (Ollama, Jupyter, MCP, Qdrant, A2A, LiteLLM,
-MLflow, Open WebUI, Ray, Langflow, Flowise, ChromaDB) are
+MLflow, Open WebUI, LangServe, Ray, Langflow, Flowise, ChromaDB) are
 implemented and isolated in `<prefix>.content.jsonl` (mode `0600`);
 high-precision secret detection over those bodies is implemented in
 `internal/secrets` (`private_key`, `github_token`, `aws_access_key`; see the
@@ -88,9 +88,9 @@ deployment; denied checks remain denied, not a reason to authenticate.
 | MLflow | Reported server identity/version; experiment and registered-model metadata; model versions, stages/aliases where supported, and sanitized artifact-store references | Registry model version is separate from MLflow version. Artifact listings are inventory; small text artifacts (MLmodel, requirements, parameters) are content-tier reads; model weights are never fetched. |
 | Jupyter | Reported server/API metadata; authentication outcomes; session metadata and contents listings without file bodies | API version does not imply a particular server/package version. Non-binary notebook and file bodies are read by default (`jupyter_file_content`, content tier) into `.content.jsonl` within `content.*` bounds. |
 | Open WebUI | Reported application identity/version; model inventory and explicitly exposed backend references | Application version is distinct from Ollama or other backends. Configuration is a content-tier read. |
-| LangServe | Fingerprint, exposed route/schema metadata and runnable descriptions | An OpenAPI document's application/API version is not automatically the LangServe package version. Bound schemas and avoid treating examples as observed results. |
+| LangServe | Fingerprint, exposed route/schema metadata and runnable descriptions | An OpenAPI document's application/API version is not automatically the LangServe package version. Bound schemas (`langserve_schemas`) and capture JSON schema bodies into `.content.jsonl`; avoid treating examples as observed results. |
 
-### M2c long-tail surfaces
+### Long-tail surfaces
 
 Same rules as above. All five long-tail collectors are implemented with per-surface
 operation inventories and fixtures.
@@ -109,28 +109,27 @@ The project exists to answer tier-0 pathing questions, so collectors must
 extract the facts that matter for them (the [min-max
 principle](02-graph-model.md#property-contract)). This table lists, per surface,
 what to classify beyond identity and version. Values are not evidence of
-exploitability; the **Rule candidate** column names surfaces that might later
-clear the [path-qualification bar](02-graph-model.md#path-qualification-traversable-edges).
-Every candidate needs official documentation, a version range, and fixtures
-first, and no rule is enabled by default.
+exploitability; the **Opt-in rule** column notes surfaces with a shipped rule under the
+[path-qualification bar](02-graph-model.md#path-qualification-traversable-edges).
+All rules are disabled by default and require explicit opt-in in `llmhound.yaml`.
 
-| Surface | Execution surface to classify | Other path-relevant facts | Rule candidate |
+| Surface | Execution surface to classify | Other path-relevant facts | Opt-in rule |
 |---|---|---|---|
-| MCP | `tool_invocation` (declared); per-tool `capability_hint` from names/schemas/annotations | Transport and auth model, OAuth authorization-server references, resource URI schemes, whether tools list anonymously | No (advertisement is not evidence) |
+| MCP | `tool_invocation` (declared); per-tool `capability_hint` (planned) | Transport and auth model, OAuth authorization-server references, resource URI schemes, whether tools list anonymously | No (advertisement is not evidence) |
 | A2A | `tool_invocation` (declared) from skills/interfaces | Advertised security schemes, linked agents and interfaces (recorded, not followed) | No |
 | Ollama | `model_mutation` (pull/delete exposed anonymously is not host execution) | Model catalog, digests, bind/exposure hints, version | No |
 | vLLM | none expected | Served models, aliases, version | No |
 | LiteLLM | `workflow_exec` only if exposed | Backend/provider references (redacted), key-management endpoints listed in the OpenAPI document (never called), version | No |
 | Qdrant | none expected | Collections, counts, storage/snapshot endpoints present, API-key requirement | No |
 | MLflow | `model_mutation` | Artifact-store references, registry stages, version | No (revisit with documented semantics) |
-| Jupyter | `code_kernel`, `terminal` | Whether the API requires a token, kernel/session listings, contents listing, version | Yes: authentication disabled |
+| Jupyter | `code_kernel`, `terminal` | Whether the API requires a token, kernel/session listings, contents listing, version | Yes (`jupyter-auth-disabled`, opt-in) |
 | Open WebUI | none expected | Backend references, signup/auth settings exposed, version | No |
 | LangServe | `code_eval` only if documented for the route | Routes, schemas, playground exposure | No |
-| Ray dashboard (M2c) | `job_submit` | Cluster/node summary, job listing, version | Yes: anonymous job-submission API |
-| Langflow (M2c) | `workflow_exec`, `code_eval` | Auto-login posture, version | Yes: unauthenticated access on affected versions |
-| Flowise (M2c) | `workflow_exec` | Public-chatflow flags, version | Revisit |
-| ChromaDB (M2c) | none expected | Tenants/databases/collections, auth provider | No |
-| OpenAI-compatible (M2c) | none expected | Served models, identity headers | No |
+| Ray dashboard | `job_submit` | Cluster/node summary, job listing, version | Yes (`ray-anonymous-jobs`, opt-in) |
+| Langflow | `workflow_exec`, `code_eval` | Auto-login posture, version | Yes (`langflow-unauthenticated-exec`, opt-in) |
+| Flowise | `workflow_exec` | Public-chatflow flags, version | Revisit |
+| ChromaDB | none expected | Tenants/databases/collections, auth provider | No |
+| OpenAI-compatible | none expected | Served models, identity headers | No |
 
 ## Per-check result contract
 
@@ -181,5 +180,4 @@ checkpoints, payloads, sidecar, and content file, secret detectors proven
 against true-positive and look-alike-negative corpora with zero false
 positives, and unchanged service IDs after metadata changes.
 Golden exports must preserve check outcomes and evidence attribution even when a
-version is unknown. Matrix checks become M2a/M2b/M2c acceptance criteria, not
-claims of already-implemented support.
+version is unknown.

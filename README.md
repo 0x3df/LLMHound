@@ -1,129 +1,226 @@
-# LLMHound
-
-**Find the AI services on your network and add them to your BloodHound attack paths.**
-
-LLMHound is a scanner for LLM and agentic-AI infrastructure: MCP servers, Ollama, Jupyter,
-vector stores, model gateways. It runs from one machine, **only reads, never logs in**, and
-attaches what it finds to the hosts you already have in [BloodHound](https://bloodhound.specterops.io/).
-That lets the attack-path graph you built from SharpHound and AzureHound answer questions it
-could not before:
-
-> *Which hosts on a path to tier 0 are also running AI services, and which of those are open to anyone?*
-
-New here and short on time? Read the **[executive summary](docs/00-executive-summary.md)**.
-
-## Why it exists
-
-AI tooling gets deployed fast and often without authentication. An unauthenticated notebook
-server or agent-tool endpoint can be as good as remote code execution on its host, and those
-hosts may already sit one or two steps from tier 0. Today that is invisible to the graph.
-LLMHound adds the missing context to an analysis you already trust, rather than inventing a
-second inventory.
-
-## How it works
-
-```
- asset mapping (from your normalizer) ─┐
-                                       ├─► llmhound scan ─► graph + evidence files ─► BloodHound
- targets you are authorized to scan ───┘    (anonymous, read-only)                    (your existing
-                                                                                       AD/Azure graph)
+```text
+ _     _     __  __ _   _                       _ 
+| |   | |   |  \/  | | | | ___  _   _ _ __   __| |
+| |   | |   | |\/| | |_| |/ _ \| | | | '_ \ / _` |
+| |___| |___| |  | |  _  | (_) | |_| | | | | (_| |
+|_____|_____|_|  |_|_| |_|\___/ \__,_|_| |_|\__,_|
 ```
 
-1. **Discover.** Bounded probes for known AI-service ports, then HTTP fingerprinting to confirm what each is.
-2. **Enumerate.** A read-only collector per service records version, whether it demands a login, and what it lists (models, tools, notebooks, back-ends). Every check records an outcome and a reason; unknown stays unknown.
-3. **Attach.** Each service links to the existing BloodHound node your asset mapping names (a `Computer`, an Azure VM, ...). Targets the mapping does not cover become a `NetworkEndpoint` for your normalizer to attribute later. LLMHound never guesses which machine an address is.
-4. **Emit.** Files you load into BloodHound: a graph payload, a linking payload, an evidence log, and a crash-safe scan journal.
+**Map exposed LLM & agentic-AI infrastructure directly onto your BloodHound attack paths.**
 
-## Status
+`Go 1.27+` · `Apache-2.0` · `Anonymous & Read-Only` · `15 AI Surfaces` · `BloodHound CE v9.7.1`
 
-| | |
-|---|---|
-| **Works today** | Offline `targets` and `plan`; `scan` for **Jupyter, MCP, Ollama, A2A, vLLM, and Qdrant** with default-on bounded content collection (`.content.jsonl`) and high-precision secret detection for private keys, classic GitHub tokens, and AWS access-key pairs; checkpoint journal; graph and evidence output; shipped saved BloodHound queries (`extension/saved_searches/`); validated against **BloodHound CE 9.7.1** in a reproducible [lab](lab/README.md). |
-| **Planned** | The remaining four core surfaces in M2b (LiteLLM, MLflow, Open WebUI, LangServe) and the M2c long tail; opt-in attack-transition rules (M2d); `upload` and `resume` (M3). |
-| **Not yet done** | A scan of a real environment. Treat it as pre-release. |
+---
 
-See the [roadmap](docs/06-roadmap.md) for the ordered plan.
+LLMHound remotely inventories LLM gateways, MCP servers, A2A agents, model runners,
+notebooks, AI UIs, and vector databases from a single scanner host. It **only reads**,
+**never sends or guesses credentials**, and attaches discovered services to the hosts you
+already track in [BloodHound](https://bloodhound.specterops.io/) (from SharpHound and
+AzureHound) so the graph can answer:
 
-## What it collects
+> *Which hosts along an attack path to tier 0 are running AI services, and which of those are open to anyone?*
 
-Anonymous, bounded, and read-only. Nothing is invoked, no credentials are sent or guessed, and
-secrets are never stored.
+New to the project? Read the five-minute **[Executive Summary](docs/00-executive-summary.md)**.
 
-| Surface | Status | What v1 records |
-|---|---|---|
-| **Jupyter** | ✅ | Auth posture, API version, sessions and kernels, workspace listing, bounded text/notebook bodies (into `.content.jsonl`) |
-| **MCP** | ✅ | Server identity and protocol version, tools, resources, prompts, advertised auth servers, bounded text resource bodies (into `.content.jsonl`) |
-| **Ollama** | ✅ | Runtime version, model catalog with digests, running models, bounded `/api/show` prompts/modelfiles/templates (into `.content.jsonl`) |
-| **A2A** | ✅ | Public agent card metadata, advertised skills and capabilities, security scheme declarations, sanitized interface refs, bounded card capture (into `.content.jsonl`) |
-| **vLLM** | ✅ | Runtime version (when exposed), vLLM-verified served model catalog and aliases (`max_model_len`, `root`, `parent`) |
-| **Qdrant** | ✅ | Version and commit, collection inventory and vector schemas, snapshot listing, bounded payload-only point sampling (into `.content.jsonl`, no vectors) |
-| LiteLLM · MLflow · Open WebUI · LangServe | planned | See the [capability matrix](docs/03-collector-capabilities.md) |
-| OpenAI-compatible · Ray · Langflow · Flowise · ChromaDB | planned | Same |
+## Why LLMHound
+
+- **Shadow AI sits on existing attack paths.** Unauthenticated notebooks, model servers, and
+  agent-tool endpoints are routinely deployed on hosts only one or two hops from tier 0.
+- **Context, not a competing inventory.** LLMHound attaches typed service nodes to existing
+  BloodHound nodes (`Computer`, `AZVM`, Entra devices) via your asset mapping rather than
+  guessing host identity with reverse DNS or suffix rules.
+- **Safe to point at internal infrastructure.** Collection is strictly anonymous, bounded in
+  requests/bytes/pages, and verifies TLS certificates by default.
+
+## Architecture & pipeline
+
+```text
+  +--------------------+
+  |   Target Inputs    |  IPs, CIDRs, FQDNs, exclusions (llmhound targets)
+  +---------+----------+
+            |
+            v
+  +--------------------+     +-------------------------------------------+
+  |   llmhound plan    |     |        Optional Asset Mapping File        |
+  | (offline dry-run)  |     | target -> BloodHound object_id + kind     |
+  +---------+----------+     +---------------------+---------------------+
+            |                                      |
+            +------------------+-------------------+
+                               |
+                               v
+  +----------------------------------------------------------------------+
+  |                    llmhound scan  /  llmhound resume                 |
+  |  HTTP Fingerprinting -> 15 Read-Only Collectors -> Secret Redaction   |
+  +--+----------------+----------------+-------------------+-------------+
+     |                |                |                   |
+     v                v                v                   v
+  *-base.json    *-linking.json   *.evidence.jsonl    *.content.jsonl
+  (source_kind:  (sourceless      (per-check, TLS,    (0600 bounded
+   LLMHound)      native edges)    redirect log)       bodies; no Upload)
+     |                |
+     +-------+--------+
+             |
+             v
+  +----------------------------------------------------------------------+
+  |                          llmhound upload                             |
+  |  CE Gate (v9.7.1) -> Schema -> Base Subgraph -> Pre-Flight -> Links  |
+  +----------------------------------+-----------------------------------+
+                                     |
+                                     v
+                        BloodHound CE + 15 Saved Queries
+```
+
+1. **Discover.** Bounded HTTP fingerprinting across 15 service definitions (default ports
+   overridable via `--discovery-file`).
+2. **Enumerate.** Anonymous, allowlisted read-only checks per surface capture versions,
+   authentication posture, model/tool/flow inventories, backend references, TLS metadata,
+   and bounded content bodies (`.content.jsonl`, mode `0600`).
+3. **Redact, never store secrets.** High-precision detectors (`private_key`,
+   `github_token`, `aws_access_key`) flag `has_exposed_secret = true` and mask spans with
+   `[secret:<type>]`. Raw secret values are discarded at detection time.
+4. **Attach.** Mapped targets emit `ObservedAt` edges to existing native BloodHound nodes in a
+   separate **sourceless** linking payload; unmapped targets fall back to `NetworkEndpoint`.
+5. **Opt-in path rules (off by default).** Traversable `CanExecuteOn` edges are never
+   emitted unless explicitly enabled per rule (`jupyter-auth-disabled`,
+   `ray-anonymous-jobs`, `langflow-unauthenticated-exec`) with verified native host mapping
+   and assumed-reach principals.
+
+## Supported surfaces
+
+All 15 collectors are implemented and wired through `plan`, `scan`, and `resume`:
+
+| Surface | Default Port | What LLMHound collects (anonymous, read-only, bounded) | Reference |
+|---|---:|---|---|
+| **Jupyter** | `8888` | Auth posture, API/server version, kernels, sessions, workspace files, bounded text/notebook bodies | [`jupyter`](docs/collectors/jupyter.md) |
+| **MCP** | `8080` | Streamable HTTP & SSE server identity, protocol version, tools, resources, prompts, RFC 9728 OAuth metadata, bounded text resource bodies | [`mcp`](docs/collectors/mcp.md) |
+| **Ollama** | `11434` | Runtime version, model catalog & digests, running models, bounded `/api/show` modelfiles/prompts/templates | [`ollama`](docs/collectors/ollama.md) |
+| **A2A** | `8080` | Agent card metadata, skills, protocol/agent versions, security declarations, sanitized interface refs | [`a2a`](docs/collectors/a2a.md) |
+| **vLLM** | `8000` | Runtime version, vLLM-verified served model catalog & aliases (`max_model_len`, `root`, `parent`) | [`vllm`](docs/collectors/vllm.md) |
+| **Qdrant** | `6333` | Version/commit, collections, vector schemas, snapshots, bounded payload-only point sampling (no vectors) | [`qdrant`](docs/collectors/qdrant.md) |
+| **LiteLLM** | `4000` | OpenAPI fingerprint, gateway version, models, redacted provider/backend refs, bounded config bodies | [`litellm`](docs/collectors/litellm.md) |
+| **MLflow** | `5000` | Version, paginated experiments & registered models, stages/aliases, sanitized artifact-store refs, bounded small text artifacts | [`mlflow`](docs/collectors/mlflow.md) |
+| **Open WebUI** | `3000` | Version, auth/signup posture, exposed models, sanitized backend URLs, bounded config snapshots | [`open_webui`](docs/collectors/open_webui.md) |
+| **LangServe** | `8000` | OpenAPI runnable routes, playground exposure, bounded runnable input/output/config schemas | [`langserve`](docs/collectors/langserve.md) |
+| **OpenAI-compatible** | `8000` | Generic fallback (only when specific runtimes on the same host:port do not match): served models and server identity headers | [`openai_compatible`](docs/collectors/openai_compatible.md) |
+| **Ray Dashboard** | `8265` | Ray version/commit, cluster summary, anonymous job/actor listings, bounded job entrypoints & env capture | [`ray`](docs/collectors/ray.md) |
+| **Langflow** | `7860` | Version, auto-login posture, flow & component inventories, bounded flow bodies | [`langflow`](docs/collectors/langflow.md) |
+| **Flowise** | `3000` | Version, chatflow inventory, public-chatflow flags, bounded flow definitions | [`flowise`](docs/collectors/flowise.md) |
+| **ChromaDB** | `8000` | Version/heartbeat, tenant/database/collection inventory, item counts, bounded document sampling (no embeddings) | [`chromadb`](docs/collectors/chromadb.md) |
 
 ## Quick start
 
-Requires Go 1.27+.
+Requires **Go 1.27+** (pinned in [`go.mod`](go.mod)).
+
+### 1. Build and plan offline
 
 ```bash
 CGO_ENABLED=0 go build -o llmhound ./cmd/llmhound
-cp llmhound.example.yaml llmhound.yaml        # set scope, vantage_key, and your targets
+cp llmhound.example.yaml llmhound.yaml   # set scope, vantage_key, user_agent contact, targets
 
-./llmhound plan --config llmhound.yaml        # shows targets × checks; sends no traffic
-./llmhound scan --config llmhound.yaml \
-    --mapping-file assets.json \
-    --output-dir ./out --prefix scan1
+./llmhound targets --config llmhound.yaml # normalize + deduplicate targets (zero traffic)
+./llmhound plan    --config llmhound.yaml # inspect targets x checks before sending a packet
 ```
 
-The asset mapping comes from your normalization program: each entry names the existing
-BloodHound node (objectid and kind) for a target.
+### 2. Scan (with optional asset mapping)
+
+Supply an asset-mapping JSON/CSV file from your asset-inventory or normalization pipeline to
+link discovered services directly to existing BloodHound nodes:
 
 ```json
-[{"target": "ai1.corp.example", "object_id": "S-1-5-21-…-1103", "kind": "Computer"},
- {"target": "10.1.2.3",         "object_id": "/SUBSCRIPTIONS/…/VIRTUALMACHINES/AI-VM1", "kind": "AZVM"}]
+{
+  "source": "inventory-2026-11-21",
+  "mappings": [
+    {"target": "ai1.corp.example", "object_id": "S-1-5-21-...-1103", "kind": "Computer"},
+    {"target": "10.1.2.3",         "object_id": "/SUBSCRIPTIONS/.../VIRTUALMACHINES/AI-VM1", "kind": "AZVM"}
+  ]
+}
 ```
 
-`scan` writes, under `./out`:
+```bash
+./llmhound scan --config llmhound.yaml \
+  --mapping-file assets.json \
+  --output-dir ./out --prefix scan1
 
-| File | Contents |
-|---|---|
-| `scan1-base.json` (or `scan1.json` when nothing was mapped) | The LLMHound subgraph, tagged `source_kind: LLMHound` |
-| `scan1-linking.json` | Edges to your existing nodes, deliberately **without** `source_kind` |
-| `scan1.evidence.jsonl` | Per-check results, fingerprints, TLS, redirects, attachment decisions |
-| `scan1.content.jsonl` | Bounded content bodies (mode `0600`), written lazily when content is collected |
-| `scan1.journal.jsonl` | Crash-safe record of the scan |
+# Interrupted? Resume from the checkpoint journal without re-scanning completed surfaces:
+./llmhound resume --config llmhound.yaml \
+  --journal ./out/scan1.journal.jsonl \
+  --mapping-file assets.json \
+  --output-dir ./out --prefix scan1
+```
 
-**Loading into BloodHound today** is manual (`upload` is planned): ingest the base file first,
-then the linking file. Order and the missing `source_kind` matter: a payload that declares a
-source kind also tags every node it references, and a later source cleanup would then delete
-your Computers. The reasoning is in the [decision log](docs/07-decisions.md).
+### 3. Output files written under `./out`
 
-Full flag and config reference: [configuration guide](docs/guides/configuration.md).
+| File | Contents | Ship to BloodHound? |
+|---|---|---|
+| `scan1-base.json` (or `scan1.json` if unmapped) | LLMHound-owned subgraph (`source_kind: LLMHound`) | Step 1 |
+| `scan1-linking.json` | Edges to existing native nodes (**deliberately no** `source_kind`) | Step 2 (after pre-flight) |
+| `scan1.evidence.jsonl` | Per-check outcomes, fingerprints, TLS, redirects, correlation decisions | Audit sidecar (keep local) |
+| `scan1.content.jsonl` | Bounded content bodies with `[secret:<type>]` redaction (mode `0600`) | **Never** ship to BloodHound |
+| `scan1.journal.jsonl` | Append-only crash-safe checkpoint journal for `llmhound resume` | Keep for resume/audit |
+
+### 4. Upload to BloodHound CE (v9.7.1)
+
+`llmhound upload` runs the CE adapter validation gate first, registers the OpenGraph schema,
+uploads the base subgraph, runs a read-only Cypher existence pre-flight on any native
+targets (skipping missing or kindless stub nodes), uploads the sourceless linking payload,
+and imports all **15 saved queries (`P1`–`P8`, `I1`–`I7`)**:
+
+```bash
+export BLOODHOUND_URL="http://127.0.0.1:8080"
+export BLOODHOUND_TOKEN_ID="..."
+export BLOODHOUND_TOKEN_KEY="..."
+
+./llmhound upload --validate-only
+./llmhound upload --register-schema \
+  --base-file ./out/scan1-base.json \
+  --linking-file ./out/scan1-linking.json \
+  --import-queries
+```
+
+> **Why the two-step upload matters:** BloodHound CE tags every node referenced in a
+> `source_kind` payload and deletes tagged nodes during source cleanup; missing link
+> targets create empty stub nodes. Always upload via `llmhound upload` (or ingest `base`
+> first, verify targets, then ingest `linking` without `source_kind`).
+
+Full CLI flags, YAML schema, and mapping formats: [`configuration.md`](docs/guides/configuration.md).
 
 ## Responsible use
 
-LLMHound actively probes network services. **Run it only against networks and systems you own
-or are explicitly authorized to assess.** Use `plan` first, keep an exclusion list, and leave
-the default `User-Agent` (which carries your contact) in place so defenders can attribute the
-traffic. Scan output can still be sensitive (model catalogs, workspace file names, backend
-references): restrict it, set retention, and keep it out of widely readable systems. Tool and
-prompt descriptions come from the scanned service and are **untrusted input**, including to any
-LLM tooling downstream of the graph.
+LLMHound actively probes HTTP endpoints. **Run it only against networks and systems you own
+or are explicitly authorized to assess.** Always run `llmhound plan` first, maintain an
+`exclude` list, and set an identifiable `user_agent` carrying operator contact details (as
+shown in [`llmhound.example.yaml`](llmhound.example.yaml); the fallback default is
+`LLMHound/dev`). Treat all scraped tool/skill descriptions, banners, and `.content.jsonl`
+bodies as **untrusted attacker-controlled input**, and protect scan artifacts with strict
+file permissions and retention controls.
 
 ## Documentation
 
-Start at the **[documentation index](docs/README.md)**; it gives a reading order and a path by
-role. Highlights: [executive summary](docs/00-executive-summary.md) ·
-[design](docs/01-design.md) · [graph model](docs/02-graph-model.md) ·
-[roadmap](docs/06-roadmap.md) · [decision log](docs/07-decisions.md).
+Start at the **[documentation index](docs/README.md)** for a guided reading path:
+[Executive Summary](docs/00-executive-summary.md) ·
+[Design](docs/01-design.md) ·
+[Graph Model](docs/02-graph-model.md) ·
+[Collector Capabilities](docs/03-collector-capabilities.md) ·
+[Saved Queries](docs/04-saved-queries.md) ·
+[CE Compatibility](docs/05-ce-compatibility.md) ·
+[Roadmap](docs/06-roadmap.md) ·
+[Decision Log](docs/07-decisions.md).
 
-## Contributing
+## Contributing & verification
 
-Build, test, and workflow are in the [development guide](docs/guides/development.md); the short
-version is `go test -race ./...`, which also verifies the docs. AI agents should start with
-[AGENTS.md](AGENTS.md).
+See the [development guide](docs/guides/development.md) for the reproducible BloodHound CE
+Docker lab ([`lab/`](lab/README.md)), CI rules, and tests:
+
+```bash
+gofmt -l . && go vet ./... && go test -race ./...
+```
+
+Note: real-environment / production deployment testing has not yet been performed; all
+surface collectors and CE API workflows are verified against local `httptest` fixtures and
+the pinned Docker CE 9.7.1 lab. AI coding agents should read [`AGENTS.md`](AGENTS.md) first.
 
 ## Licensing
 
-Apache-2.0 ([LICENSE](LICENSE)). LLMHound is original code written from scratch; reference
-projects (AgentHound, ShareHound, OpenHound, Netwrix AIHound) informed its behavior only, and no
-code is derived from them. See the [provenance table](docs/01-design.md#provenance-and-licensing-posture).
+Apache-2.0 ([`LICENSE`](LICENSE)). LLMHound is 100% original Go code; reference projects
+(`AgentHound`, `ShareHound`, `OpenHound`, `Netwrix AIHound`) informed behavior and schema
+design only, with zero copied code. See [provenance](docs/01-design.md#provenance-and-licensing-posture).

@@ -45,8 +45,15 @@ content:
 secrets:
   detectors: {}
 
-# Attribution belongs to the normalization program. Point mapping_file at its
-# asset mapping (target to existing BloodHound objectid and kind). Without one,
-# every service attaches to a NetworkEndpoint for the normalizer to attribute.
+# Attribution belongs to an external asset-mapping or normalization pipeline.
+# Point mapping_file at your target -> existing BloodHound object_id + kind map.
+# Without one, services attach to a fallback NetworkEndpoint.
 correlation:
   mapping_file: ""
+
+# Opt-in traversable CanExecuteOn path-qualification rules (disabled by default).
+# Enabling a rule requires non-empty assumed_reach_principals and a verified native
+# mapping_file host (NetworkEndpoint targets always fail closed).
+path_qualification:
+  enabled_rules: []
+  assumed_reach_principals: []

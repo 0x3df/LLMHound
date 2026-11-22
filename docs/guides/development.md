@@ -5,7 +5,7 @@ Everything needed to build, test, and change LLMHound. For architecture read the
 
 ## Prerequisites
 
-- Go 1.27 or newer (the toolchain pinned in `go.mod`; developed with 1.27.1).
+- Go 1.27 or newer (pinned in `go.mod`).
 - Docker with the Compose plugin, only for the [BloodHound CE lab](../../lab/README.md).
 - No service credentials and no production network are needed for any test.
 
@@ -22,7 +22,7 @@ CI runs exactly these (plus `go build ./...`). A change is not done until all pa
 
 | Command | Purpose |
 |---|---|
-| `go test ./docs` | Docs integrity: links, anchors, the docs index, leftover conflict markers |
+| `go test ./docs` | Docs integrity: links, anchors, the docs index, `legacy/docs/` ARCHIVED banners, removed concepts, leftover conflict markers |
 | `go test ./internal/emitter` | Golden payloads; regenerate deliberately with `UPDATE_GOLDEN=1 go test ./internal/emitter -run TestGoldenEmission` and review the diff, since goldens define the emitted contract |
 | `go test ./extension` | The extension schema agrees with `internal/graph` kinds |
 
@@ -38,15 +38,16 @@ CI runs exactly these (plus `go build ./...`). A change is not done until all pa
 ## The CE lab
 
 [`lab/`](../../lab/README.md) is a pinned BloodHound CE 9.7.1 + PostgreSQL 18 lab that binds to
-loopback only and reproduces the [M0 findings](../05-ce-compatibility.md). Use it to verify any
-claim about CE behavior. `run-m0-checks.sh` covers Q1–Q10 and `run-r-checks.sh` covers the
-tier-0 follow-ups R1–R9 against the real extension schema. The adapter gate (M3) re-runs both
-against a candidate CE release.
+loopback only and reproduces the [CE compatibility checks](../05-ce-compatibility.md). Use it to
+verify any claim about CE behavior: `run-m0-checks.sh` covers Q1–Q10, `run-r-checks.sh` covers
+follow-ups R1–R9 against the real extension schema, `run-d2-checks.sh` tests saved searches, and
+`run-m3-gate.sh` verifies `llmhound upload` (`--validate-only`, schema, pre-flight, and queries).
 
 ```bash
 cd lab && ./scripts/lab-up.sh && ./scripts/run-m0-checks.sh   # see lab/README.md
 ./scripts/run-r-checks.sh                                    # R1–R9, ~40 min (ingest is slow)
 ./scripts/run-d2-checks.sh                                   # saved searches on emitted scan data
+./scripts/run-m3-gate.sh                                     # adapter gate, pre-flight & upload CLI
 ```
 
 ## Continuous integration

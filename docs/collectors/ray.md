@@ -1,6 +1,6 @@
 # Ray Dashboard collector
 
-> **Status: M2c Ray Dashboard collector implemented.** Companion to
+> **Status: Implemented — anonymous, read-only, bounded.** Companion to
 > [design](../01-design.md),
 > [graph model](../02-graph-model.md), and
 > [capability matrix](../03-collector-capabilities.md).
@@ -31,7 +31,7 @@ ever submitting or mutating jobs.
 |---|---|---|---|---|---|
 | `ray_version` | `ray_version` | `/api/version` | `GET` | Ray version, API version, and `ray_commit` (excluded from `anon_operations`) | `success`: Ray version JSON verified; `denied`: 401/403; `failed`: non-Ray JSON, 404, 429, or transport error |
 | `ray_cluster_status` | `ray_cluster_status` | `/api/cluster_status` | `GET` | Cluster node summary | `success`: cluster status enumerated anonymously; `denied`: 401/403; `failed`: 404, malformed, or transport error |
-| `ray_jobs` | `ray_jobs` | `/api/jobs/` | `GET` | Job listing metadata (also required check for D7 `ray-anonymous-jobs` rule) | `success`: jobs enumerated anonymously; `denied`: 401/403; `failed`: 404, malformed, or transport error |
+| `ray_jobs` | `ray_jobs` | `/api/jobs/` | `GET` | Job listing metadata (also required check for the opt-in `ray-anonymous-jobs` path-qualification rule) | `success`: jobs enumerated anonymously; `denied`: 401/403; `failed`: 404, malformed, or transport error |
 | `ray_actors` | `ray_actors` | `/api/v0/actors` | `GET` | Cluster actor count metadata | `success`: actors enumerated anonymously; `denied`: 401/403; `failed`: 404, malformed, or transport error |
 | `ray_job_content` | `ray_job_content` | `/api/jobs/` | `GET` | Bounded job `entrypoint` / `runtime_env` capture into `.content.jsonl` | `skipped`: disabled by `content.*` policy or no job payloads; `success`: >=1 job captured |
 

@@ -1,6 +1,6 @@
 # Jupyter Collector Reference
 
-> **Status: M2a + D3 + D4 Jupyter collector implemented.** Companion to
+> **Status: Implemented — anonymous, read-only, bounded.** Companion to
 > [design](../01-design.md),
 > [graph model](../02-graph-model.md), and
 > [capability matrix](../03-collector-capabilities.md).
@@ -101,7 +101,7 @@ records enumeration checks only (not content-tier reads). An HTML login page is 
 ## Evidence Sidecar Emission
 
 The collector emits structured evidence records into the `.evidence.jsonl` sidecar:
-- **`check_result`**: Per-check outcome (`success`, `denied`, `failed`), reason, and HTTP details.
+- **`check_result`**: Per-check outcome (`success`, `denied`, `failed`, `skipped`), reason, and HTTP details.
 - **`fingerprint`**: Reported API version, product ("Jupyter Server"), vendor ("Project Jupyter"),
   and observation method ("api_version").
 - **`correlation`**: Decision provenance linking target to an existing native BloodHound node or NetworkEndpoint fallback.

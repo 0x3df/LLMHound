@@ -1,6 +1,6 @@
 # A2A collector
 
-> **Status: M2b A2A collector implemented.** Companion to
+> **Status: Implemented — anonymous, read-only, bounded.** Companion to
 > [design](../01-design.md),
 > [graph model](../02-graph-model.md), and
 > [capability matrix](../03-collector-capabilities.md).

@@ -1,20 +1,20 @@
 # Scan coverage — live CLI vs unit tests
 
-Companion to the [design](../01-design.md) M2a vertical
-slice. Records which acceptance behaviors were exercised through the product
-CLI against disposable loopback fixtures versus covered only by package unit
-tests. Library-only collector tests do **not** prove CLI integration.
+Companion to the [design](../01-design.md). Records which acceptance behaviors
+were exercised through the product CLI against disposable loopback fixtures
+versus covered only by package unit tests. Library-only collector tests do
+**not** prove CLI integration.
 
-## Implemented in this slice
+## Implemented capabilities
 
 | Capability | Where |
 |---|---|
 | Data-driven discovery fingerprints (all 15 surfaces; `openai_compatible` fallback guarded per host:port) | `internal/discovery` |
-| Checkpoint journal writers, torn-tail repair + deterministic replay | `internal/checkpoint` |
+| Checkpoint journal writers, bounded torn-tail repair + deterministic replay | `internal/checkpoint` |
 | Offline `llmhound plan` (targets × allowlisted checks) | `cmd/llmhound`, `internal/scanner` |
 | `llmhound scan` & `llmhound resume` orchestration → journal → OpenGraph + evidence + content | `cmd/llmhound`, `internal/scanner` |
-| Bounded D3 content tier + `0600` `.content.jsonl` isolation | `internal/content`, collectors |
-| High-precision D4 secret detection (`private_key`, `github_token`, `aws_access_key`) + `[secret:<type>]` redaction | `internal/secrets`, `internal/content`, collectors |
+| Bounded content tier + `0600` `.content.jsonl` isolation | `internal/content`, collectors |
+| High-precision secret detection (`private_key`, `github_token`, `aws_access_key`) + `[secret:<type>]` redaction | `internal/secrets`, `internal/content`, collectors |
 | All 15 collectors (Jupyter, MCP, Ollama, A2A, vLLM, Qdrant, LiteLLM, MLflow, Open WebUI, LangServe, Generic OpenAI-compatible, Ray, Langflow, Flowise, ChromaDB) | `internal/collectors/*` |
 | Mapping-file attachment to an existing native node (any kind) with `mapping_source` + source_kind-free linking payload | `internal/correlate`, `internal/emitter`, scanner tests |
 | Opt-in `CanExecuteOn` path-qualification rule engine (`jupyter-auth-disabled`, `ray-anonymous-jobs`, `langflow-unauthenticated-exec`) | `internal/rules`, `extension/rules` |
@@ -56,11 +56,12 @@ Exercised by `cmd/llmhound` tests (`TestScanCLIEndToEndLoopbackFixtures`,
   (`TestScanner_MixedTargetsAndHonestCoverage`)
 - Attachment of a mapped target to a native node of a non-`Computer` kind (library path)
 
-## Remaining capability gaps (out of this bounded task)
+## Remaining / future work
 
 - Credential-driven enumeration (M4)
 - Live lab UI verification of `CanExecuteOn` rendering in BloodHound CE UI
-- TCP-first port sweep (scan probes each configured definition once with its
-  probe paths and matcher; unmatched or unreachable surfaces are journaled as
-  failed coverage without collector requests, matched surfaces are collected)
+- Live run against production / real-environment targets
+- TCP-first port sweep (scan currently probes each configured definition directly
+  over HTTP on its configured port; unmatched or unreachable surfaces are
+  journaled without collector requests)
 - ZIP-streaming emission for very large scans

@@ -1,14 +1,14 @@
 # Ollama Collector Reference
 
-> **Status: M2a + D3 + D4 Ollama collector implemented.** Companion to
+> **Status: Implemented — anonymous, read-only, bounded.** Companion to
 > [design](../01-design.md),
 > [capability matrix](../03-collector-capabilities.md), and
 > [graph model](../02-graph-model.md).
 > Implemented in `internal/collectors/ollama` and `internal/transport`.
 
 The Ollama collector remotely enumerates Ollama LLM inference server instances
-anonymously, safely, and read-only. It consumes the landed discovery/transport,
-graph/evidence output, and checkpoint journal contracts.
+anonymously, safely, and read-only using the shared HTTP transport, graph/evidence
+output, and checkpoint journal contracts.
 
 ## Collection Policy and Safety
 

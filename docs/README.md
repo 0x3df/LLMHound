@@ -7,7 +7,7 @@ others link rather than restate.
 
 | # | Document | Read it to learn | Audience |
 |---|---|---|---|
-| 0 | [Executive summary](00-executive-summary.md) | What this is, why it matters, status, risks, decisions needed | Everyone, five minutes |
+| 0 | [Executive summary](00-executive-summary.md) | What this is, why it matters, status, risks, pre-scan decisions | Everyone, five minutes |
 | 1 | [Design](01-design.md) | Architecture, scope, pipeline, scanning behavior, repo layout | Engineers, reviewers |
 | 2 | [Graph model](02-graph-model.md) | Node/edge kinds, identity, attachment, property contract, content and secrets, path qualification, implementation status | Engineers, query authors |
 | 3 | [Collector capabilities](03-collector-capabilities.md) | Per-surface allowlisted checks and the check-outcome contract | Collector authors |
@@ -28,7 +28,7 @@ others link rather than restate.
 
 ## Who should read what
 
-- **Executive or program owner:** 0, then 6.
+- **Security lead or program owner:** 0, then 6.
 - **Operator running a scan:** [README](../README.md), [configuration](guides/configuration.md), then 3.
 - **Analyst writing queries:** 2, 4, then 5.
 - **Engineer adding a collector:** 1, 2, 3, then [AGENTS.md](../AGENTS.md).

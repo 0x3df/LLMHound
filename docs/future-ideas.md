@@ -13,8 +13,8 @@ Revisit only through a separate explicit design decision.
   successful, complete listings; denied/failed/partial/truncated collection is
   never reported as removal or revocation. v1 already retains the needed data.
 - **CVE matching:** join observed products/versions to vulnerability findings
-  from Axonius or its underlying sources. This may belong entirely in the
-  owner's external mapping platform rather than LLMHound.
+  from an asset-inventory or vulnerability-management platform. This may belong
+  entirely in the external mapping platform rather than LLMHound.
 - **Exploit checks:** any active vulnerability validation needs separate
   authorization, safety review, scope, and operational controls.
 - **Tool invocation:** executing MCP tools or A2A skills is different from
@@ -30,7 +30,7 @@ Revisit only through a separate explicit design decision.
 
 ## Context worth retaining if revisited
 
-The external platform could correlate an Ollama endpoint with an Axonius asset,
+The external platform could correlate an Ollama endpoint with an inventory asset,
 a vulnerability finding, and an existing BloodHound Computer. Keep a shared CVE
 definition separate from a finding on one installation and from a derived attack
 transition. A host-level finding does not automatically apply to every instance.

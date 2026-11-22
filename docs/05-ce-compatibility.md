@@ -5,8 +5,8 @@
 > (fetched 2026-09-29/30 from bloodhound.specterops.io) informed what to test;
 > every answer records the request/response or Cypher evidence that produced
 > it. The tier-0 follow-ups R1–R9 were answered the same way on 2026-11-21 (see the last
-> section). M1's `extension/schema.json` and the adapter mapping are written from
-> these answers, and M3's adapter validation gate re-checks them.
+> section). `extension/schema.json` and the adapter mapping are written from
+> these answers, and `llmhound upload` (`internal/bloodhound.Client.ValidateAdapter`) re-checks them.
 
 ## Test environment
 
@@ -231,7 +231,7 @@ Observed against SharpHound-ingested Computers:
 - `samaccountname` = `LAB-WIN-02$` (not in the uppercased list) exact → edge
   created.
 
-**Consequence for correlation rule 2 (AD-suffix FQDN):** CE's property match
+**Consequence for correlation rule 2 (historical — retired AD-suffix matching; superseded by mapping-file-only attachment):** CE's property match
 is usable for correlation only with exact, correctly-cased match values.
 Because ingest upper-cases `name`, the collector must emit the upper-cased
 FQDN in the matcher. Silent edge-dropping on zero/ambiguous matches means
@@ -251,8 +251,8 @@ existing AD Computer node — verified by re-querying
 `match_method`/`match_value`/`confidence` properties. No new Computer node
 was created; no native identifier was touched.
 
-**Consequence:** correlation rules 1 (mapping file) and 3 (CE API lookup)
-emit `ObservedAt` edges with `match_by: id` on the Computer SID. This is the
+**Consequence (historical note — runtime CE lookup retired in favor of mapping-file attachment + pre-flight):** correlation rule 1 (mapping file)
+emits `ObservedAt` edges with `match_by: id` on the native node ID. This is the
 preferred, exact matching path (CE docs also recommend id matching over
 property matching).
 
@@ -370,9 +370,10 @@ the older single-step form; on 9.7.1 the flow above is what actually works.
    - Ingest is asynchronous with variable latency (~1 s idle → ~1 min for
      larger batches); uploads must poll jobs and verify per-file tasks.
 7. **Validated combination:** CE 9.7.1 + PostgreSQL 18.6 + `graph_driver=pg`.
-   The M3 adapter validation gate must re-run this suite
-   (`lab/scripts/run-m0-checks.sh`) against any candidate release before
-   declaring support, and extend it with the M1 schema.
+   Re-run `lab/scripts/run-m0-checks.sh`, `lab/scripts/run-r-checks.sh`, and
+   `lab/scripts/run-m3-gate.sh` against any candidate CE release before
+   declaring support; `llmhound upload` rejects unpinned CE versions unless
+   `--allow-unvalidated-ce` is passed.
 
 ## Unverified / open (not blocking M1)
 
@@ -421,8 +422,9 @@ ambiguous matches (Q6).
 - **Ingest is slow and not always reliable right after a reset.** An upload started
   while the pipeline is still settling after `clear-database` can end in job status `3`
   (canceled) and a job can sit in status `6` (ingesting) with an idle pipeline. 3,000
-  sourceless edges onto one Computer took 60 s in one run and 320 s in another. The M3
-  client must poll with a timeout, verify the result, and retry.
+  sourceless edges onto one Computer took 60 s in one run and 320 s in another.
+  `internal/bloodhound` polls with a timeout, inspects per-file completed tasks,
+  and retries canceled jobs.
 - **Saved-query import rejects duplicate names** (HTTP 400, `duplicate name for saved query`),
   and a graph reset does not remove saved queries. An installer deletes prior `LLMHound*`
   queries first.

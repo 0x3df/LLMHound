@@ -1,9 +1,9 @@
 # Configuration, plan, scan, resume, and upload
 
-**Implemented M1–M3:**
+**All 15 collectors and core CLI commands implemented:**
 Cobra help/version, strict YAML loading, explicit flag replacements, policy validation,
 offline `targets` preparation, offline `plan` (targets × allowlisted checks, no traffic),
-`scan` and `resume` across all **15 M2a/M2b/M2c collectors** (Jupyter, MCP, Ollama,
+`scan` and `resume` across all **15 supported collectors** (Jupyter, MCP, Ollama,
 A2A, vLLM, Qdrant, LiteLLM, MLflow, Open WebUI, LangServe, Generic OpenAI-compatible,
 Ray, Langflow, Flowise, and ChromaDB) through `internal/scanner`
 (checkpoint journal, torn-tail repair on `resume`, OpenGraph base + sourceless linking
@@ -17,7 +17,7 @@ CLI vs package coverage is recorded in [scan coverage](../internals/scan-coverag
 
 ## Build and use
 
-Requires Go 1.27 or newer; developed/tested with Go 1.27.1.
+Requires Go 1.27 or newer (pinned in `go.mod`).
 
 ```bash
 CGO_ENABLED=0 go build -o llmhound ./cmd/llmhound
@@ -72,7 +72,8 @@ when provided.
 most 128 bytes without surrounding whitespace or control characters. Different
 deployments/network contexts need different keys; do not use a per-run UUID.
 At least one target source is required. There are no environment-variable
-configuration overrides and no target-service credential fields.
+overrides for scan configuration (`llmhound.yaml`); only `llmhound upload` reads
+`BLOODHOUND_*` connection variables. Target-service credentials are never supported.
 
 | YAML field | Flag | Meaning |
 |---|---|---|
@@ -110,11 +111,11 @@ sidecar is emitted.
 
 ### Scan and plan commands
 
-- `llmhound plan`: prints prepared targets × embedded allowlisted checks for
-  Jupyter, MCP, Ollama, A2A, vLLM, and Qdrant. No DNS, no target connections, no artifacts.
-  Content checks (`ollama_show`, `jupyter_file_content`, `mcp_resources_read`,
-  `qdrant_points_sample`) are active by default and show a policy skip reason when disabled via
-  `--content=false` or `--content-disable`.
+- `llmhound plan`: prints prepared targets × embedded allowlisted checks for all 15
+  supported surfaces (Jupyter, MCP, Ollama, A2A, vLLM, Qdrant, LiteLLM, MLflow,
+  Open WebUI, LangServe, OpenAI-compatible, Ray, Langflow, Flowise, ChromaDB). No DNS,
+  no target connections, no artifacts. Content-tier checks are active by default and show
+  a policy skip reason when disabled via `--content=false` or `--content-disable`.
 - `llmhound scan`: discovers and enumerates those surfaces, writes
   `<prefix>.journal.jsonl`, `<prefix>.json` (or `<prefix>-base.json` and
   `<prefix>-linking.json` when native mapping correlation applies),
@@ -124,10 +125,6 @@ sidecar is emitted.
   port/path overrides that inherit builtin matchers). Only surfaces present in
   the active definitions are scanned, so `plan` and `scan` agree. See
   [scan coverage](../internals/scan-coverage.md) for probe and coverage behavior.
-  Known limitation: only the Jupyter, MCP, Ollama, A2A, vLLM, and Qdrant surfaces
-  have collectors today; a custom `--discovery-file` entry for any other surface is
-  honored by `plan` (listed with no checks) and probed by `scan`, but no collector
-  can enumerate it yet, so its coverage record stays at the probe result.
 
 ### Bounds
 
@@ -167,8 +164,8 @@ These values are parsed/validated. Scan collectors apply TLS, User-Agent, the
 - `user_agent` (`--user-agent`): default `LLMHound/dev`; nonblank printable ASCII
   up to 256 bytes. Add non-secret operator contact information if desired.
 - `content.enabled` (`--content`): default `true`; collect bounded existing
-  content (Ollama prompts/modelfiles/templates, Jupyter text/notebook bodies,
-  MCP text resources, A2A agent cards, Qdrant point payload samples) into
+  content (prompts, modelfiles, templates, configurations, notebook/flow bodies,
+  and bounded non-vector samples across all content-capable surfaces) into
   `<prefix>.content.jsonl` (mode `0600`) without leaking bodies into payloads,
   sidecars, checkpoints, or logs.
 - `content.max_item_bytes` (`--content-max-item-bytes`): default `262144`
@@ -180,9 +177,10 @@ These values are parsed/validated. Scan collectors apply TLS, User-Agent, the
 - `content.max_sample_points` (`--content-max-sample-points`): default `5`
   (range `1`–`1000`).
 - `content.surfaces` (`--content-disable`): per-surface enable map in YAML
-  (valid keys: capability-matrix surface names such as `ollama`, `jupyter`,
-  `mcp`, `a2a`, `qdrant`); `--content-disable` accepts comma-separated or repeated surface names
-  to disable content reads for those surfaces.
+  (valid keys: `jupyter`, `mcp`, `ollama`, `a2a`, `vllm`, `qdrant`, `litellm`,
+  `mlflow`, `open_webui`, `langserve`, `openai_compatible`, `ray`, `langflow`,
+  `flowise`, `chromadb`); `--content-disable` accepts comma-separated or repeated
+  surface names to disable content reads for those surfaces.
 - `secrets.detectors`: per-detector enable map over content bodies; every
   detector is enabled unless explicitly set to `false`. Valid keys:
   `private_key` (parse-verified PEM, unencrypted), `github_token`
@@ -194,11 +192,11 @@ These values are parsed/validated. Scan collectors apply TLS, User-Agent, the
   (`detected_exposures`), and flagged on the graph
   (`has_exposed_secret`, `secret_types`, `secret_last_confirmed`); the value
   is never stored.
-- `correlation.mapping_file` (`--mapping-file`): the asset mapping supplied by the
-  normalization program, which maps a target to an **existing BloodHound node
-  (objectid and kind)**. Without it, every service attaches to a
-  `NetworkEndpoint` for the normalizer to attribute later. LLMHound performs no
-  DNS, suffix matching, or CE lookups; attribution is not its job. See
+- `correlation.mapping_file` (`--mapping-file`): the asset mapping supplied by your
+  external asset-inventory or normalization pipeline, which maps a target to an
+  **existing BloodHound node (objectid and kind)**. Without it, every service attaches
+  to a `NetworkEndpoint` for external reconciliation. LLMHound performs no
+  DNS, suffix matching, or CE attribution lookups; attribution is not its job. See
   [Mapping file](#mapping-file) and
   [attachment](../02-graph-model.md#attachment-to-existing-nodes).
 
@@ -215,21 +213,24 @@ LLMHound's own kinds, the `LLMHound_` namespace, and malformed names are rejecte
  {"target": "10.1.2.3",         "object_id": "/SUBSCRIPTIONS/…/VIRTUALMACHINES/AI-VM1", "kind": "AZVM"}]
 ```
 
-Also accepted: `{"source": "normalizer-v2", "mappings": [...]}` (attaching `mapping_source`
+Also accepted: `{"source": "inventory-rev-2", "mappings": [...]}` (attaching `mapping_source`
 provenance onto emitted attachment edges and evidence records),
 `{"ai1.corp.example": "S-1-5-21-..."}` (kind defaults to `Computer`), and
-lines of `target,object_id[,kind]` with `#` comments. An entry is the normalizer's
-assertion; the destination's existence is re-verified at upload (`llmhound upload`), because an
-edge to a missing objectid makes CE create an empty stub node.
+lines of `target,object_id[,kind]` with `#` comments. Each entry asserts an existing
+node in BloodHound; `llmhound upload` re-verifies existence against CE before sending
+links because an edge to a missing objectid creates an empty stub node.
 
-- `path_qualification` (YAML only; disabled by default):
-  - `enabled_rules`: list of rule IDs to enable (`jupyter-auth-disabled`,
-    `ray-anonymous-jobs`, `langflow-unauthenticated-exec`). Must be empty unless
-    `assumed_reach_principals` is non-empty.
-  - `assumed_reach_principals`: list of `{object_id, kind}` existing BloodHound
-    principals (e.g. Domain Users `S-1-5-21-...-513`) used as `CanExecuteOn` start nodes.
-    Rules always fail closed when target is unmapped (`NetworkEndpoint`), version is
-    unknown/out-of-range, or required check evidence is missing.
+#### Path qualification (opt-in)
+
+Top-level YAML key `path_qualification` (disabled by default):
+
+- `enabled_rules`: list of rule IDs to enable (`jupyter-auth-disabled`,
+  `ray-anonymous-jobs`, `langflow-unauthenticated-exec`). Must be empty unless
+  `assumed_reach_principals` is non-empty.
+- `assumed_reach_principals`: list of `{object_id, kind}` existing BloodHound
+  principals (e.g. Domain Users `S-1-5-21-...-513`) used as `CanExecuteOn` start nodes.
+  Rules always fail closed when target is unmapped (`NetworkEndpoint`), version is
+  unknown/out-of-range, or required check evidence is missing.
 
 ### `llmhound resume` and `llmhound upload`
 

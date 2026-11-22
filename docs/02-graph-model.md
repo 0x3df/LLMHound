@@ -1,15 +1,9 @@
 # LLMHound graph model
 
-> **Status: implemented core + D3 content tier + D4 secret detection + M2b cohort 1 (A2A, vLLM, Qdrant), specified
-> remaining extensions.** Companion to the
-> [design](01-design.md). The graph, identity, mapping-file attachment, flat
-> access properties, shared property contract, default-on bounded content tier
-> (`internal/content`), high-precision secret detection (`internal/secrets`),
-> emitter, shipped saved queries, and the Jupyter, MCP, Ollama, A2A, vLLM, and
-> Qdrant collectors are implemented and tested. Remaining metadata properties,
-> path-qualification rules, remaining M2b/M2c surfaces, and two-step upload are
-> specified here but not built; the [Implementation status](#implementation-status)
-> table lists exactly which. CE behavior is recorded in
+> **Status: v1 graph model, 15 collectors, opt-in `CanExecuteOn` rules, `mapping_source` provenance, 15 saved queries, and two-step upload are implemented.**
+> Companion to [design](01-design.md). See the
+> [Implementation status](#implementation-status) table for remaining optional
+> property fields (`capability_hint`, `image_digest`, etc.) and CE behavior in
 > [05-ce-compatibility.md](05-ce-compatibility.md).
 
 This is the **canonical home** for node/edge kinds, identity, attachment to
@@ -20,8 +14,8 @@ LLMHound adds AI-infrastructure facts to a BloodHound graph that SharpHound,
 AzureHound, and similar collectors already built. The product question is
 tier-0 pathing: *from this asset, what is the shortest path to tier 0, and
 which paths cross hosts running AI services?* LLMHound supplies the AI-service
-side of that join. A separate normalization program owns attribution and
-cleanup.
+side of that join. Attribution and stale-data cleanup belong to your external
+asset-mapping / normalization pipeline.
 
 ## Naming contract
 
@@ -162,18 +156,17 @@ different network context under a different scope.
 
 LLMHound does not attribute targets itself. Attribution is an input:
 
-- **Asset mapping file** (supplied by the normalization program): target (IP,
-  FQDN, or `host:port`) → BloodHound `objectid` **and node kind**. The kind may
+- **Asset mapping file** (supplied by an external asset-mapping or normalization
+  pipeline): target (IP, FQDN, or `host:port`) → BloodHound `objectid` **and node kind**. The kind may
   be anything already in the graph: AD `Computer`, `AZVM`, an Entra device, and
   so on. For an Azure VM the `object_id` is the full ARM resource ID (CE stores
   an `AZVM` under its upper-cased ARM id; the VM GUID does not resolve and would
-  create a stub, [R3](05-ce-compatibility.md#follow-up-answers-for-the-tier-0-redesign-r1r9)). Each entry must point at a node that exists: the mapping is the
-  normalizer's assertion, and `upload` re-verifies it (below).
+  create a stub, [R3](05-ce-compatibility.md#follow-up-answers-for-the-tier-0-redesign-r1r9)). Each entry must point at a node that exists;
+  `llmhound upload` re-verifies existence against CE before sending links.
 - A mapped target gets `ObservedAt` (service → existing node) carrying
-  `match_method = mapping`, `match_value`, and `confidence = asserted` (the
-  mapping is the normalizer's assertion; `mapping_source`, a revision or ID
-  supplied with the file, is specified but not yet recorded). No
-  `NetworkEndpoint` is created.
+  `match_method = mapping`, `match_value`, `confidence = asserted`, and optional
+  `mapping_source` (the `source` revision string from a `{source, mappings}`
+  JSON mapping envelope). No `NetworkEndpoint` is created.
 - An unmapped target gets `ObservedAt` → `NetworkEndpoint`, plus the reason in
   the evidence sidecar. A target mapped to several objectids is treated as
   unmapped, with the candidates recorded; LLMHound never picks one.
@@ -181,22 +174,21 @@ LLMHound does not attribute targets itself. Attribution is an input:
   Service objectids never depend on it, native BloodHound IDs are never
   overwritten, and LLMHound never emits or modifies nodes of native kinds.
 - No suffix matching, reverse DNS, or CE-side attribution in LLMHound; those
-  belong to the normalizer. (Earlier versions matched AD suffixes against a
+  belong to the external mapping/normalization pipeline. (Earlier versions matched AD suffixes against a
   supplied inventory; that code is retired to [`legacy/`](../legacy/README.md).)
 - **Why existence matters (M0 Q5/Q6):** an edge to a missing `match_by: id`
   endpoint makes CE create an empty, kindless **stub node**, and a property
-  match with zero or several hits is silently dropped. So an attachment edge is
-  emitted only for a mapping entry whose destination is verified, and `upload`
-  runs a read-only existence pre-flight against CE before sending the linking
-  payload, skipping and reporting entries that fail (M3).
+  match with zero or several hits is silently dropped. So `llmhound upload`
+  runs a read-only Cypher existence pre-flight against CE before sending the
+  linking payload, skipping and reporting entries that fail (missing or kindless stubs).
 - **Upload shape (M0 Q5):** a payload that declares `metadata.source_kind`
   tags every node it references, including existing `Computer`s, and source
   cleanup then deletes them. So each scan uploads in two steps:
   (1) the LLMHound-owned subgraph with `source_kind: LLMHound` (including
   edges to `NetworkEndpoint`), then (2) a **linking payload without
-  `source_kind`** holding `ObservedAt` edges to existing native nodes.
-  Linking edges are therefore sourceless data, not removed by source cleanup;
-  the normalizer owns their lifecycle.
+  `source_kind`** holding `ObservedAt` (and any opt-in `CanExecuteOn`) edges to
+  existing native nodes. Linking edges are therefore sourceless data, not
+  removed by source cleanup; the external pipeline owns their lifecycle.
 
 ## Edges
 
@@ -249,14 +241,14 @@ work named in the [roadmap](06-roadmap.md):
 | Group | Properties |
 |---|---|
 | Endpoint *(built)* | `endpoint` (canonical URL), `endpoint_scheme`, `endpoint_host`, `endpoint_port`, `endpoint_base_path` (omitted for `/`) |
-| Product | `product`, `vendor` *(built)*; `software_version`, `software_version_raw`, `api_version`, `protocol_version`, `build_id`, `commit` (built where the surface reports them; `build_id` and `commit` supported by `graph.ServiceFacts`, `commit` emitted by Qdrant). Specified, not built: `image_digest`, and `*_source` / `*_basis` labels on each |
-| Auth *(built)* | `auth_observed` (`anonymous`/`denied`/`mixed`/`unknown`, `observed`), `anon_operations` (sorted array of succeeded `check_id`s only). `auth_advertised` (`none`/`required`/`mixed`, always `declared`, with `auth_advertised_basis`) is built in `graph.ServiceFacts` and emitted by A2A from agent-card security declarations. Jupyter also keeps the surface-specific `auth_required` |
-| Execution surface *(built)* | `exec_surface` (sorted array: `code_kernel`, `terminal`, `job_submit`, `code_eval`, `workflow_exec`, `tool_invocation`, `model_mutation`; only positively identified surfaces are listed, never `unknown`), `exec_surface_basis` (`observed`/`declared`/`inferred`). Emitted today: Jupyter `code_kernel` and Ollama `model_mutation` (both `inferred` from product identity, nothing executed), MCP and A2A `tool_invocation` (`declared`, when tools or skills/interfaces are advertised). It says a surface exists, not that anything was run |
-| Dependencies *(built)* | `backend_refs` (sanitized array), `store_refs` (sanitized array), `backend_refs_basis` (supported by `graph.ServiceFacts`; `backend_refs` emitted by A2A from declared agent/interface URLs) |
-| Inventory *(built)* | `model_count`, `tool_count`, `resource_count`, `collection_count`, `skill_count` (supported by `graph.ServiceFacts`; emitted by vLLM, Qdrant, and A2A) |
+| Product | `product`, `vendor` *(built)*; `software_version`, `software_version_raw`, `api_version`, `protocol_version`, `build_id`, `commit` (`build_id` and `commit` emitted where reported, e.g. Qdrant and Ray). Specified, not built: `image_digest`, and per-field `*_source` / `*_basis` labels |
+| Auth *(built)* | `auth_observed` (`anonymous`/`denied`/`mixed`/`unknown`, `observed`), `anon_operations` (sorted array of succeeded `check_id`s only). `auth_advertised` (`none`/`required`/`mixed`, `declared`, with `auth_advertised_basis`) is built in `graph.ServiceFacts` and emitted by A2A, Open WebUI, and Langflow. Jupyter also keeps `auth_required` |
+| Execution surface *(built)* | `exec_surface` (sorted array: `code_kernel`, `terminal`, `job_submit`, `code_eval`, `workflow_exec`, `tool_invocation`, `model_mutation`; only positively identified surfaces are listed, never `unknown`), `exec_surface_basis` (`observed`/`declared`/`inferred`). Emitted across Jupyter, Ollama, MCP, A2A, MLflow, Ray, Langflow, and Flowise where identified. It says a surface exists, not that anything was run |
+| Dependencies *(built)* | `backend_refs` (sanitized array), `store_refs` (sanitized array), `backend_refs_basis` (supported by `graph.ServiceFacts`; `backend_refs` emitted by A2A, LiteLLM, and Open WebUI; `store_refs` emitted by MLflow) |
+| Inventory *(built)* | `model_count`, `tool_count`, `resource_count`, `collection_count`, `skill_count` (supported by `graph.ServiceFacts`; emitted where enumerated, including vLLM, Qdrant, A2A, LiteLLM, MLflow, Open WebUI, OpenAI-compatible, and ChromaDB) |
 | Content *(built)* | `system_prompt_present`, `config_collected`, `content_bytes`, `content_truncated`, `has_exposed_secret` (`true` or unset), `secret_last_confirmed`, `secret_types` (sorted array of detector names); bodies and secret values never appear in the graph, see [Content and secrets](#content-and-secrets) |
 | TLS *(built)* | `tls_verification` (`ok`/`failed`/`insecure_override`/`n_a`; `n_a` for plain `http`, absent when no handshake was observed), `tls_failure_reason` (bounded; kept under `insecure_override` when the certificate would not have verified), `tls_leaf_sha256` (lower-case hex), `tls_issuer`, `tls_not_after`, `tls_negotiated_version` |
-| Provenance | `vantage_key`, `scan_id`, `evidence_id`, `coverage`, `observed_at` *(built)*; specified, not built: `schema_version`, `first_observed`, `coverage_reason`, `mapping_source` |
+| Provenance | `vantage_key`, `scan_id`, `evidence_id`, `coverage`, `observed_at`, `mapping_source` *(built)*; specified, not built: `schema_version`, `first_observed`, `coverage_reason` (sidecar/observation carry them; not flattened onto graph nodes) |
 
 Child resources carry the subset that applies (`anon_operations`, `*_basis`,
 `last_observed`, `scan_id`, plus resource-specific fields such as `digest`,
@@ -436,7 +428,7 @@ backlog, in the order the [roadmap](06-roadmap.md) schedules it.
 
 | Area | Specified behavior |
 |---|---|
-| Remaining property contract | Optional per-field version `*_source`/`*_basis` labels beyond shared `version_basis`/`build_id`/`commit`, `image_digest`, `schema_version`, `first_observed`, `coverage_reason` |
+| Remaining property contract | Optional per-field version `*_source`/`*_basis` labels beyond shared `version_basis`/`build_id`/`commit`, `image_digest`, `schema_version`, `first_observed`, `coverage_reason`, and `MCPTool.capability_hint` (referenced by saved query `P7`) |
 | Future milestones | Credentialed enumeration (M4); per-kind reference pages and community library listing (M5) |
 
 ## Implementation acceptance checks

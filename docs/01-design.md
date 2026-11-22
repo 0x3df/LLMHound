@@ -14,11 +14,11 @@ built, the [implementation status](02-graph-model.md#implementation-status) says
 LLMHound is a BloodHound OpenGraph collector that remotely maps LLM and
 agentic AI infrastructure (MCP servers, A2A agents, LLM gateways, inference
 servers, vector stores, model registries, notebooks, AI UIs) and **enriches an
-existing corporate attack-path graph**. SharpHound runs first, then
+existing BloodHound attack-path graph**. SharpHound runs first, then
 AzureHound and other collectors; LLMHound maps on top of the infrastructure
 those already identified.
 
-The question the program answers is: **from this asset, what is the shortest
+The question an attack-path graph answers is: **from this asset, what is the shortest
 attack path to tier 0?** LLMHound contributes context that improves that
 answer. Its acceptance questions:
 
@@ -58,8 +58,9 @@ decide which properties must be flat and queryable.
 - Host-local collection (agent configs, instruction files, keychains)
 - Authenticated enumeration (M4), including any use or validation of
   credentials found in content; credential guessing or default-credential tests
-- Target attribution, reverse DNS or FQDN guessing, CE-side lookups, stale-data
-  reconciliation and cleanup — owned by the separate normalization program
+- Target attribution, reverse DNS or FQDN guessing, CE-side attribution lookups,
+  stale-data reconciliation, and cleanup — owned by your external asset-mapping
+  or normalization pipeline (optional JSON/CSV mapping input)
 - Active exploit validation, tool invocation, inference requests
   (see [future ideas](future-ideas.md))
 - BloodHound Enterprise-only features
@@ -83,39 +84,41 @@ from the reference projects. LLMHound is Apache-2.0.
 
 ## Architecture
 
-Single static Go binary (`llmhound`) on a dedicated scanner VM, scheduled by the
-existing ingest process, run after SharpHound/AzureHound collection.
+Single static Go binary (`llmhound`) run from a scanner host or CI runner after
+SharpHound/AzureHound collection.
 
 ```
 llmhound.yaml (+ flag overrides): scope, vantage_key, targets/exclude, bounds,
   content/secrets settings, TLS mode, User-Agent, mapping_file,
-  assumed_reach_principals, rules
+  path_qualification.{enabled_rules, assumed_reach_principals}
 targets (CIDR ranges / targets-file, minus exclude)
-  → discovery: worker-pool TCP probe of AI-service ports
-      + HTTP path fingerprinting (data-driven definitions) → service typing
-  → per-service anonymous enumeration modules (MCP via official go-sdk, A2A,
-      Ollama, vLLM, LiteLLM, Qdrant, MLflow, Jupyter, Open WebUI, LangServe;
-      M2c: OpenAI-compatible, Ray, Langflow, Flowise, ChromaDB)
+  → discovery: bounded worker-pool HTTP fingerprinting across 15 service
+      definitions (data-driven ports, paths, and response matchers)
+  → per-service anonymous enumeration modules (Jupyter, MCP via go-sdk,
+      Ollama, A2A, vLLM, Qdrant, LiteLLM, MLflow, Open WebUI, LangServe,
+      generic OpenAI-compatible, Ray, Langflow, Flowise, ChromaDB)
   → attachment: mapping file → existing node objectid, else NetworkEndpoint
   → content tier + secret detection (bounded; secret values discarded)
   → classification: auth posture, execution surface, dependencies
   → deterministic graph (SHA-256 objectids) + optional path-qualification rules
-  → emission: OpenGraph payload (JSON; ZIP stream for large scans)
-      + evidence sidecar (.evidence.jsonl) + restricted content file (.content.jsonl)
-  → BloodHound CE: PUT /api/v2/extensions, job-based file upload
-      (/api/v2/file-upload/*), POST /api/v2/saved-queries/import
-  — checkpoint journal throughout, resumable
+  → emission: OpenGraph payload (JSON) + evidence sidecar (.evidence.jsonl)
+      + restricted content file (.content.jsonl, mode 0600)
+  → BloodHound CE (llmhound upload): adapter gate, PUT /api/v2/extensions,
+      two-step file upload (/api/v2/file-upload/* + Cypher existence pre-flight),
+      POST /api/v2/saved-queries/import
+  — checkpoint journal throughout, resumable via llmhound resume
 ```
 
 ### Pipeline stages
 
 1. **Targets** — parse CIDR ranges and/or a targets file (IPs, FQDNs); dedup;
-   remove `exclude` entries; optional port expansion.
-2. **Discovery** — bounded-concurrency TCP probes against known AI-service
-   ports (Ollama 11434, vLLM 8000, MLflow 5000, Jupyter 8888, Qdrant 6333,
-   Open WebUI 3000/8080, LiteLLM 4000, MCP/A2A over 80/443/8080 + others), then
-   HTTP path fingerprinting. Ports, paths, and matchers are data-driven
-   definitions embedded in the binary and overridable by file.
+   remove `exclude` entries.
+2. **Discovery** — bounded-concurrency HTTP path probes against each active
+   definition's default port (Jupyter `8888`, MCP/A2A `8080`, Ollama `11434`,
+   vLLM/LangServe/ChromaDB/OpenAI-compatible `8000`, Qdrant `6333`,
+   LiteLLM `4000`, MLflow `5000`, Open WebUI/Flowise `3000`, Ray `8265`,
+   Langflow `7860`). Definitions are embedded in the binary and overridable via
+   `--discovery-file`. (A separate TCP-first pre-sweep is not yet built.)
 3. **Enumeration** — per-surface allowlisted checks from the
    [capability matrix](03-collector-capabilities.md); each check
    records outcome and reason, separately from surface coverage.
@@ -141,34 +144,34 @@ LLMHound/
 ├── AGENTS.md                 # agent operating manual (CLAUDE.md imports it)
 ├── LICENSE                   # Apache-2.0
 ├── llmhound.example.yaml     # annotated example configuration
-├── cmd/llmhound/             # CLI entrypoint (cobra): targets, plan, scan, upload (stub)
+├── cmd/llmhound/             # CLI entrypoint (cobra): targets, plan, scan, resume, upload
 ├── internal/
+│   ├── bloodhound/           # BloodHound CE v9.7.1 API client, pre-flight, uploader, gate
 │   ├── config/               # llmhound.yaml loading, flag overrides, validation
 │   ├── targets/              # CIDR/file parsing, dedup, exclude
-│   ├── discovery/            # data-driven port probes + path fingerprints → service typing
+│   ├── discovery/            # data-driven HTTP probes + path fingerprints → service typing
 │   ├── transport/            # shared bounded, TLS-aware HTTP client
-│   ├── collectors/           # one package per surface: jupyter, mcp, ollama, a2a, vllm, qdrant (more in M2b/M2c)
+│   ├── collectors/           # one package per surface (all 15 core + long-tail surfaces)
 │   ├── content/              # bounded content-tier records, redaction hook, 0600 lazy writer
 │   ├── secrets/              # parse/checksum-verified secret detectors over content bodies
 │   ├── correlate/            # asset mapping → existing native node, else NetworkEndpoint
 │   ├── graph/                # identity, kinds, observations, edges, access summary
+│   ├── rules/                # opt-in CanExecuteOn path-qualification evaluator & schema helper
 │   ├── evidence/             # per-check results, evidence sidecar records and writer
 │   ├── emitter/              # OpenGraph base + linking payloads, evidence sidecar
 │   ├── checkpoint/           # scan journal + deterministic replay
 │   ├── savedsearch/          # Cypher query validation and saved-search generator helpers
-│   └── scanner/              # orchestration: discovery → collectors → journal → emission
+│   └── scanner/              # orchestration: discovery → collectors → journal → rules → emission
 ├── extension/
 │   ├── schema.json           # OpenGraph extension definition (LLMHound_* kinds)
-│   └── saved_searches/       # generated CE saved queries (P1, P2, P4, P6)
+│   ├── rules/                # embedded opt-in path-qualification rules (JSON specs)
+│   └── saved_searches/       # generated CE saved queries (P1–P8, I1–I7)
 ├── tools/
 │   └── gensearches/          # generates extension/saved_searches/ from internal/graph kinds
-├── lab/                      # pinned BloodHound CE lab + M0/D2 compatibility checks
+├── lab/                      # pinned BloodHound CE lab + M0/R/D2/M3 gate scripts
 ├── docs/                     # numbered core docs + guides/, collectors/, internals/
 └── legacy/                   # retired docs and code, kept for history (not built)
 ```
-
-Planned, not yet present: `internal/rules` and `extension/rules`
-(path-qualification, M2d), and `internal/bloodhound` (CE API client, M3).
 
 ## Graph model
 
@@ -200,13 +203,13 @@ design points:
   bodies with secret spans replaced by `[secret:<type>]`. Not shipped through
   the BloodHound ingest pipeline.
 - **Checkpoint journal** — `<prefix>.journal.jsonl`: append-only scan journal
-  used for deterministic replay and planned resume (M3).
-- **`llmhound.yaml`** — built keys: deployment `scope`, `vantage_key`,
+  used for deterministic replay and `llmhound resume`.
+- **`llmhound.yaml`** — keys: deployment `scope`, `vantage_key`,
   `targets`/`cidrs`/`targets_files` and `exclude`/`exclude_files`, `bounds`
   (concurrency/rate/timeout/size/page/item/redirect limits), `content` settings
   (global and per-surface enable, byte/item/sample caps), `secrets.detectors`
-  enables, `insecure` TLS mode, `user_agent`, and `correlation.mapping_file`.
-  Planned for M2d: `assumed_reach_principals` and enabled `rules`. Flags
+  enables, `insecure` TLS mode, `user_agent`, `correlation.mapping_file`, and
+  `path_qualification` (`enabled_rules` and `assumed_reach_principals`). Flags
   override file values; the effective policy is recorded with each scan. Missing
   required values (scope, vantage key) fail before any network activity.
 
@@ -241,14 +244,15 @@ properties.
 
 ## Ingest pipeline
 
-1. SharpHound/AzureHound collection and the normalizer's asset mapping run first.
-2. `llmhound scan --config llmhound.yaml` → payload + sidecar.
-3. `llmhound upload --server … --token-file …` (M3) registers the schema, then
-   uploads in **two steps** (M0 Q5): the LLMHound-owned subgraph with
-   `source_kind`, then a linking payload to existing native nodes **without**
-   it, after a read-only existence pre-flight (missing endpoints would create
-   stub nodes). It then imports saved queries. Or the existing ingest picks up
-   the emitted files.
+1. SharpHound/AzureHound collection and your external asset mapping run first.
+2. `llmhound scan --config llmhound.yaml` → payloads + sidecar (+ journal).
+3. `llmhound upload --url … --token-id … --token-key … --register-schema --base-file … --linking-file … --import-queries`
+   runs the CE adapter gate, registers the schema, uploads in **two steps**
+   (M0 Q5): the LLMHound-owned subgraph with `source_kind`, then a linking
+   payload to existing native nodes **without** `source_kind` after a read-only
+   Cypher existence pre-flight (skipping missing endpoints that would create
+   stub nodes), and imports the 15 saved queries. Or an external ingest pipeline
+   consumes the emitted files directly following the same two-step order.
 
 ### BloodHound adapter validation gate
 

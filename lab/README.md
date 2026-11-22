@@ -1,20 +1,19 @@
-# LLMHound M0 — BloodHound CE compatibility lab
+# LLMHound — BloodHound CE compatibility & integration lab
 
-A pinned, isolated BloodHound CE + PostgreSQL lab that answers the M0
-compatibility questions in
-[`docs/05-ce-compatibility.md`](../docs/05-ce-compatibility.md)
-with reproducible checks. The lab binds to loopback only, never touches any
+A pinned, isolated BloodHound CE + PostgreSQL lab that verifies the CE
+compatibility checks in [`docs/05-ce-compatibility.md`](../docs/05-ce-compatibility.md),
+tier-0 path queries, and the `llmhound upload` adapter gate with reproducible scripts.
+The lab binds to loopback only, never touches any
 other BloodHound server, and performs no network scanning of real targets.
-All fixtures (toy extension schema, toy payloads, synthetic AD data) are
+All fixtures (extension schemas, payloads, synthetic AD/Azure data) are
 original to this repository.
 
-> **The fixtures are a CE probe, not the product schema.** They were written for
-> the M0 spike and deliberately include shapes the product no longer emits (a
-> `CollectionVantage` node, access edges, property-matched endpoints) because
-> those were exactly what M0 tested. The shipping schema is
-> [`extension/schema.json`](../extension/schema.json). The adapter validation gate
-> (M3) re-runs these checks against a candidate CE release and extends them with the
-> real schema.
+> **M0 fixtures vs product schema.** The `fixtures/extension/llmhound-m0-schema.json`
+> and `fixtures/payloads/` files were written for the initial M0 CE probe and
+> deliberately test historical shapes the product no longer emits (`CollectionVantage`,
+> access edges, property-matched endpoints). The shipping schema is
+> [`extension/schema.json`](../extension/schema.json), and `run-r-checks.sh`,
+> `run-d2-checks.sh`, and `run-m3-gate.sh` test against the real schema and CLI.
 
 ## Pin
 
@@ -42,6 +41,7 @@ cd lab
 ./scripts/run-m0-checks.sh     # run all M0 question checks (~25 min; ingest is asynchronous)
 ./scripts/run-r-checks.sh      # tier-0 follow-ups R1–R9 with the real schema (~40 min)
 ./scripts/run-d2-checks.sh     # validate shipped saved searches against real scan output
+./scripts/run-m3-gate.sh       # run llmhound upload gate, schema, pre-flight, and query import
 ./scripts/lab-down.sh          # stop and remove ONLY this lab's resources
 ```
 
@@ -99,7 +99,8 @@ lab/
     ├── validate-fixtures.sh    # offline structural validation of all fixtures
     ├── run-m0-checks.sh        # the repeatable M0 check suite (Q1–Q10)
     ├── run-r-checks.sh         # tier-0 follow-ups R1–R9 (real schema, attack-path fixtures)
-    └── run-d2-checks.sh        # shipped saved searches on real emitted payloads
+    ├── run-d2-checks.sh        # shipped saved searches on real emitted payloads
+    └── run-m3-gate.sh          # builds llmhound and verifies the M3 upload gate against CE
 ```
 
 ## Notes

@@ -499,13 +499,23 @@ func OpenFile(path string, opts ...Option) (*FileJournal, error) {
 		return nil, fmt.Errorf("invalid journal header: %w", err)
 	}
 
-	fAppend, err := securefile.OpenFile(path, os.O_RDWR|os.O_APPEND)
+	// Repair through a separate read-write handle: on Windows a handle opened
+	// with O_APPEND has append-only access and cannot truncate a torn tail.
+	fRepair, err := securefile.OpenFile(path, os.O_RDWR)
+	if err != nil {
+		return nil, fmt.Errorf("open journal file for repair: %w", err)
+	}
+	if err := repairTornTail(fRepair); err != nil {
+		_ = fRepair.Close()
+		return nil, fmt.Errorf("repair journal tail: %w", err)
+	}
+	if err := fRepair.Close(); err != nil {
+		return nil, fmt.Errorf("close journal after repair: %w", err)
+	}
+
+	fAppend, err := securefile.OpenFile(path, os.O_WRONLY|os.O_APPEND)
 	if err != nil {
 		return nil, fmt.Errorf("open journal file for appending: %w", err)
-	}
-	if err := repairTornTail(fAppend); err != nil {
-		_ = fAppend.Close()
-		return nil, fmt.Errorf("repair journal tail: %w", err)
 	}
 
 	o := defaultOptions()
@@ -580,7 +590,8 @@ func repairTornTail(f *os.File) error {
 			return err
 		}
 		if json.Valid(bytes.TrimSpace(tail)) {
-			if _, err := f.Write([]byte{'\n'}); err != nil {
+			// Explicit offset: the repair handle is not in append mode.
+			if _, err := f.WriteAt([]byte{'\n'}, size); err != nil {
 				return err
 			}
 			return f.Sync()

@@ -515,3 +515,48 @@ func TestReplayNewerCompleteNodeSupersedesStalePartial(t *testing.T) {
 		t.Errorf("auth_observed = %v, want anonymous", got)
 	}
 }
+
+// A complete final record that only lacks its newline is kept: repair appends
+// the newline at the end of the file (never at offset 0) and later records
+// follow it.
+func TestOpenFileRepairsMissingFinalNewline(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "j.jsonl")
+	header := sampleHeader()
+	fj, err := checkpoint.CreateFile(path, header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	obs := sampleObservation(t, sampleVantage(t, header.DeploymentScope, header.VantageKey), "ev-1", semanticsTime)
+	recordSurface(t, fj, obs, "10.0.0.1", "ollama", graph.CoverageComplete)
+	_ = fj.Close()
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, raw[:len(raw)-1], 0o600); err != nil { // drop the final '\n'
+		t.Fatal(err)
+	}
+
+	fj, err = checkpoint.OpenFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recordSurface(t, fj, obs, "10.0.0.3", "ollama", graph.CoverageComplete)
+	_ = fj.Close()
+
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.HasPrefix(after, raw) {
+		t.Fatal("repair must not rewrite existing journal bytes")
+	}
+	state, err := checkpoint.ReplayFile(path)
+	if err != nil {
+		t.Fatalf("replay: %v", err)
+	}
+	if !state.IsCompleted("10.0.0.1", "ollama") || !state.IsCompleted("10.0.0.3", "ollama") {
+		t.Fatal("record before the repair and record after it must both replay")
+	}
+}

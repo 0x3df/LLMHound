@@ -1,9 +1,8 @@
 # Starter saved queries
 
-> **Status: P1, P2, P4 and P6 are built and validated** (`extension/saved_searches/`, generated;
-> `lab/scripts/run-d2-checks.sh`). The rest are planned. These queries ship in `extension/saved_searches/` in
-> SpecterOps Query Library format. Their shapes were validated on CE 9.7.1
-> ([R2](05-ce-compatibility.md#follow-up-answers-for-the-tier-0-redesign-r1r9));
+> **Status: All 15 queries (`P1`–`P8` and `I1`–`I7`) are implemented, generated** (`extension/saved_searches/`, via `tools/gensearches`),
+> validated for syntax and schema kinds, and importable via `llmhound upload --import-queries`. Core queries (`P1`, `P2`, `P4`, `P6`)
+> were additionally validated live against CE 9.7.1 (`lab/scripts/run-d2-checks.sh`, [R2](05-ce-compatibility.md#follow-up-answers-for-the-tier-0-redesign-r1r9));
 > kind and property names follow the [graph model](02-graph-model.md) and the
 > [M0 findings](05-ce-compatibility.md). Every property a query filters on is a
 > flat graph property, not sidecar-only data.

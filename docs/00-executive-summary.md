@@ -81,8 +81,8 @@ anyone?*
 
 | | |
 |---|---|
-| **Built and tested** | The core engine; end-to-end collection for **6 of the 10 planned core services** (Jupyter, MCP servers, Ollama, A2A agents, vLLM, and Qdrant); shared service properties (D1); default-on, bounded content collection into restricted `.content.jsonl` (D3); high-precision `private_key`, `github_token`, and `aws_access_key` secret detection (D4); a crash-safe scan journal (the resume command itself is planned); graph and evidence output; shipped saved queries (`P1`, `P2`, `P4`, `P6`) validated against **BloodHound CE 9.7.1** in a reproducible lab (D2). |
-| **Not built yet** | The other 4 core services in M2b (LiteLLM, MLflow, Open WebUI, LangServe) and long tail (M2c); the planned attack-transition rules (M2d); the built-in uploader and `resume` command (M3). |
+| **Built and tested** | The core engine; end-to-end collection across **all 15 planned services** (Jupyter, MCP, Ollama, A2A, vLLM, Qdrant, LiteLLM, MLflow, Open WebUI, LangServe, Generic OpenAI-compatible, Ray, Langflow, Flowise, and ChromaDB); shared service properties (D1); default-on, bounded content collection into restricted `.content.jsonl` (D3); high-precision `private_key`, `github_token`, and `aws_access_key` secret detection (D4); opt-in `CanExecuteOn` path-qualification rules (D7); crash-safe scan journal and `llmhound resume`, mapping provenance (`mapping_source`), the `llmhound upload` BloodHound CE client with read-only existence pre-flight and adapter validation gate, and all **15 shipped saved queries** (`P1`–`P8`, `I1`–`I7`) against **BloodHound CE 9.7.1** (D2, D8). |
+| **Not built yet** | Credentialed enumeration (M4) and per-kind node/edge reference docs (M5). |
 | **Not yet done** | A scan of a real environment. Nothing here has run against production. |
 
 The [roadmap](06-roadmap.md) sequences the remaining work; it deliberately gives order and

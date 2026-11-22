@@ -380,21 +380,22 @@ only by a rule. The service remains the evidence node; the edge is the
 transition. Execution identity is not guessed: an edge to the host means "code
 execution on this host as the service's account", which may not be privileged.
 
-**Candidate rules** (unvalidated; each needs official documentation, a
-product/version range, and fixtures before it exists): Jupyter with
-authentication disabled; Ray dashboard with anonymous job-submission API;
-Langflow with unauthenticated/auto-login access on affected versions.
+**Implemented rules** (disabled by default in `llmhound.yaml`; require `path_qualification.enabled_rules`
+and non-empty `path_qualification.assumed_reach_principals` + verified native host mapping):
+`jupyter-auth-disabled` (Jupyter with authentication disabled), `ray-anonymous-jobs` (Ray
+dashboard with anonymous jobs API), and `langflow-unauthenticated-exec` (Langflow with
+anonymous auto-login / open flow access).
 
 **Do not qualify:** advertised MCP/A2A tools or skills, anonymous model
 listing, vector-store or registry inventory, any state based on a login page, a
 TCP probe, a version banner, or a shared certificate. Qualification never
 depends on FQDN matching or `RunsOn`.
 
-Rules live in `extension/rules/` as data with their own tests. A rule that
-cannot be validated against the pinned CE does not ship. M0 Q4 confirmed that
-pathfinding honors `is_traversable: false` and that raw search still returns
-non-traversable edges; R5 confirmed that an `is_traversable: true` extension edge is honored by
-`only_traversable` pathfinding through the API ([R5](05-ce-compatibility.md#follow-up-answers-for-the-tier-0-redesign-r1r9)); UI rendering is
+Rules live in `extension/rules/` as data, evaluated by `internal/rules`, with their own
+tests. M0 Q4 confirmed that pathfinding honors `is_traversable: false` and that raw
+search still returns non-traversable edges; R5 confirmed that an `is_traversable: true`
+extension edge is honored by `only_traversable` pathfinding through the API
+([R5](05-ce-compatibility.md#follow-up-answers-for-the-tier-0-redesign-r1r9)); UI rendering is
 not yet checked.
 
 ## Source ownership and lifecycle
@@ -418,26 +419,25 @@ backlog, in the order the [roadmap](06-roadmap.md) schedules it.
 
 | Area | Where |
 |---|---|
-| Scoped identity, canonical endpoints, kind mapping (`LLMHound_<Kind>`), all-non-traversable edges | `internal/graph` |
-| Mapping-file attachment to an existing native node of any kind; `NetworkEndpoint` fallback; nil resolver is an empty mapping | `internal/correlate` |
+| Scoped identity, canonical endpoints, kind mapping (`LLMHound_<Kind>`), non-traversable default edges, opt-in `CanExecuteOn` edge | `internal/graph` |
+| Mapping-file attachment to an existing native node of any kind (with `mapping_source` provenance); `NetworkEndpoint` fallback; nil resolver is an empty mapping | `internal/correlate` |
 | Shared service property contract (`graph.ServiceFacts`: endpoint, access, `auth_advertised`, `exec_surface`, `build_id`/`commit`, dependencies, inventory counts, content summary, TLS) | `internal/graph/serviceprops.go`, all collectors |
 | Anonymous access as flat properties (`auth_observed`, `anon_operations`, `vantage_key`) derived from operation evidence | `internal/graph/access.go`, collectors |
-| Default-on, bounded content tier (`content.*` config, binary exclusion, 0600 `.content.jsonl` isolation) across Ollama, Jupyter, MCP, A2A, and Qdrant | `internal/content`, `internal/config`, collectors, `internal/scanner` |
+| Default-on, bounded content tier (`content.*` config, binary exclusion, 0600 `.content.jsonl` isolation) across content-capable surfaces | `internal/content`, `internal/config`, collectors, `internal/scanner` |
 | High-precision secret detection over content bodies (`private_key` parse-verified PEM, `github_token` CRC32-verified, `aws_access_key` id+secret pair), `[secret:<type>]` redaction, `detected_exposures` sidecar details | `internal/secrets`, `internal/content`, collectors, `internal/scanner` |
 | Base payload (`source_kind`) and sourceless linking payload; evidence sidecar | `internal/emitter`, `internal/evidence` |
-| Checkpoint journal and deterministic replay | `internal/checkpoint` |
-| Jupyter, MCP, Ollama, A2A, vLLM, and Qdrant collectors; discovery; `plan` and `scan` | `internal/collectors`, `internal/discovery`, `internal/scanner` |
-| Shipped BloodHound CE saved queries (`P1`, `P2`, `P4`, `P6`) and generator | `internal/savedsearch`, `extension/saved_searches/`, `tools/gensearches` |
+| Checkpoint journal, deterministic replay, torn-tail repair, and `llmhound resume` | `internal/checkpoint`, `internal/scanner`, `cmd/llmhound` |
+| All 15 collectors (Jupyter, MCP, Ollama, A2A, vLLM, Qdrant, LiteLLM, MLflow, Open WebUI, LangServe, Generic OpenAI-compatible, Ray, Langflow, Flowise, ChromaDB); discovery; `plan` and `scan` | `internal/collectors`, `internal/discovery`, `internal/scanner` |
+| Opt-in `CanExecuteOn` path-qualification rule engine (`jupyter-auth-disabled`, `ray-anonymous-jobs`, `langflow-unauthenticated-exec`) | `internal/rules`, `extension/rules`, `internal/config`, `internal/scanner` |
+| BloodHound CE API client, `v9.7.1` adapter validation gate, M0 Q5 two-step upload with read-only Cypher pre-flight, schema registration, and saved-query import (`llmhound upload`) | `internal/bloodhound`, `cmd/llmhound`, `lab/scripts/run-m3-gate.sh` |
+| Shipped BloodHound CE saved queries (`P1`–`P8`, `I1`–`I7`) and generator | `internal/savedsearch`, `extension/saved_searches/`, `tools/gensearches` |
 
 **Specified, not yet built**
 
 | Area | Specified behavior |
 |---|---|
-| Remaining property contract | The fields of the [property contract](#property-contract) not yet populated: `image_digest`, `*_source`/`*_basis` per-field version provenance labels, `schema_version`, `first_observed`, `coverage_reason` |
-| Path qualification | Rule-gated, opt-in `CanExecuteOn` edges (M2d); `EdgeKind.IsTraversable()` is always false today |
-| Upload | Two-step upload with an existence pre-flight (M3); `upload` is a not-implemented stub, though the emitter already splits base and linking payloads |
-| Mapping provenance | `mapping_source` on attachment edges |
-| Surfaces | LiteLLM, MLflow, Open WebUI, LangServe (remaining M2b); long tail (M2c) |
+| Remaining property contract | Optional per-field version `*_source`/`*_basis` labels beyond shared `version_basis`/`build_id`/`commit`, `image_digest`, `schema_version`, `first_observed`, `coverage_reason` |
+| Future milestones | Credentialed enumeration (M4); per-kind reference pages and community library listing (M5) |
 
 ## Implementation acceptance checks
 

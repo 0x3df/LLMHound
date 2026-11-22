@@ -1,16 +1,15 @@
 # Collector capability matrix
 
-**Status: the Jupyter, MCP, Ollama, A2A, vLLM, and Qdrant collectors are implemented and wired
-through `llmhound plan` / `llmhound scan` (`internal/scanner`); the other
-surfaces are specified here and scheduled in the [roadmap](06-roadmap.md).**
+**Status: all 15 M2a/M2b/M2c collectors (Jupyter, MCP, Ollama, A2A, vLLM, Qdrant, LiteLLM, MLflow, Open WebUI, LangServe, Generic OpenAI-compatible, Ray, Langflow, Flowise, and ChromaDB) are implemented and wired
+through `llmhound plan` / `llmhound scan` / `llmhound resume` (`internal/scanner`).**
 This is the v1 collection contract for the [design](01-design.md) and
 [graph model](02-graph-model.md), not a claim that every product release exposes
 every field anonymously. Exact operations and supported releases must be verified
 against official product/protocol documentation and recorded in collector tests.
 Live CLI coverage vs package-only tests: [scan coverage](internals/scan-coverage.md);
 per-collector behavior: [`collectors/`](collectors/).
-Default-on, bounded content-tier reads (`ollama_show`, `jupyter_file_content`,
-`mcp_resources_read`, `qdrant_points_sample`, and A2A agent-card capture) are
+Default-on, bounded content-tier reads (Ollama, Jupyter, MCP, Qdrant, A2A, LiteLLM,
+MLflow, Open WebUI, Ray, Langflow, Flowise, ChromaDB) are
 implemented and isolated in `<prefix>.content.jsonl` (mode `0600`);
 high-precision secret detection over those bodies is implemented in
 `internal/secrets` (`private_key`, `github_token`, `aws_access_key`; see the
@@ -93,8 +92,8 @@ deployment; denied checks remain denied, not a reason to authenticate.
 
 ### M2c long-tail surfaces
 
-Same rules as above. These rows are planning targets; each needs the same
-operation inventory and fixtures before it counts as supported.
+Same rules as above. All five long-tail collectors are implemented with per-surface
+operation inventories and fixtures.
 
 | Surface | Default metadata checks | Version distinctions and content-tier reads |
 |---|---|---|

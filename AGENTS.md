@@ -38,12 +38,15 @@ UPDATE_GOLDEN=1 go test ./internal/emitter -run TestGoldenEmission   # then revi
 
 `cmd/llmhound` CLI · `internal/config` YAML + flags · `internal/targets` target prep ·
 `internal/discovery` data-driven fingerprints · `internal/transport` bounded TLS-aware HTTP ·
-`internal/collectors/<surface>` one package per surface (jupyter, mcp, ollama, a2a, vllm, qdrant) · `internal/content`
+`internal/collectors/<surface>` one package per surface (jupyter, mcp, ollama, a2a, vllm, qdrant,
+litellm, mlflow, openwebui, langserve, openaicompat, ray, langflow, flowise, chromadb) · `internal/content`
 bounded content-tier records + 0600 writer · `internal/secrets` high-precision
 secret detectors over content bodies · `internal/correlate` mapping → existing
 native node or `NetworkEndpoint` · `internal/graph` identity, kinds, observations, edges,
-access summary · `internal/evidence` sidecar records · `internal/emitter` base + linking
-payloads · `internal/checkpoint` journal/replay · `internal/savedsearch` CE saved queries
+access summary · `internal/rules` & `extension/rules` opt-in traversable rule engine ·
+`internal/evidence` sidecar records · `internal/emitter` base + linking payloads ·
+`internal/bloodhound` CE API client, pre-flight, two-step uploader & gate ·
+`internal/checkpoint` journal/replay · `internal/savedsearch` CE saved queries
 (`extension/saved_searches/`, `tools/gensearches`) · `internal/scanner` orchestration ·
 `extension/schema.json` · `lab/` CE lab · `legacy/` retired, never built.
 
@@ -66,7 +69,7 @@ payloads · `internal/checkpoint` journal/replay · `internal/savedsearch` CE sa
    Property names are flat, lowercase, primitive (or homogeneous primitive arrays). CE upper-cases
    node ids and `name`, so case-sensitive data never goes in `name`.
 7. Nothing is traversable unless an opt-in rule clears the six-point bar in the graph model.
-   `EdgeKind.IsTraversable()` is false today and must stay false until M2d.
+   `CanExecuteOn` is the only traversable edge kind (`EdgeKind.IsTraversable()`), gated behind `path_qualification.enabled_rules` (empty by default).
 8. Attach to **existing** nodes by objectid and native kind only, from the asset mapping. No DNS,
    suffix, or CE-side guessing. Never emit or modify a native-kind node. Native IDs are verbatim.
 9. **Two payloads.** Owned nodes/edges carry `source_kind: LLMHound`. Edges touching native nodes go

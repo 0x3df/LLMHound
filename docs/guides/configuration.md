@@ -1,12 +1,16 @@
-# Configuration, plan, and scan
+# Configuration, plan, scan, resume, and upload
 
-**Implemented M2a + D3 content tier + D4 secret detection + M2b cohort 1 (A2A, vLLM, Qdrant):**
+**Implemented M1–M3:**
 Cobra help/version, strict YAML loading, explicit flag replacements, policy validation,
 offline `targets` preparation, offline `plan` (targets × allowlisted checks, no traffic),
-and `scan` for Jupyter / MCP / Ollama / A2A / vLLM / Qdrant through `internal/scanner`
-(checkpoint journal, OpenGraph payload, evidence sidecar, and default-on, bounded
-`.content.jsonl` content tier with high-precision secret detection).
-`upload` remains an honest not-implemented stub and `resume` is not yet implemented (M3).
+`scan` and `resume` across all **15 M2a/M2b/M2c collectors** (Jupyter, MCP, Ollama,
+A2A, vLLM, Qdrant, LiteLLM, MLflow, Open WebUI, LangServe, Generic OpenAI-compatible,
+Ray, Langflow, Flowise, and ChromaDB) through `internal/scanner`
+(checkpoint journal, torn-tail repair on `resume`, OpenGraph base + sourceless linking
+payloads, evidence sidecar, opt-in `CanExecuteOn` rules, and default-on, bounded
+`.content.jsonl` content tier with high-precision secret detection), plus `upload`
+for BloodHound CE validation gate, schema registration, two-step upload with read-only
+existence pre-flight, and saved-query import.
 Detector semantics are specified in the
 [graph model](../02-graph-model.md#content-and-secrets). Live
 CLI vs package coverage is recorded in [scan coverage](../internals/scan-coverage.md).
@@ -211,10 +215,37 @@ LLMHound's own kinds, the `LLMHound_` namespace, and malformed names are rejecte
  {"target": "10.1.2.3",         "object_id": "/SUBSCRIPTIONS/…/VIRTUALMACHINES/AI-VM1", "kind": "AZVM"}]
 ```
 
-Also accepted: `{"ai1.corp.example": "S-1-5-21-..."}` (kind defaults to `Computer`) and
+Also accepted: `{"source": "normalizer-v2", "mappings": [...]}` (attaching `mapping_source`
+provenance onto emitted attachment edges and evidence records),
+`{"ai1.corp.example": "S-1-5-21-..."}` (kind defaults to `Computer`), and
 lines of `target,object_id[,kind]` with `#` comments. An entry is the normalizer's
-assertion; the destination's existence is re-verified at upload (M3), because an
+assertion; the destination's existence is re-verified at upload (`llmhound upload`), because an
 edge to a missing objectid makes CE create an empty stub node.
+
+- `path_qualification` (YAML only; disabled by default):
+  - `enabled_rules`: list of rule IDs to enable (`jupyter-auth-disabled`,
+    `ray-anonymous-jobs`, `langflow-unauthenticated-exec`). Must be empty unless
+    `assumed_reach_principals` is non-empty.
+  - `assumed_reach_principals`: list of `{object_id, kind}` existing BloodHound
+    principals (e.g. Domain Users `S-1-5-21-...-513`) used as `CanExecuteOn` start nodes.
+    Rules always fail closed when target is unmapped (`NetworkEndpoint`), version is
+    unknown/out-of-range, or required check evidence is missing.
+
+### `llmhound resume` and `llmhound upload`
+
+```bash
+# Resume an interrupted scan without re-probing completed (target, surface) pairs:
+./llmhound resume --journal ./out/lab.journal.jsonl --scope lab --vantage scanner-a --targets 127.0.0.1
+
+# Validate BloodHound CE adapter contract (pinned v9.7.1) and upload payloads + queries:
+./llmhound upload --url http://127.0.0.1:8080 --token-id ... --token-key ... \
+  --register-schema --base-file ./out/lab-base.json --linking-file ./out/lab-linking.json --import-queries
+```
+
+`upload` flags fall back to `BLOODHOUND_URL`, `BLOODHOUND_TOKEN_ID`, `BLOODHOUND_TOKEN_KEY`,
+`BLOODHOUND_BEARER_TOKEN`, `BLOODHOUND_USERNAME`, and `BLOODHOUND_PASSWORD`.
+Pass `--enable-rules-schema` with `--register-schema` (and `--include-can-execute-on`
+with `--import-queries`) only when opt-in path-qualification rules are active.
 
 ## Verification
 
@@ -227,6 +258,7 @@ CGO_ENABLED=0 go build ./cmd/llmhound
 Tests cover unchanged file values, explicit false/zero/empty overrides, strict
 YAML types, required keys and policy ranges, normalization, bounded expansion,
 file limits, deterministic exclusions, help/errors, offline plan (no DNS /
-loopback connections), and CLI scan against disposable loopback fixtures for
-Jupyter/MCP/Ollama. No production network or service credentials are needed.
+loopback connections), CLI scan/resume/upload against disposable loopback and mock-CE
+fixtures across all 15 surfaces, and `path_qualification` validation. No production
+network or service credentials are needed.
 See [scan coverage](../internals/scan-coverage.md) for live vs unit coverage.

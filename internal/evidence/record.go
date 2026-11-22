@@ -62,6 +62,7 @@ type Record struct {
 	Confidence       string   `json:"confidence,omitempty"`
 	FallbackReason   string   `json:"fallback_reason,omitempty"`
 	CandidateIDs     []string `json:"candidate_ids,omitempty"`
+	MappingSource    string   `json:"mapping_source,omitempty"`
 
 	// Fingerprint fields
 	Product            string `json:"product,omitempty"`
@@ -186,6 +187,7 @@ func NewCorrelationRecord(ev correlate.Evidence, obs graph.Observation) (Record,
 	r.Confidence = ev.Correlation.Confidence
 	r.FallbackReason = ev.Correlation.FallbackReason
 	r.CandidateIDs = append([]string(nil), ev.Correlation.CandidateIDs...)
+	r.MappingSource = ev.Correlation.MappingSource
 	return r, nil
 }
 

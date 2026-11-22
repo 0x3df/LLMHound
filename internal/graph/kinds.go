@@ -87,11 +87,19 @@ const (
 	AdvertisesSkill  EdgeKind = "AdvertisesSkill"
 	UsesBackend      EdgeKind = "UsesBackend"
 	Contains         EdgeKind = "Contains"
+	CanExecuteOn     EdgeKind = "CanExecuteOn" // Opt-in rule-gated attack transition (M2d).
 )
 
+// EdgeKinds returns the default non-traversable base relationship kinds declared
+// in extension/schema.json.
 func EdgeKinds() []EdgeKind {
 	return []EdgeKind{ObservedAt, RunsOn, ProvidesTool, ProvidesResource, ProvidesPrompt,
 		ProvidesModel, AdvertisesSkill, UsesBackend, Contains}
+}
+
+// RuleEdgeKinds returns opt-in traversable relationship kinds gated by path-qualification rules.
+func RuleEdgeKinds() []EdgeKind {
+	return []EdgeKind{CanExecuteOn}
 }
 
 func (k EdgeKind) Emitted() (string, error) {
@@ -100,8 +108,14 @@ func (k EdgeKind) Emitted() (string, error) {
 			return SourceKind + "_" + string(k), nil
 		}
 	}
+	for _, known := range RuleEdgeKinds() {
+		if k == known {
+			return SourceKind + "_" + string(k), nil
+		}
+	}
 	return "", errors.New("unknown edge kind")
 }
 
-// IsTraversable is false for all kinds, including reserved and unknown kinds.
-func (k EdgeKind) IsTraversable() bool { return false }
+// IsTraversable is false for all base, reserved, and unknown kinds. Only the
+// opt-in rule-gated CanExecuteOn kind is traversable.
+func (k EdgeKind) IsTraversable() bool { return k == CanExecuteOn }

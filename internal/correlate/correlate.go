@@ -40,12 +40,22 @@ type nativeNode struct {
 // Resolver is immutable after construction; inputs are normalized and copied.
 type Resolver struct {
 	mappings map[graph.Target][]nativeNode
+	source   string
 }
 
 // New validates and indexes mapping entries. Duplicate identical entries
 // collapse; differing entries for one target make that target ambiguous.
 func New(mappings []Mapping) (*Resolver, error) {
-	r := &Resolver{mappings: make(map[graph.Target][]nativeNode)}
+	return NewWithSource(mappings, "")
+}
+
+// NewWithSource validates and indexes mapping entries while recording the
+// mapping revision/source provenance identifier.
+func NewWithSource(mappings []Mapping, source string) (*Resolver, error) {
+	r := &Resolver{
+		mappings: make(map[graph.Target][]nativeNode),
+		source:   source,
+	}
 	for _, m := range mappings {
 		target, err := graph.ParseTarget(m.Target)
 		if err != nil {
@@ -130,7 +140,12 @@ func (r *Resolver) Resolve(scope, rawTarget string) (Result, error) {
 		}
 		result.target = ref
 		result.evidence.NativeKind = nodes[0].kind
-		result.evidence.Correlation = graph.Correlation{MatchMethod: "mapping", MatchValue: target.Value(), Confidence: "asserted"}
+		result.evidence.Correlation = graph.Correlation{
+			MatchMethod:   "mapping",
+			MatchValue:    target.Value(),
+			Confidence:    "asserted",
+			MappingSource: r.source,
+		}
 		return result, nil
 	default:
 		ids := make([]string, 0, len(nodes))

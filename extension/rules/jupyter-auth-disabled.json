@@ -1,0 +1,20 @@
+{
+  "id": "jupyter-auth-disabled",
+  "version": "1.0.0",
+  "capability_class": "host_code_execution",
+  "surface": "jupyter",
+  "node_kind": "JupyterServer",
+  "version_range": ">=1.0.0, <4.0.0",
+  "required_checks_any": [
+    "jupyter_sessions",
+    "jupyter_contents"
+  ],
+  "required_node_props": {
+    "auth_required": false
+  },
+  "docs": [
+    "https://jupyter-server.readthedocs.io/en/latest/operators/security.html"
+  ],
+  "confidence": "high",
+  "exec_identity": "unknown"
+}

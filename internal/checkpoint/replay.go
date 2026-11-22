@@ -135,7 +135,11 @@ func targetKey(target, surface string) string {
 }
 
 func edgeKey(edge graph.Edge) string {
-	return string(edge.Kind()) + ":" + edge.Start().ID() + ":" + edge.End().ID()
+	base := string(edge.Kind()) + ":" + edge.Start().ID() + ":" + edge.End().ID()
+	if prov, ok := edge.RuleProvenance(); ok {
+		return base + ":" + prov.RuleID
+	}
+	return base
 }
 
 func (s *State) addNode(item emitter.NodeItem) {

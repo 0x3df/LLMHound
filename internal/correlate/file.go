@@ -17,57 +17,67 @@ import (
 const MaxMappingFileBytes = 1 << 20 // 1 MiB
 
 // LoadMappingFile reads asset-mapping entries (target to existing BloodHound
-// objectid and kind) from a JSON or line-delimited file. Accepted forms:
-//
-//	[{"target": "ai1.corp.example", "object_id": "S-1-5-21-...", "kind": "Computer"}]
-//	{"ai1.corp.example": "S-1-5-21-..."}            (kind defaults to Computer)
-//	ai1.corp.example,S-1-5-21-...[,AZVM]             (one per line, # comments)
-//
-// The file It enforces bounds, ignores comments, canonicalizes targets,
-// and rejects conflicting entries for the same target.
+// objectid and kind) from a JSON or line-delimited file.
 func LoadMappingFile(path string) ([]Mapping, error) {
+	mappings, _, err := LoadMappingFileWithSource(path)
+	return mappings, err
+}
+
+// LoadMappingFileWithSource reads asset-mapping entries plus an optional
+// mapping_source revision identifier from an envelope JSON object:
+//
+//	{"source": "norm-2026-11-21", "mappings": [{"target": "...", "object_id": "...", "kind": "Computer"}]}
+//
+// Legacy JSON arrays, target-to-objectid maps, and line-delimited formats are
+// also supported with an empty source.
+func LoadMappingFileWithSource(path string) ([]Mapping, string, error) {
 	if strings.TrimSpace(path) == "" {
-		return nil, errors.New("mapping file path cannot be empty")
+		return nil, "", errors.New("mapping file path cannot be empty")
 	}
 	info, err := os.Stat(path)
 	if err != nil {
-		return nil, fmt.Errorf("stat mapping file: %w", err)
+		return nil, "", fmt.Errorf("stat mapping file: %w", err)
 	}
 	if !info.Mode().IsRegular() {
-		return nil, errors.New("mapping file must be a regular file")
+		return nil, "", errors.New("mapping file must be a regular file")
 	}
 	if info.Size() > MaxMappingFileBytes {
-		return nil, fmt.Errorf("mapping file exceeds limit of %d bytes", MaxMappingFileBytes)
+		return nil, "", fmt.Errorf("mapping file exceeds limit of %d bytes", MaxMappingFileBytes)
 	}
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, fmt.Errorf("open mapping file: %w", err)
+		return nil, "", fmt.Errorf("open mapping file: %w", err)
 	}
 	defer f.Close()
 
 	data, err := io.ReadAll(io.LimitReader(f, MaxMappingFileBytes+1))
 	if err != nil {
-		return nil, fmt.Errorf("read mapping file: %w", err)
+		return nil, "", fmt.Errorf("read mapping file: %w", err)
 	}
 	if len(data) > MaxMappingFileBytes {
-		return nil, fmt.Errorf("mapping file exceeds limit of %d bytes", MaxMappingFileBytes)
+		return nil, "", fmt.Errorf("mapping file exceeds limit of %d bytes", MaxMappingFileBytes)
 	}
 
 	trimmed := bytes.TrimSpace(data)
 	if len(trimmed) == 0 {
-		return nil, errors.New("mapping file is empty")
+		return nil, "", errors.New("mapping file is empty")
 	}
 
 	var mappings []Mapping
+	var source string
 	if trimmed[0] == '{' || trimmed[0] == '[' {
-		mappings, err = parseJSONMappings(trimmed)
+		mappings, source, err = parseJSONMappingsWithSource(trimmed)
 	} else {
 		mappings, err = parseLineMappings(trimmed)
 	}
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	return rejectConflicts(mappings)
+	clean, err := rejectConflicts(mappings)
+	if err != nil {
+		return nil, "", err
+	}
+	return clean, source, nil
 }
 
 func rejectConflicts(mappings []Mapping) ([]Mapping, error) {
@@ -87,23 +97,45 @@ func rejectConflicts(mappings []Mapping) ([]Mapping, error) {
 	return out, nil
 }
 
-func parseJSONMappings(data []byte) ([]Mapping, error) {
+func parseJSONMappingsWithSource(data []byte) ([]Mapping, string, error) {
 	type jsonEntry struct {
 		Target   string `json:"target"`
 		ObjectID string `json:"object_id"`
 		Kind     string `json:"kind"`
 	}
+	type jsonEnvelope struct {
+		Source   string      `json:"source"`
+		Mappings []jsonEntry `json:"mappings"`
+	}
+	if len(data) > 0 && data[0] == '{' {
+		var env jsonEnvelope
+		if err := json.Unmarshal(data, &env); err == nil && env.Mappings != nil {
+			if len(env.Mappings) == 0 {
+				return nil, "", errors.New("mapping envelope contains no mappings")
+			}
+			var mappings []Mapping
+			for _, e := range env.Mappings {
+				m, err := validateMappingEntry(e.Target, e.ObjectID, e.Kind)
+				if err != nil {
+					return nil, "", err
+				}
+				mappings = append(mappings, m)
+			}
+			return mappings, strings.TrimSpace(env.Source), nil
+		}
+	}
+
 	var entries []jsonEntry
 	if err := json.Unmarshal(data, &entries); err == nil && len(entries) > 0 {
 		var mappings []Mapping
 		for _, e := range entries {
 			m, err := validateMappingEntry(e.Target, e.ObjectID, e.Kind)
 			if err != nil {
-				return nil, err
+				return nil, "", err
 			}
 			mappings = append(mappings, m)
 		}
-		return mappings, nil
+		return mappings, "", nil
 	}
 
 	var dict map[string]string
@@ -112,14 +144,14 @@ func parseJSONMappings(data []byte) ([]Mapping, error) {
 		for target, id := range dict {
 			m, err := validateMappingEntry(target, id, "")
 			if err != nil {
-				return nil, err
+				return nil, "", err
 			}
 			mappings = append(mappings, m)
 		}
-		return mappings, nil
+		return mappings, "", nil
 	}
 
-	return nil, errors.New("malformed JSON mapping format: must be an array of {target, object_id, kind} objects or a target-to-objectid map")
+	return nil, "", errors.New("malformed JSON mapping format: must be an array of {target, object_id, kind} objects, an envelope {source, mappings}, or a target-to-objectid map")
 }
 
 func parseLineMappings(data []byte) ([]Mapping, error) {
@@ -192,12 +224,14 @@ func validateMappingEntry(rawTarget, objectID, rawKind string) (Mapping, error) 
 // intended hand-off to the normalizer.
 func NewFromConfig(cfg config.Config) (*Resolver, error) {
 	var mappings []Mapping
+	var source string
 	if cfg.Correlation.MappingFile != "" {
-		loaded, err := LoadMappingFile(cfg.Correlation.MappingFile)
+		loaded, src, err := LoadMappingFileWithSource(cfg.Correlation.MappingFile)
 		if err != nil {
 			return nil, fmt.Errorf("load correlation mapping file: %w", err)
 		}
 		mappings = loaded
+		source = src
 	}
-	return New(mappings)
+	return NewWithSource(mappings, source)
 }

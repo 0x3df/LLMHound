@@ -1,0 +1,20 @@
+{
+  "id": "langflow-unauthenticated-exec",
+  "version": "1.0.0",
+  "capability_class": "host_code_execution",
+  "surface": "langflow",
+  "node_kind": "LangflowInstance",
+  "version_range": ">=1.0.0, <2.0.0",
+  "required_checks_any": [
+    "langflow_auto_login",
+    "langflow_flows"
+  ],
+  "required_node_props": {
+    "auto_login_enabled": true
+  },
+  "docs": [
+    "https://docs.langflow.org/configuration-authentication"
+  ],
+  "confidence": "high",
+  "exec_identity": "unknown"
+}

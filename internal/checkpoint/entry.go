@@ -261,11 +261,26 @@ type NodeRecord struct {
 
 // EdgeRecord serializes graph.Edge.
 type EdgeRecord struct {
-	Kind        string             `json:"kind"`
-	Start       ReferenceRecord    `json:"start"`
-	End         ReferenceRecord    `json:"end"`
-	Observation ObservationRecord  `json:"observation"`
-	Correlation *CorrelationRecord `json:"correlation,omitempty"`
+	Kind           string                `json:"kind"`
+	Start          ReferenceRecord       `json:"start"`
+	End            ReferenceRecord       `json:"end"`
+	Observation    ObservationRecord     `json:"observation"`
+	Correlation    *CorrelationRecord    `json:"correlation,omitempty"`
+	RuleProvenance *RuleProvenanceRecord `json:"rule_provenance,omitempty"`
+}
+
+// RuleProvenanceRecord serializes graph.RuleProvenance.
+type RuleProvenanceRecord struct {
+	RuleID          string   `json:"rule_id"`
+	RuleVersion     string   `json:"rule_version"`
+	Basis           string   `json:"basis"`
+	Confidence      string   `json:"confidence"`
+	CapabilityClass string   `json:"capability_class"`
+	ReachBasis      string   `json:"reach_basis"`
+	ExecIdentity    string   `json:"exec_identity"`
+	ServiceID       string   `json:"service_id"`
+	Operations      []string `json:"operations"`
+	EvidenceIDs     []string `json:"evidence_ids"`
 }
 
 // CorrelationRecord serializes graph.Correlation.
@@ -275,6 +290,7 @@ type CorrelationRecord struct {
 	Confidence     string   `json:"confidence,omitempty"`
 	FallbackReason string   `json:"fallback_reason,omitempty"`
 	CandidateIDs   []string `json:"candidate_ids,omitempty"`
+	MappingSource  string   `json:"mapping_source,omitempty"`
 }
 
 // Helper converters
@@ -416,6 +432,21 @@ func toEdgeRecord(edge graph.Edge, maxStringLen int) EdgeRecord {
 			Confidence:     corr.Confidence,
 			FallbackReason: sanitizeText(corr.FallbackReason, maxStringLen),
 			CandidateIDs:   boundStrings(corr.CandidateIDs, maxStringLen),
+			MappingSource:  sanitizeText(corr.MappingSource, maxStringLen),
+		}
+	}
+	if prov, ok := edge.RuleProvenance(); ok {
+		rec.RuleProvenance = &RuleProvenanceRecord{
+			RuleID:          sanitizeText(prov.RuleID, maxStringLen),
+			RuleVersion:     sanitizeText(prov.RuleVersion, maxStringLen),
+			Basis:           prov.Basis,
+			Confidence:      prov.Confidence,
+			CapabilityClass: prov.CapabilityClass,
+			ReachBasis:      prov.ReachBasis,
+			ExecIdentity:    sanitizeText(prov.ExecIdentity, maxStringLen),
+			ServiceID:       sanitizeText(prov.ServiceID, maxStringLen),
+			Operations:      boundStrings(prov.Operations, maxStringLen),
+			EvidenceIDs:     boundStrings(prov.EvidenceIDs, maxStringLen),
 		}
 	}
 
@@ -447,8 +478,27 @@ func fromEdgeRecord(r EdgeRecord, vantage vantageContext) (graph.Edge, error) {
 			Confidence:     r.Correlation.Confidence,
 			FallbackReason: r.Correlation.FallbackReason,
 			CandidateIDs:   append([]string(nil), r.Correlation.CandidateIDs...),
+			MappingSource:  r.Correlation.MappingSource,
 		}
 		return graph.NewObservedAtEdge(start, end, obs, corr)
+	}
+	if kind == graph.CanExecuteOn {
+		if r.RuleProvenance == nil {
+			return graph.Edge{}, errors.New("CanExecuteOn edge requires rule_provenance")
+		}
+		prov := graph.RuleProvenance{
+			RuleID:          r.RuleProvenance.RuleID,
+			RuleVersion:     r.RuleProvenance.RuleVersion,
+			Basis:           r.RuleProvenance.Basis,
+			Confidence:      r.RuleProvenance.Confidence,
+			CapabilityClass: r.RuleProvenance.CapabilityClass,
+			ReachBasis:      r.RuleProvenance.ReachBasis,
+			ExecIdentity:    r.RuleProvenance.ExecIdentity,
+			ServiceID:       r.RuleProvenance.ServiceID,
+			Operations:      append([]string(nil), r.RuleProvenance.Operations...),
+			EvidenceIDs:     append([]string(nil), r.RuleProvenance.EvidenceIDs...),
+		}
+		return graph.NewCanExecuteOnEdge(start, end, obs, prov)
 	}
 
 	return graph.NewTopologyEdge(kind, start, end, obs)
@@ -549,7 +599,7 @@ func boundStrings(in []string, maxLen int) []string {
 // sanitizeEvidence returns a copy of ev with every free-text field redacted and bounded.
 func sanitizeEvidence(ev evidence.Record, maxLen int) evidence.Record {
 	for _, f := range []*string{
-		&ev.Reason, &ev.CoverageReason, &ev.MatchValue, &ev.FallbackReason, &ev.VerificationReason,
+		&ev.Reason, &ev.CoverageReason, &ev.MatchValue, &ev.FallbackReason, &ev.MappingSource, &ev.VerificationReason,
 		&ev.Product, &ev.Vendor, &ev.SoftwareVersion, &ev.SoftwareVersionRaw, &ev.BuildID, &ev.Commit,
 		&ev.ImageDigest, &ev.APIVersion, &ev.ProtocolVersion, &ev.Method, &ev.CertFingerprint,
 		&ev.Issuer, &ev.Subject, &ev.NegotiatedVersion, &ev.CheckID, &ev.Operation, &ev.TargetID,

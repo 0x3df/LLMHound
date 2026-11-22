@@ -2,6 +2,7 @@ package graph
 
 import (
 	"errors"
+	"sort"
 	"strings"
 )
 
@@ -97,6 +98,7 @@ type Correlation struct {
 	Confidence     string
 	FallbackReason string
 	CandidateIDs   []string
+	MappingSource  string
 }
 
 func cloneCorrelation(c Correlation) Correlation {
@@ -104,22 +106,88 @@ func cloneCorrelation(c Correlation) Correlation {
 	return c
 }
 
-// Edge never carries a configurable traversal flag. SourceKind is deliberately
-// empty on native-touching edges: M0 Q5 requires a separate sourceless linking
-// payload to avoid tagging and deleting existing native nodes on source cleanup.
+// RuleProvenance records the six-point qualification evidence for an opt-in
+// traversable CanExecuteOn edge (docs/02-graph-model.md#path-qualification-traversable-edges).
+type RuleProvenance struct {
+	RuleID          string
+	RuleVersion     string
+	Basis           string
+	Confidence      string
+	CapabilityClass string
+	ReachBasis      string
+	ExecIdentity    string
+	ServiceID       string
+	Operations      []string
+	EvidenceIDs     []string
+}
+
+// Validate enforces the closed capability class, reachability basis, and
+// required rule provenance fields.
+func (p RuleProvenance) Validate() error {
+	if !validStableText(p.RuleID) || !validStableText(p.RuleVersion) {
+		return errors.New("rule provenance requires rule_id and rule_version")
+	}
+	if p.Basis != BasisInferred {
+		return errors.New("rule provenance basis must be inferred")
+	}
+	if !validStableText(p.Confidence) {
+		return errors.New("rule provenance requires confidence")
+	}
+	if p.CapabilityClass != "host_code_execution" {
+		return errors.New("rule capability_class must be host_code_execution")
+	}
+	if p.ReachBasis != "scanner_vantage" {
+		return errors.New("rule reach_basis must be scanner_vantage")
+	}
+	if !validStableText(p.ExecIdentity) {
+		return errors.New("rule provenance requires exec_identity")
+	}
+	if !validStableText(p.ServiceID) {
+		return errors.New("rule provenance requires service_id")
+	}
+	if len(p.Operations) == 0 || len(p.EvidenceIDs) == 0 {
+		return errors.New("rule provenance requires positive operations and evidence_ids")
+	}
+	for _, op := range p.Operations {
+		if !validStableText(op) {
+			return errors.New("rule provenance operation cannot be empty")
+		}
+	}
+	for _, ev := range p.EvidenceIDs {
+		if !validStableText(ev) {
+			return errors.New("rule provenance evidence_id cannot be empty")
+		}
+	}
+	return nil
+}
+
+func cloneRuleProvenance(p RuleProvenance) RuleProvenance {
+	p.Operations = append([]string(nil), p.Operations...)
+	p.EvidenceIDs = append([]string(nil), p.EvidenceIDs...)
+	sort.Strings(p.Operations)
+	sort.Strings(p.EvidenceIDs)
+	return p
+}
+
+// Edge carries relationship semantics and provenance. Non-rule edges are never
+// traversable; only rule-qualified CanExecuteOn edges are traversable.
+// SourceKind is deliberately empty on native-touching edges: M0 Q5 requires a
+// separate sourceless linking payload to avoid tagging and deleting existing
+// native nodes on source cleanup.
 type Edge struct {
-	kind        EdgeKind
-	start       Reference
-	end         Reference
-	observation Observation
-	correlation *Correlation
+	kind           EdgeKind
+	start          Reference
+	end            Reference
+	observation    Observation
+	correlation    *Correlation
+	ruleProvenance *RuleProvenance
 }
 
 func (e Edge) Kind() EdgeKind           { return e.kind }
 func (e Edge) Start() Reference         { return e.start }
 func (e Edge) End() Reference           { return e.end }
 func (e Edge) Observation() Observation { return e.observation }
-func (e Edge) IsTraversable() bool      { return false }
+func (e Edge) IsTraversable() bool      { return e.kind.IsTraversable() }
 func (e Edge) TouchesNative() bool      { return e.start.IsNative() || e.end.IsNative() }
 func (e Edge) SourceKind() string {
 	if e.TouchesNative() {
@@ -132,6 +200,37 @@ func (e Edge) Correlation() (Correlation, bool) {
 		return Correlation{}, false
 	}
 	return cloneCorrelation(*e.correlation), true
+}
+func (e Edge) RuleProvenance() (RuleProvenance, bool) {
+	if e.ruleProvenance == nil {
+		return RuleProvenance{}, false
+	}
+	return cloneRuleProvenance(*e.ruleProvenance), true
+}
+
+// NewCanExecuteOnEdge constructs a rule-qualified, traversable CanExecuteOn edge
+// from an assumed-reach native principal to an existing mapped native host node.
+func NewCanExecuteOnEdge(start, end Reference, observation Observation, prov RuleProvenance) (Edge, error) {
+	if !start.IsNative() || !end.IsNative() {
+		return Edge{}, errors.New("CanExecuteOn requires verified native start principal and native target node")
+	}
+	if start.ID() == "" || end.ID() == "" {
+		return Edge{}, errors.New("CanExecuteOn requires non-empty endpoint IDs")
+	}
+	if err := observation.Validate(observation.DeploymentScope); err != nil {
+		return Edge{}, err
+	}
+	if err := prov.Validate(); err != nil {
+		return Edge{}, err
+	}
+	cloned := cloneRuleProvenance(prov)
+	return Edge{
+		kind:           CanExecuteOn,
+		start:          start,
+		end:            end,
+		observation:    observation,
+		ruleProvenance: &cloned,
+	}, nil
 }
 
 func newEdge(kind EdgeKind, start, end Reference, observation Observation) (Edge, error) {

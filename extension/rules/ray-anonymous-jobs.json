@@ -1,0 +1,16 @@
+{
+  "id": "ray-anonymous-jobs",
+  "version": "1.0.0",
+  "capability_class": "host_code_execution",
+  "surface": "ray",
+  "node_kind": "RayDashboard",
+  "version_range": ">=2.0.0, <3.0.0",
+  "required_checks_any": [
+    "ray_jobs"
+  ],
+  "docs": [
+    "https://docs.ray.io/en/latest/cluster/running-applications/job-submission/rest.html"
+  ],
+  "confidence": "high",
+  "exec_identity": "unknown"
+}

@@ -119,4 +119,18 @@ func TestNewFromConfig(t *testing.T) {
 	if _, err := correlate.NewFromConfig(config.Config{Correlation: config.Correlation{MappingFile: filepath.Join(t.TempDir(), "nope")}}); err == nil {
 		t.Fatal("missing configured mapping file accepted")
 	}
+
+	// Envelope with mapping_source provenance.
+	envFile := write(t, `{"source":"norm-rev-20261121","mappings":[{"target":"ai2.corp.example","object_id":"S-1-5-21-1","kind":"Computer"}]}`)
+	rEnv, err := correlate.NewFromConfig(config.Config{Correlation: config.Correlation{MappingFile: envFile}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resEnv, err := rEnv.Resolve("scope", "ai2.corp.example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resEnv.Evidence().Correlation.MappingSource != "norm-rev-20261121" {
+		t.Fatalf("expected mapping_source norm-rev-20261121, got %q", resEnv.Evidence().Correlation.MappingSource)
+	}
 }

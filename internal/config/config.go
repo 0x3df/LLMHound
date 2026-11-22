@@ -3,8 +3,10 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"math"
 	"net/netip"
 	"os"
@@ -14,6 +16,8 @@ import (
 	"time"
 	"unicode"
 
+	extrules "github.com/0x3df/LLMHound/extension/rules"
+	"github.com/0x3df/LLMHound/internal/graph"
 	"github.com/0x3df/LLMHound/internal/targets"
 	"gopkg.in/yaml.v3"
 )
@@ -33,19 +37,73 @@ const (
 )
 
 type Config struct {
-	Scope        string      `yaml:"scope"`
-	VantageKey   string      `yaml:"vantage_key"`
-	Targets      []string    `yaml:"targets"`
-	CIDRs        []string    `yaml:"cidrs"`
-	TargetsFiles []string    `yaml:"targets_files"`
-	Exclude      []string    `yaml:"exclude"`
-	ExcludeFiles []string    `yaml:"exclude_files"`
-	Bounds       Bounds      `yaml:"bounds"`
-	Insecure     bool        `yaml:"insecure"`
-	UserAgent    string      `yaml:"user_agent"`
-	Content      Content     `yaml:"content"`
-	Secrets      Secrets     `yaml:"secrets"`
-	Correlation  Correlation `yaml:"correlation"`
+	Scope             string            `yaml:"scope"`
+	VantageKey        string            `yaml:"vantage_key"`
+	Targets           []string          `yaml:"targets"`
+	CIDRs             []string          `yaml:"cidrs"`
+	TargetsFiles      []string          `yaml:"targets_files"`
+	Exclude           []string          `yaml:"exclude"`
+	ExcludeFiles      []string          `yaml:"exclude_files"`
+	Bounds            Bounds            `yaml:"bounds"`
+	Insecure          bool              `yaml:"insecure"`
+	UserAgent         string            `yaml:"user_agent"`
+	Content           Content           `yaml:"content"`
+	Secrets           Secrets           `yaml:"secrets"`
+	Correlation       Correlation       `yaml:"correlation"`
+	PathQualification PathQualification `yaml:"path_qualification"`
+}
+
+// ReachPrincipal identifies an existing BloodHound native principal (e.g.
+// Domain Users Group) from which enabled path-qualification rules emit
+// CanExecuteOn edges.
+type ReachPrincipal struct {
+	ObjectID string `yaml:"object_id"`
+	Kind     string `yaml:"kind"`
+}
+
+// EffectiveKind returns the principal's native kind, defaulting to Group when omitted.
+func (p ReachPrincipal) EffectiveKind() graph.Kind {
+	k := strings.TrimSpace(p.Kind)
+	if k == "" {
+		return graph.Kind("Group")
+	}
+	return graph.Kind(k)
+}
+
+// PathQualification configures opt-in, rule-gated traversable CanExecuteOn
+// edges (M2d). Rules ship disabled and require explicit operator opt-in plus
+// assumed_reach_principals.
+type PathQualification struct {
+	EnabledRules           []string         `yaml:"enabled_rules"`
+	AssumedReachPrincipals []ReachPrincipal `yaml:"assumed_reach_principals"`
+}
+
+var knownRuleIDs = loadKnownRuleIDs()
+
+func loadKnownRuleIDs() map[string]bool {
+	out := make(map[string]bool)
+	entries, err := fs.ReadDir(extrules.FS, ".")
+	if err != nil {
+		return out
+	}
+	for _, ent := range entries {
+		data, err := fs.ReadFile(extrules.FS, ent.Name())
+		if err != nil {
+			continue
+		}
+		var hdr struct {
+			ID string `json:"id"`
+		}
+		if json.Unmarshal(data, &hdr) == nil && hdr.ID != "" {
+			out[hdr.ID] = true
+		}
+	}
+	return out
+}
+
+// IsKnownPathRule reports whether id names a shipped path-qualification rule.
+func IsKnownPathRule(id string) bool {
+	return knownRuleIDs[id]
 }
 
 // Secrets controls high-precision secret detectors run over content-tier
@@ -474,6 +532,27 @@ func (c Config) Validate() error {
 	for name := range c.Secrets.Detectors {
 		if !IsKnownSecretDetector(name) {
 			return fmt.Errorf("secrets.detectors contains unknown detector %q", name)
+		}
+	}
+	seenRules := make(map[string]bool, len(c.PathQualification.EnabledRules))
+	for _, ruleID := range c.PathQualification.EnabledRules {
+		if strings.TrimSpace(ruleID) == "" || ruleID != strings.TrimSpace(ruleID) {
+			return fmt.Errorf("path_qualification.enabled_rules cannot contain empty or whitespace-padded rule IDs")
+		}
+		if !IsKnownPathRule(ruleID) {
+			return fmt.Errorf("path_qualification.enabled_rules contains unknown rule %q", ruleID)
+		}
+		if seenRules[ruleID] {
+			return fmt.Errorf("path_qualification.enabled_rules contains duplicate rule %q", ruleID)
+		}
+		seenRules[ruleID] = true
+	}
+	if len(c.PathQualification.EnabledRules) > 0 && len(c.PathQualification.AssumedReachPrincipals) == 0 {
+		return fmt.Errorf("path_qualification.assumed_reach_principals is required when path-qualification rules are enabled")
+	}
+	for i, p := range c.PathQualification.AssumedReachPrincipals {
+		if _, err := graph.ExistingNodeByID(p.EffectiveKind(), p.ObjectID); err != nil {
+			return fmt.Errorf("path_qualification.assumed_reach_principals[%d]: %w", i, err)
 		}
 	}
 	return nil

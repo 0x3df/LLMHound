@@ -179,3 +179,32 @@ func TestSecretsDetectorConfig(t *testing.T) {
 		t.Fatalf("unknown detector must fail validation, got: %v", err)
 	}
 }
+
+func TestPathQualificationConfigValidation(t *testing.T) {
+	// Valid enabled config.
+	valid, err := Load(writeConfig(t, "scope: tenant\nvantage_key: scanner\ntargets: [AI.Example.Test]\npath_qualification:\n  enabled_rules: [jupyter-auth-disabled, ray-anonymous-jobs]\n  assumed_reach_principals:\n    - object_id: S-1-5-21-1-2-3-513\n      kind: Group\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("valid path_qualification rejected: %v", err)
+	}
+
+	// Enabled without principals fails.
+	noPrincipals, err := Load(writeConfig(t, "scope: tenant\nvantage_key: scanner\ntargets: [AI.Example.Test]\npath_qualification:\n  enabled_rules: [jupyter-auth-disabled]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := noPrincipals.Validate(); err == nil || !strings.Contains(err.Error(), "assumed_reach_principals") {
+		t.Fatalf("expected missing assumed_reach_principals error, got: %v", err)
+	}
+
+	// Unknown rule fails.
+	unknownRule, err := Load(writeConfig(t, "scope: tenant\nvantage_key: scanner\ntargets: [AI.Example.Test]\npath_qualification:\n  enabled_rules: [nonexistent-rule]\n  assumed_reach_principals:\n    - object_id: S-1-5-21-1-2-3-513\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := unknownRule.Validate(); err == nil || !strings.Contains(err.Error(), "unknown rule") {
+		t.Fatalf("expected unknown rule error, got: %v", err)
+	}
+}

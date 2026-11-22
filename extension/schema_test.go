@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/0x3df/LLMHound/internal/graph"
+	"github.com/0x3df/LLMHound/internal/rules"
 )
 
 type SchemaDefinition struct {
@@ -138,5 +139,34 @@ func TestExtensionSchema(t *testing.T) {
 	}
 	if len(foundEdgeKinds) != len(expectedEdgeKinds) {
 		t.Errorf("expected %d relationship kinds, got %d", len(expectedEdgeKinds), len(foundEdgeKinds))
+	}
+}
+
+func TestSchemaWithCanExecuteOn(t *testing.T) {
+	base, err := os.ReadFile("schema.json")
+	if err != nil {
+		t.Fatalf("read schema.json: %v", err)
+	}
+	aug, err := rules.SchemaWithCanExecuteOn(base)
+	if err != nil {
+		t.Fatalf("SchemaWithCanExecuteOn: %v", err)
+	}
+	var def SchemaDefinition
+	if err := json.Unmarshal(aug, &def); err != nil {
+		t.Fatalf("parse augmented schema: %v", err)
+	}
+	var foundRuleEdge bool
+	for _, rk := range def.RelationshipKinds {
+		if rk.Name == "LLMHound_CanExecuteOn" {
+			foundRuleEdge = true
+			if !rk.IsTraversable {
+				t.Errorf("LLMHound_CanExecuteOn must be traversable in augmented schema")
+			}
+		} else if rk.IsTraversable {
+			t.Errorf("base relationship kind %s must remain non-traversable", rk.Name)
+		}
+	}
+	if !foundRuleEdge {
+		t.Errorf("LLMHound_CanExecuteOn missing from augmented schema")
 	}
 }

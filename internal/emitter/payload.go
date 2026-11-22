@@ -234,6 +234,21 @@ func formatEdge(edge graph.Edge) (EdgePayload, error) {
 		if corr.FallbackReason != "" {
 			props["fallback_reason"] = corr.FallbackReason
 		}
+		if corr.MappingSource != "" {
+			props["mapping_source"] = corr.MappingSource
+		}
+	}
+	if prov, ok := edge.RuleProvenance(); ok {
+		props["rule_id"] = prov.RuleID
+		props["rule_version"] = prov.RuleVersion
+		props["basis"] = prov.Basis
+		props["confidence"] = prov.Confidence
+		props["capability_class"] = prov.CapabilityClass
+		props["reach_basis"] = prov.ReachBasis
+		props["exec_identity"] = prov.ExecIdentity
+		props["service_id"] = prov.ServiceID
+		props["operations"] = prov.Operations
+		props["evidence_ids"] = prov.EvidenceIDs
 	}
 
 	obs := edge.Observation()

@@ -12,6 +12,7 @@ import (
 	"github.com/0x3df/LLMHound/extension"
 	"github.com/0x3df/LLMHound/internal/bloodhound"
 	"github.com/0x3df/LLMHound/internal/config"
+	"github.com/0x3df/LLMHound/internal/correlate"
 	"github.com/0x3df/LLMHound/internal/discovery"
 	"github.com/0x3df/LLMHound/internal/rules"
 	"github.com/0x3df/LLMHound/internal/savedsearch"
@@ -33,6 +34,7 @@ func newRootCommand() *cobra.Command {
 	root.CompletionOptions.DisableDefaultCmd = true
 	var configPath string
 	var disabledContentSurfaces []string
+	var prettyJSON bool
 	overrides := config.Defaults()
 	flags := root.PersistentFlags()
 	flags.StringVar(&configPath, "config", "llmhound.yaml", "Configuration file (default is optional; explicit path must exist)")
@@ -41,10 +43,13 @@ func newRootCommand() *cobra.Command {
 	flags.StringSliceVar(&overrides.Targets, "targets", nil, "IP/FQDN/CIDR inputs; repeat or comma-separate (replaces targets)")
 	flags.StringSliceVar(&overrides.CIDRs, "cidr", nil, "CIDR ranges; repeat or comma-separate (replaces cidrs)")
 	flags.StringArrayVar(&overrides.TargetsFiles, "targets-file", nil, "Line-oriented targets file; repeat (replaces targets_files)")
+	flags.StringArrayVar(&overrides.EndpointsFiles, "endpoints-file", nil, "Line-oriented host:port or scheme://host:port file; repeat (replaces endpoints_files)")
 	flags.StringSliceVar(&overrides.Exclude, "exclude", nil, "Exact IP/FQDN or CIDR exclusions; repeat or comma-separate")
 	flags.StringArrayVar(&overrides.ExcludeFiles, "exclude-file", nil, "Line-oriented exclusions file; repeat (replaces exclude_files)")
-	flags.IntVar(&overrides.Bounds.MaxTargets, "max-targets", overrides.Bounds.MaxTargets, "Maximum raw expansion before dedup/exclusions (1–65536)")
-	flags.IntVar(&overrides.Bounds.Concurrency, "concurrency", overrides.Bounds.Concurrency, "Worker concurrency (1–256)")
+	flags.IntVar(&overrides.Bounds.MaxTargets, "max-targets", overrides.Bounds.MaxTargets, "Maximum raw expansion before dedup/exclusions (1–1048576)")
+	flags.IntVar(&overrides.Bounds.Concurrency, "concurrency", overrides.Bounds.Concurrency, "Worker concurrency (1–1024)")
+	flags.IntVar(&overrides.Bounds.TCPConcurrency, "tcp-concurrency", overrides.Bounds.TCPConcurrency, "Stage 1 TCP open-port sweep concurrency (1–4096)")
+	flags.DurationVar(&overrides.Bounds.TCPTimeout, "tcp-timeout", overrides.Bounds.TCPTimeout, "Stage 1 TCP dial timeout (50ms–30s)")
 	flags.Float64Var(&overrides.Bounds.PerHostRate, "per-host-rate", overrides.Bounds.PerHostRate, "Per-host requests/second (0.1–1000)")
 	flags.DurationVar(&overrides.Bounds.ConnectTimeout, "connect-timeout", overrides.Bounds.ConnectTimeout, "Connect timeout (1ms–5m)")
 	flags.DurationVar(&overrides.Bounds.ResponseTimeout, "response-timeout", overrides.Bounds.ResponseTimeout, "Response timeout (1ms–5m)")
@@ -52,9 +57,19 @@ func newRootCommand() *cobra.Command {
 	flags.IntVar(&overrides.Bounds.MaxPages, "max-pages", overrides.Bounds.MaxPages, "Per-check page limit (1–10000)")
 	flags.IntVar(&overrides.Bounds.MaxItems, "max-items", overrides.Bounds.MaxItems, "Per-check item limit (1–100000)")
 	flags.IntVar(&overrides.Bounds.MaxRedirects, "max-redirects", overrides.Bounds.MaxRedirects, "Authorized redirect limit (0–10)")
+	flags.StringVar(&overrides.Scan.Profile, "profile", overrides.Scan.Profile, "Discovery profile: attack-path, rce-only, or full")
+	flags.StringSliceVar(&overrides.Scan.Surfaces, "surfaces", nil, "Explicit comma-separated surfaces to scan (overrides profile)")
+	flags.StringVar(&overrides.Scan.GraphMode, "graph-mode", overrides.Scan.GraphMode, "BloodHound graph emission mode: attack-path or full")
+	flags.StringVar(&overrides.Scan.Scheme, "scheme", overrides.Scan.Scheme, "Discovery scheme: auto, http, or https")
+	flags.BoolVar(&overrides.Scan.RecordUnmatched, "record-unmatched", overrides.Scan.RecordUnmatched, "Record failed journal/evidence rows for unreachable ports")
+	flags.BoolVar(&prettyJSON, "pretty-json", false, "Emit indented OpenGraph JSON (default is compact JSON)")
+	flags.BoolVar(&overrides.Scan.MappedOnly, "mapped-only", overrides.Scan.MappedOnly, "Omit unmapped NetworkEndpoint nodes from BloodHound payloads")
+	flags.BoolVar(&overrides.Scan.MappedOnlyTargets, "mapped-only-targets", overrides.Scan.MappedOnlyTargets, "Restrict scan targets strictly to hosts in correlation.mapping_file")
+	flags.IntSliceVar(&overrides.Scan.ExtraPorts, "extra-ports", nil, "Additional TCP ports to sweep/probe across active surfaces")
 	flags.BoolVar(&overrides.Insecure, "insecure", false, "Explicit TLS verification bypass (off by default)")
 	flags.StringVar(&overrides.UserAgent, "user-agent", overrides.UserAgent, "Identifiable request User-Agent")
-	flags.BoolVar(&overrides.Content.Enabled, "content", overrides.Content.Enabled, "Collect allowlisted anonymous content bodies into .content.jsonl")
+	flags.BoolVar(&overrides.Content.Enabled, "content", overrides.Content.Enabled, "Enable bounded allowlisted content-tier reads")
+	flags.StringVar(&overrides.Content.Mode, "content-mode", overrides.Content.Mode, "Content-tier mode: secrets-only, metadata, or full")
 	flags.Int64Var(&overrides.Content.MaxItemBytes, "content-max-item-bytes", overrides.Content.MaxItemBytes, "Maximum bytes retained per content item (1–16777216)")
 	flags.IntVar(&overrides.Content.MaxItemsPerResource, "content-max-items-per-resource", overrides.Content.MaxItemsPerResource, "Maximum content items per resource (1–1000)")
 	flags.Int64Var(&overrides.Content.MaxServiceBytes, "content-max-service-bytes", overrides.Content.MaxServiceBytes, "Maximum content bytes per service (1–268435456)")
@@ -63,6 +78,7 @@ func newRootCommand() *cobra.Command {
 	flags.StringVar(&overrides.Correlation.MappingFile, "mapping-file", "", "Asset mapping file from the normalizer: target to existing BloodHound objectid and kind")
 
 	var prepared []string
+	var preparedEndpoints []targets.EndpointTarget
 	var effectiveConfig config.Config
 	prepare := func(cmd *cobra.Command, _ []string) error {
 		c := config.Defaults()
@@ -80,11 +96,19 @@ func newRootCommand() *cobra.Command {
 				overrides.Content.Surfaces[strings.TrimSpace(s)] = false
 			}
 		}
+		if flags.Changed("pretty-json") {
+			overrides.Scan.CompactJSON = !prettyJSON
+		}
 		var changed []string
 		flags.VisitAll(func(flag *pflag.Flag) {
-			if flag.Changed && flag.Name != "config" {
-				changed = append(changed, flag.Name)
+			if !flag.Changed || flag.Name == "config" {
+				return
 			}
+			if flag.Name == "pretty-json" {
+				changed = append(changed, "compact-json")
+				return
+			}
+			changed = append(changed, flag.Name)
 		})
 		c, err = config.Apply(c, overrides, changed)
 		if err != nil {
@@ -93,29 +117,66 @@ func newRootCommand() *cobra.Command {
 		if err = c.Validate(); err != nil {
 			return err
 		}
-		prepared, err = targets.Prepare(c.TargetInput())
-		if err != nil {
-			return err
+		ti := c.TargetInput()
+		if len(ti.Entries) > 0 || len(ti.Files) > 0 {
+			prepared, err = targets.Prepare(ti)
+			if err != nil {
+				return err
+			}
+		} else {
+			prepared = nil
 		}
-		if len(prepared) == 0 {
+		if len(c.EndpointsFiles) > 0 {
+			preparedEndpoints, err = targets.PrepareEndpoints(nil, c.EndpointsFiles, c.Exclude, c.ExcludeFiles, c.Bounds.MaxTargets)
+			if err != nil {
+				return err
+			}
+		} else {
+			preparedEndpoints = nil
+		}
+		if len(prepared) == 0 && len(preparedEndpoints) == 0 {
 			return fmt.Errorf("no targets remain after exclusions")
 		}
 		effectiveConfig = c
 		return nil
 	}
-	root.AddCommand(&cobra.Command{
-		Use: "targets", Short: "Validate policy and print normalized targets offline (no traffic)",
-		Long: "Validate scope, vantage and bounds, then print sorted, deduplicated targets\nafter exclusions. This is not the future targets × checks plan; no DNS or\nnetwork traffic occurs. Lists replace only their explicitly flagged field.",
+
+	var prioOpts bhSeedOptions
+	targetsCmd := &cobra.Command{
+		Use: "targets", Short: "Validate policy and print normalized targets (offline unless --prioritize-from-bh)",
+		Long: "Validate scope, vantage and bounds, then print sorted, deduplicated targets\nafter exclusions. No target network traffic occurs.",
 		Args: cobra.NoArgs, PreRunE: prepare,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			for _, target := range prepared {
+			outTargets := prepared
+			if effectiveConfig.Correlation.MappingFile != "" || prioOpts.enabled {
+				resolver, err := correlate.NewFromConfig(effectiveConfig)
+				if err != nil {
+					return err
+				}
+				var prioIDs map[string]bool
+				if prioOpts.enabled {
+					prioIDs, err = fetchTier0PriorityIDs(cmd, prioOpts)
+					if err != nil {
+						return err
+					}
+				}
+				outTargets = targets.PrioritizeTargets(prepared, resolver.ObjectIDForTarget, prioIDs, effectiveConfig.Scan.MappedOnlyTargets)
+			}
+			for _, target := range outTargets {
 				if _, err := fmt.Fprintln(cmd.OutOrStdout(), target); err != nil {
+					return err
+				}
+			}
+			for _, ep := range preparedEndpoints {
+				if _, err := fmt.Fprintln(cmd.OutOrStdout(), ep.String()); err != nil {
 					return err
 				}
 			}
 			return nil
 		},
-	})
+	}
+	bindBHSeedFlags(targetsCmd, &prioOpts)
+	root.AddCommand(targetsCmd)
 	root.AddCommand(&cobra.Command{
 		Use:     "plan",
 		Short:   "Print planned targets × checks offline (no traffic)",
@@ -148,6 +209,7 @@ func newRootCommand() *cobra.Command {
 	var outputDir string
 	var artifactPrefix string
 	var discoveryFile string
+	var scanBHOpts bhSeedOptions
 
 	scanCmd := &cobra.Command{
 		Use:     "scan",
@@ -165,6 +227,16 @@ func newRootCommand() *cobra.Command {
 				}
 				scanOpts = append(scanOpts, scanner.WithDefinitions(defs))
 			}
+			if len(preparedEndpoints) > 0 {
+				scanOpts = append(scanOpts, scanner.WithEndpoints(preparedEndpoints))
+			}
+			if scanBHOpts.enabled {
+				ids, err := fetchTier0PriorityIDs(cmd, scanBHOpts)
+				if err != nil {
+					return err
+				}
+				scanOpts = append(scanOpts, scanner.WithPriorityObjectIDs(ids))
+			}
 			s, err := scanner.New(effectiveConfig, scanOpts...)
 			if err != nil {
 				return err
@@ -180,6 +252,7 @@ func newRootCommand() *cobra.Command {
 	scanCmd.Flags().StringVar(&outputDir, "output-dir", "", "Directory to write emitted scan artifacts (default: current directory)")
 	scanCmd.Flags().StringVar(&artifactPrefix, "prefix", "", "Filename prefix for emitted scan artifacts (default: llmhound-<timestamp>)")
 	scanCmd.Flags().StringVar(&discoveryFile, "discovery-file", "", "Optional custom discovery fingerprint definitions file")
+	bindBHSeedFlags(scanCmd, &scanBHOpts)
 	root.AddCommand(scanCmd)
 
 	var resumeJournalPath string
@@ -205,6 +278,9 @@ func newRootCommand() *cobra.Command {
 					return fmt.Errorf("load discovery definitions: %w", err)
 				}
 				scanOpts = append(scanOpts, scanner.WithDefinitions(defs))
+			}
+			if len(preparedEndpoints) > 0 {
+				scanOpts = append(scanOpts, scanner.WithEndpoints(preparedEndpoints))
 			}
 			s, err := scanner.New(effectiveConfig, scanOpts...)
 			if err != nil {
@@ -244,6 +320,8 @@ func newRootCommand() *cobra.Command {
 		pollInterval      time.Duration
 		maxRetries        int
 		insecureCE        bool
+		noZIP             bool
+		chunkSize         int
 	)
 
 	uploadCmd := &cobra.Command{
@@ -311,6 +389,8 @@ func newRootCommand() *cobra.Command {
 				opts.PollInterval = pollInterval
 				opts.PollTimeout = uploadTimeout
 				opts.MaxRetries = maxRetries
+				opts.DisableZIP = noZIP
+				opts.MaxChunkItems = chunkSize
 				if baseFile != "" {
 					b, err := os.ReadFile(baseFile)
 					if err != nil {
@@ -393,8 +473,57 @@ func newRootCommand() *cobra.Command {
 	uploadCmd.Flags().DurationVar(&pollInterval, "poll-interval", 1*time.Second, "Upload job status polling interval")
 	uploadCmd.Flags().IntVar(&maxRetries, "max-retries", 2, "Retries on canceled upload jobs")
 	uploadCmd.Flags().BoolVar(&insecureCE, "insecure-ce", false, "Bypass TLS verification for BloodHound CE API (explicit opt-in; off by default)")
+	uploadCmd.Flags().BoolVar(&noZIP, "no-zip", false, "Upload raw uncompressed JSON instead of application/zip")
+	uploadCmd.Flags().IntVar(&chunkSize, "chunk-size", bloodhound.DefaultMaxChunkItems, "Maximum nodes+edges per BloodHound upload job")
 	root.AddCommand(uploadCmd)
 	return root
+}
+
+type bhSeedOptions struct {
+	enabled     bool
+	url         string
+	tokenID     string
+	tokenKey    string
+	bearerToken string
+	username    string
+	password    string
+	hops        int
+	insecure    bool
+}
+
+func bindBHSeedFlags(cmd *cobra.Command, opts *bhSeedOptions) {
+	f := cmd.Flags()
+	f.BoolVar(&opts.enabled, "prioritize-from-bh", false, "Query BloodHound CE read-only for Tier-0-adjacent hosts and scan them first")
+	f.StringVar(&opts.url, "bh-url", "", "BloodHound CE base URL (or BLOODHOUND_URL) for --prioritize-from-bh")
+	f.StringVar(&opts.tokenID, "bh-token-id", "", "BloodHound HMAC Token ID (or BLOODHOUND_TOKEN_ID)")
+	f.StringVar(&opts.tokenKey, "bh-token-key", "", "BloodHound HMAC Token Key (or BLOODHOUND_TOKEN_KEY)")
+	f.StringVar(&opts.bearerToken, "bh-bearer-token", "", "BloodHound Bearer JWT (or BLOODHOUND_BEARER_TOKEN)")
+	f.StringVar(&opts.username, "bh-username", "", "BloodHound username (or BLOODHOUND_USERNAME)")
+	f.StringVar(&opts.password, "bh-password", "", "BloodHound password (or BLOODHOUND_PASSWORD)")
+	f.IntVar(&opts.hops, "bh-hops", 2, "Traversable hops from Tag_Tier_Zero for --prioritize-from-bh (1–3)")
+	f.BoolVar(&opts.insecure, "bh-insecure", false, "Bypass TLS verification for BloodHound CE seed lookup")
+}
+
+func fetchTier0PriorityIDs(cmd *cobra.Command, opts bhSeedOptions) (map[string]bool, error) {
+	resolvedURL := firstNonEmpty(opts.url, os.Getenv("BLOODHOUND_URL"))
+	auth := bloodhound.AuthConfig{
+		TokenID:     firstNonEmpty(opts.tokenID, os.Getenv("BLOODHOUND_TOKEN_ID")),
+		TokenKey:    firstNonEmpty(opts.tokenKey, os.Getenv("BLOODHOUND_TOKEN_KEY")),
+		BearerToken: firstNonEmpty(opts.bearerToken, os.Getenv("BLOODHOUND_BEARER_TOKEN")),
+		Username:    firstNonEmpty(opts.username, os.Getenv("BLOODHOUND_USERNAME")),
+		Password:    firstNonEmpty(opts.password, os.Getenv("BLOODHOUND_PASSWORD")),
+	}
+	client, err := bloodhound.NewClient(bloodhound.ClientConfig{
+		BaseURL:   resolvedURL,
+		Auth:      auth,
+		Timeout:   30 * time.Second,
+		Insecure:  opts.insecure,
+		UserAgent: "LLMHound/" + version,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("bloodhound priority lookup: %w", err)
+	}
+	return client.Tier0AdjacentObjectIDs(cmd.Context(), opts.hops, 10000)
 }
 
 func printScanSummary(cmd *cobra.Command, verb string, res *scanner.ScanResult) {

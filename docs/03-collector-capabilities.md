@@ -115,7 +115,7 @@ All rules are disabled by default and require explicit opt-in in `llmhound.yaml`
 
 | Surface | Execution surface to classify | Other path-relevant facts | Opt-in rule |
 |---|---|---|---|
-| MCP | `tool_invocation` (declared); per-tool `capability_hint` (planned) | Transport and auth model, OAuth authorization-server references, resource URI schemes, whether tools list anonymously | No (advertisement is not evidence) |
+| MCP | `tool_invocation` (declared); per-tool `capability_hint` (`shell`, `filesystem`, `secrets`, `code`, `database`, `network`) | Transport and auth model, OAuth authorization-server references, resource URI schemes, whether tools list anonymously | No (advertisement is not evidence) |
 | A2A | `tool_invocation` (declared) from skills/interfaces | Advertised security schemes, linked agents and interfaces (recorded, not followed) | No |
 | Ollama | `model_mutation` (pull/delete exposed anonymously is not host execution) | Model catalog, digests, bind/exposure hints, version | No |
 | vLLM | none expected | Served models, aliases, version | No |
@@ -127,7 +127,7 @@ All rules are disabled by default and require explicit opt-in in `llmhound.yaml`
 | LangServe | `code_eval` only if documented for the route | Routes, schemas, playground exposure | No |
 | Ray dashboard | `job_submit` | Cluster/node summary, job listing, version | Yes (`ray-anonymous-jobs`, opt-in) |
 | Langflow | `workflow_exec`, `code_eval` | Auto-login posture, version | Yes (`langflow-unauthenticated-exec`, opt-in) |
-| Flowise | `workflow_exec` | Public-chatflow flags, version | Revisit |
+| Flowise | `workflow_exec` | Public-chatflow flags, version | Yes (`flowise-unauthenticated-exec`, opt-in) |
 | ChromaDB | none expected | Tenants/databases/collections, auth provider | No |
 | OpenAI-compatible | none expected | Served models, identity headers | No |
 

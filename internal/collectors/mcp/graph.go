@@ -194,6 +194,11 @@ func buildToolNodesAndEdges(scope string, srvID graph.Identity, obs graph.Observ
 			}
 		}
 
+		if hints := ClassifyCapabilityHints(tool.Name, tool.Description, tool.InputSchema); len(hints) > 0 {
+			props["capability_hint"] = hints
+			props["capability_hint_basis"] = graph.BasisDeclared
+		}
+
 		item, err := emitter.NewNodeItem(toolNode, props)
 		if err != nil {
 			return nil, nil, fmt.Errorf("create tool item %q: %w", tool.Name, err)

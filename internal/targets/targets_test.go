@@ -103,7 +103,9 @@ func TestPrepareFileAndEntryBounds(t *testing.T) {
 func TestPrepareFileBoundaries(t *testing.T) {
 	dir := t.TempDir()
 	large := filepath.Join(dir, "large.txt")
-	if err := os.WriteFile(large, []byte(strings.Repeat("# comment\n", 60000)), 0600); err != nil {
+	chunk := "# comment\n"
+	repeats := (MaxInputBytes / len(chunk) / 2) + 100
+	if err := os.WriteFile(large, []byte(strings.Repeat(chunk, repeats)), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := Prepare(Input{Files: []string{large, large}, MaxTargets: 1}); err == nil {

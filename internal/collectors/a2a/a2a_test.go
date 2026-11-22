@@ -38,6 +38,7 @@ func baseCfg() config.Config {
 	cfg.Scope = "a2a-scope"
 	cfg.VantageKey = "vantage-a2a"
 	cfg.Targets = []string{"127.0.0.1"}
+	cfg.Content.Mode = config.ContentModeFull
 	return cfg
 }
 

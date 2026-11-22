@@ -90,6 +90,7 @@ type WriterJournal struct {
 	opts    options
 	closed  bool
 	failed  error
+	pending int
 }
 
 // NewWriter creates a Journal writing to w and emits the Header entry.
@@ -333,6 +334,16 @@ func (j *WriterJournal) writeEntryLocked(entry JournalEntry) error {
 		j.failed = fmt.Errorf("journal write failed, journal is unusable: %w", err)
 		return err
 	}
+	j.pending++
+	if j.pending >= 128 {
+		if flusher, ok := j.w.(interface{ Flush() error }); ok {
+			if err := flusher.Flush(); err != nil {
+				j.failed = fmt.Errorf("journal flush failed, journal is unusable: %w", err)
+				return err
+			}
+		}
+		j.pending = 0
+	}
 	return nil
 }
 
@@ -364,11 +375,14 @@ func (j *WriterJournal) Close() error {
 	return nil
 }
 
+const fileJournalBufSize = 256 << 10 // 256 KiB buffered journal writes
+
 // FileJournal wraps WriterJournal over an os.File.
 type FileJournal struct {
 	*WriterJournal
-	file *os.File
-	path string
+	fileMu sync.Mutex
+	file   *os.File
+	path   string
 }
 
 func (f *FileJournal) Path() string {
@@ -376,6 +390,11 @@ func (f *FileJournal) Path() string {
 }
 
 func (f *FileJournal) Flush() error {
+	f.fileMu.Lock()
+	defer f.fileMu.Unlock()
+	if f.file == nil {
+		return nil
+	}
 	if err := f.WriterJournal.Flush(); err != nil {
 		return err
 	}
@@ -383,9 +402,21 @@ func (f *FileJournal) Flush() error {
 }
 
 func (f *FileJournal) Close() error {
-	flushErr := f.Flush()
-	closeErr := f.WriterJournal.Close()
-	return errors.Join(flushErr, closeErr)
+	f.fileMu.Lock()
+	defer f.fileMu.Unlock()
+	if f.file == nil {
+		return nil
+	}
+	var flushErr error
+	if err := f.WriterJournal.Flush(); err != nil {
+		flushErr = err
+	} else if err := f.file.Sync(); err != nil {
+		flushErr = err
+	}
+	wjCloseErr := f.WriterJournal.Close()
+	fileCloseErr := f.file.Close()
+	f.file = nil
+	return errors.Join(flushErr, wjCloseErr, fileCloseErr)
 }
 
 // CreateFile creates a new journal file at path, writing header as the first entry.
@@ -399,11 +430,17 @@ func CreateFile(path string, header Header, opts ...Option) (*FileJournal, error
 		return nil, fmt.Errorf("open journal file: %w", err)
 	}
 
-	wj, err := NewWriter(f, header, opts...)
+	bw := bufio.NewWriterSize(f, fileJournalBufSize)
+	wj, err := NewWriter(bw, header, opts...)
 	if err != nil {
 		_ = f.Close()
 		_ = os.Remove(path)
 		return nil, err
+	}
+	if err := bw.Flush(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(path)
+		return nil, fmt.Errorf("flush journal header: %w", err)
 	}
 
 	return &FileJournal{
@@ -454,8 +491,9 @@ func OpenFile(path string, opts ...Option) (*FileJournal, error) {
 		opt(&o)
 	}
 
+	bw := bufio.NewWriterSize(fAppend, fileJournalBufSize)
 	wj := &WriterJournal{
-		w:       fAppend,
+		w:       bw,
 		header:  *headerEntry.Header,
 		vantage: vantageOf(*headerEntry.Header),
 		opts:    o,

@@ -50,40 +50,31 @@ New to the project? Read the five-minute **[Executive Summary](docs/00-executive
                                v
   +----------------------------------------------------------------------+
   |                    llmhound scan  /  llmhound resume                 |
-  |  HTTP Fingerprinting -> 15 Read-Only Collectors -> Secret Redaction   |
+  |  TCP Sweep -> Cached HTTP/S Probe -> Attack-Path Collect & Secret Scan |
   +--+----------------+----------------+-------------------+-------------+
      |                |                |                   |
      v                v                v                   v
   *-base.json    *-linking.json   *.evidence.jsonl    *.content.jsonl
-  (source_kind:  (sourceless      (per-check, TLS,    (0600 bounded
-   LLMHound)      native edges)    redirect log)       bodies; no Upload)
+  (compact +     (sourceless      (full inventory,    (opt-in full mode;
+   source_kind)   native edges)    TLS & redirect log) 0600; no Upload)
      |                |
      +-------+--------+
              |
              v
   +----------------------------------------------------------------------+
   |                          llmhound upload                             |
-  |  CE Gate (v9.7.1) -> Schema -> Base Subgraph -> Pre-Flight -> Links  |
+  |  CE Gate -> Schema -> ZIP/Chunked Base -> Pre-Flight -> Links        |
   +----------------------------------+-----------------------------------+
                                      |
                                      v
-                        BloodHound CE + 15 Saved Queries
+                        BloodHound CE + 17 Saved Queries
 ```
 
-1. **Discover.** Bounded HTTP fingerprinting across 15 service definitions (default ports
-   overridable via `--discovery-file`).
-2. **Enumerate.** Anonymous, allowlisted read-only checks per surface capture versions,
-   authentication posture, model/tool/flow inventories, backend references, TLS metadata,
-   and bounded content bodies (`.content.jsonl`, mode `0600`).
-3. **Redact, never store secrets.** High-precision detectors (`private_key`,
-   `github_token`, `aws_access_key`) flag `has_exposed_secret = true` and mask spans with
-   `[secret:<type>]`. Raw secret values are discarded at detection time.
-4. **Attach.** Mapped targets emit `ObservedAt` edges to existing native BloodHound nodes in a
-   separate **sourceless** linking payload; unmapped targets fall back to `NetworkEndpoint`.
-5. **Opt-in path rules (off by default).** Traversable `CanExecuteOn` edges are never
-   emitted unless explicitly enabled per rule (`jupyter-auth-disabled`,
-   `ray-anonymous-jobs`, `langflow-unauthenticated-exec`) with verified native host mapping
-   and assumed-reach principals.
+1. **Discover fast.** Stage 1 concurrent TCP sweep (`--tcp-concurrency 512`) eliminates closed ports before HTTP probing, reuses cached responses across shared ports (`8000`, `8080`, `3000`), and auto-upgrades HTTP-to-HTTPS (`--scheme auto`). Default `--profile attack-path` focuses on the 10 highest-value execution, gateway, credential, and store surfaces (`--profile rce-only` narrows to 5; `--profile full` runs all 15).
+2. **Keep BloodHound signal-dense.** Default `--graph-mode attack-path` emits `AIService` nodes (with `risk_signals`), cross-host `UsesBackend` edges (`P5`), and high-risk `MCPTool` nodes (`capability_hint` for `P7`), keeping verbose child inventories in `.evidence.jsonl` (`--graph-mode full` emits all child nodes). Target inputs also support `--endpoints-file` (`host:port` lists) and `--prioritize-from-bh` to scan Tier-0-adjacent hosts first.
+3. **Redact, never store secrets.** Default `--content-mode secrets-only` scans high-yield configs and notebooks **in memory** with zero `.content.jsonl` disk bloat while flagging `has_exposed_secret = true` (`P8`); `--content-mode full` writes bounded bodies to `0600` `.content.jsonl` with `[secret:<type>]` redaction.
+4. **Attach.** Mapped targets emit `ObservedAt` edges to existing native BloodHound nodes in a separate **sourceless** linking payload; unmapped targets fall back to `NetworkEndpoint` (or omit with `--mapped-only`).
+5. **Opt-in path rules (off by default).** Traversable `CanExecuteOn` edges require explicit per-rule opt-in (`jupyter-auth-disabled`, `ray-anonymous-jobs`, `langflow-unauthenticated-exec`, `flowise-unauthenticated-exec`), verified native mapping, and assumed-reach principals.
 
 ## Supported surfaces
 

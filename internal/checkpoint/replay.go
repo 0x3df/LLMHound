@@ -93,6 +93,10 @@ func (s *State) CompletedTargets() []string {
 	return out
 }
 
+// SweepMarkerSurface is the lightweight internal surface marker recorded when
+// Stage 1 TCP sweep finds zero open ports on a host (avoids 15x unmatched bloat).
+const SweepMarkerSurface = "_tcp_sweep"
+
 // IsCompleted reports whether the given surface of target was recorded as fully covered.
 // A surface with no record is never completed; the journal cannot attest surfaces it
 // never saw, so resume must ask this per expected surface.
@@ -102,6 +106,35 @@ func (s *State) IsCompleted(target, surface string) bool {
 	}
 	tr, ok := s.targets[targetKey(target, surface)]
 	return ok && surfaceCompleted(tr)
+}
+
+// IsHostSweptEmpty reports whether Stage 1 TCP sweep already confirmed zero
+// open ports on target covering every port in ports.
+func (s *State) IsHostSweptEmpty(target string, ports []int) bool {
+	if s == nil || len(ports) == 0 {
+		return false
+	}
+	tr, ok := s.targets[targetKey(target, SweepMarkerSurface)]
+	if !ok || !surfaceCompleted(tr) || tr.Details == nil {
+		return false
+	}
+	raw, _ := tr.Details["swept_ports"].(string)
+	if raw == "" {
+		return false
+	}
+	covered := make(map[string]bool)
+	for _, p := range strings.Split(raw, ",") {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			covered[p] = true
+		}
+	}
+	for _, port := range ports {
+		if !covered[fmt.Sprintf("%d", port)] {
+			return false
+		}
+	}
+	return true
 }
 
 func surfaceCompleted(tr TargetRecord) bool {

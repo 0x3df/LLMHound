@@ -39,8 +39,9 @@ type nativeNode struct {
 
 // Resolver is immutable after construction; inputs are normalized and copied.
 type Resolver struct {
-	mappings map[graph.Target][]nativeNode
-	source   string
+	mappings   map[graph.Target][]nativeNode
+	byObjectID map[string][]string
+	source     string
 }
 
 // New validates and indexes mapping entries. Duplicate identical entries
@@ -53,8 +54,9 @@ func New(mappings []Mapping) (*Resolver, error) {
 // mapping revision/source provenance identifier.
 func NewWithSource(mappings []Mapping, source string) (*Resolver, error) {
 	r := &Resolver{
-		mappings: make(map[graph.Target][]nativeNode),
-		source:   source,
+		mappings:   make(map[graph.Target][]nativeNode),
+		byObjectID: make(map[string][]string),
+		source:     source,
 	}
 	for _, m := range mappings {
 		target, err := graph.ParseTarget(m.Target)
@@ -67,9 +69,49 @@ func NewWithSource(mappings []Mapping, source string) (*Resolver, error) {
 		r.mappings[target] = append(r.mappings[target], nativeNode{m.ObjectID, m.Kind})
 	}
 	for target, nodes := range r.mappings {
-		r.mappings[target] = uniqueNodes(nodes)
+		uniq := uniqueNodes(nodes)
+		r.mappings[target] = uniq
+		if len(uniq) == 1 {
+			r.byObjectID[uniq[0].id] = append(r.byObjectID[uniq[0].id], target.Value())
+		}
+	}
+	for id, hosts := range r.byObjectID {
+		sort.Strings(hosts)
+		r.byObjectID[id] = hosts
 	}
 	return r, nil
+}
+
+// HasMapping reports whether rawTarget resolves uniquely to an existing native node.
+func (r *Resolver) HasMapping(rawTarget string) bool {
+	_, ok := r.ObjectIDForTarget(rawTarget)
+	return ok
+}
+
+// ObjectIDForTarget returns the unique existing native ObjectID mapped to rawTarget,
+// or ("", false) if unmapped or ambiguous.
+func (r *Resolver) ObjectIDForTarget(rawTarget string) (string, bool) {
+	if r == nil {
+		return "", false
+	}
+	target, err := graph.ParseTarget(rawTarget)
+	if err != nil {
+		return "", false
+	}
+	nodes := r.mappings[target]
+	if len(nodes) != 1 {
+		return "", false
+	}
+	return nodes[0].id, true
+}
+
+// MappedHostsForObjectID returns the sorted canonical target strings that
+// uniquely map to objectID.
+func (r *Resolver) MappedHostsForObjectID(objectID string) []string {
+	if r == nil {
+		return nil
+	}
+	return append([]string(nil), r.byObjectID[objectID]...)
 }
 
 // Evidence preserves the original accepted target and the decision made.

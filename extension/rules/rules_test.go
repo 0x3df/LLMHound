@@ -28,8 +28,8 @@ func TestEmbeddedRuleFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read embedded rules dir: %v", err)
 	}
-	if len(entries) != 3 {
-		t.Fatalf("expected 3 embedded rule files, got %d", len(entries))
+	if len(entries) != 4 {
+		t.Fatalf("expected 4 embedded rule files, got %d", len(entries))
 	}
 	seenIDs := map[string]bool{}
 	for _, ent := range entries {

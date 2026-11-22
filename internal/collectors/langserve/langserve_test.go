@@ -34,6 +34,7 @@ func testConfig(target string) config.Config {
 	cfg.Scope = "lab-scope"
 	cfg.VantageKey = "scanner-a"
 	cfg.Targets = []string{target}
+	cfg.Content.Mode = config.ContentModeFull
 	return cfg
 }
 

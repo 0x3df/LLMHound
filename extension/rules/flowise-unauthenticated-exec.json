@@ -1,0 +1,16 @@
+{
+  "id": "flowise-unauthenticated-exec",
+  "version": "1.0.0",
+  "capability_class": "host_code_execution",
+  "surface": "flowise",
+  "node_kind": "FlowiseInstance",
+  "version_range": ">=1.0.0",
+  "required_checks_any": [
+    "flowise_chatflows"
+  ],
+  "docs": [
+    "https://docs.flowiseai.com/using-flowise/custom-mcp-and-tools"
+  ],
+  "confidence": "high",
+  "exec_identity": "unknown"
+}

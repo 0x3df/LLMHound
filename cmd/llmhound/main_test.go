@@ -1,6 +1,7 @@
 package main
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -154,9 +155,22 @@ func TestUploadValidationAndPlanWritesNoArtifacts(t *testing.T) {
 		t.Fatalf("upload without url: %q %v", out, err)
 	}
 
-	out, err = execute("plan", "--scope", "tenant", "--vantage", "scanner", "--targets", "ai.example.test")
+	// Default attack-path plan: 10 surfaces, secrets-only content.
+	outDef, err := execute("plan", "--scope", "tenant", "--vantage", "scanner", "--targets", "ai.example.test")
 	if err != nil {
-		t.Fatalf("plan: %q %v", out, err)
+		t.Fatalf("plan (default): %q %v", outDef, err)
+	}
+	if !strings.Contains(outDef, "TARGET: ai.example.test") || !strings.Contains(outDef, "SURFACE: jupyter") {
+		t.Fatalf("default plan missing jupyter: %q", outDef)
+	}
+	if strings.Contains(outDef, "SURFACE: vllm") {
+		t.Fatalf("default attack-path plan should exclude low-value vllm: %q", outDef)
+	}
+
+	// Explicit full profile + full content mode: all 15 surfaces and all content checks active.
+	out, err = execute("plan", "--scope", "tenant", "--vantage", "scanner", "--targets", "ai.example.test", "--profile", "full", "--content-mode", "full")
+	if err != nil {
+		t.Fatalf("plan (full): %q %v", out, err)
 	}
 	if !strings.Contains(out, "TARGET: ai.example.test") {
 		t.Fatalf("plan missing target: %q", out)
@@ -176,7 +190,7 @@ func TestUploadValidationAndPlanWritesNoArtifacts(t *testing.T) {
 		}
 	}
 	if strings.Contains(out, "policy:") {
-		t.Fatalf("default plan should enable content checks, got skip policy: %q", out)
+		t.Fatalf("full content plan should enable content checks, got skip policy: %q", out)
 	}
 
 	outOff, err := execute("plan", "--scope", "tenant", "--vantage", "scanner", "--targets", "ai.example.test", "--content=false")
@@ -366,6 +380,9 @@ func TestScanCLIEndToEndLoopbackFixtures(t *testing.T) {
 		"--vantage", "cli-vantage",
 		"--targets", "127.0.0.1",
 		"--discovery-file", "discovery.json",
+		"--profile", "full",
+		"--graph-mode", "full",
+		"--content-mode", "full",
 		"--output-dir", outDir,
 		"--prefix", "cli-live",
 	)
@@ -648,6 +665,9 @@ func TestScanCLIM2bCohortLoopbackFixtures(t *testing.T) {
 		"--vantage", "cli-vantage",
 		"--targets", "127.0.0.1",
 		"--discovery-file", "m2b-discovery.json",
+		"--profile", "full",
+		"--graph-mode", "full",
+		"--content-mode", "full",
 		"--output-dir", outDir,
 		"--prefix", "m2b-live",
 	)
@@ -859,6 +879,9 @@ func TestScanCLID5D6CohortLoopbackFixtures(t *testing.T) {
 		"--vantage", "cli-vantage",
 		"--targets", "127.0.0.1",
 		"--discovery-file", "d5d6-discovery.json",
+		"--profile", "full",
+		"--graph-mode", "full",
+		"--content-mode", "full",
 		"--output-dir", outDir,
 		"--prefix", "d5d6-live",
 	)
@@ -1048,13 +1071,18 @@ func TestUploadCLIWithMockCE(t *testing.T) {
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v2/file-upload/start":
 			w.WriteHeader(http.StatusCreated)
 			_, _ = fmt.Fprintf(w, `{"data":{"id":%d}}`, len(uploadedFiles)+1)
-		case r.Method == http.MethodPost && r.URL.Path == "/api/v2/file-upload/1":
+		case r.Method == http.MethodPost && (r.URL.Path == "/api/v2/file-upload/1" || r.URL.Path == "/api/v2/file-upload/2"):
 			b, _ := io.ReadAll(r.Body)
-			uploadedFiles = append(uploadedFiles, b)
-			uploadedFileNames = append(uploadedFileNames, r.Header.Get("X-File-Upload-Name"))
-			w.WriteHeader(http.StatusAccepted)
-		case r.Method == http.MethodPost && r.URL.Path == "/api/v2/file-upload/2":
-			b, _ := io.ReadAll(r.Body)
+			if strings.Contains(r.Header.Get("Content-Type"), "application/zip") {
+				zr, zerr := zip.NewReader(bytes.NewReader(b), int64(len(b)))
+				if zerr == nil && len(zr.File) > 0 {
+					rc, oerr := zr.File[0].Open()
+					if oerr == nil {
+						b, _ = io.ReadAll(rc)
+						_ = rc.Close()
+					}
+				}
+			}
 			uploadedFiles = append(uploadedFiles, b)
 			uploadedFileNames = append(uploadedFileNames, r.Header.Get("X-File-Upload-Name"))
 			w.WriteHeader(http.StatusAccepted)
@@ -1168,8 +1196,11 @@ func TestUploadCLIWithMockCE(t *testing.T) {
 	if len(importedZip) == 0 {
 		t.Fatal("expected non-empty saved queries zip import")
 	}
-	if !strings.Contains(out, "Imported 15 saved queries") {
-		t.Fatalf("expected 15 imported saved queries, got: %q", out)
+	if !strings.HasSuffix(uploadedFileNames[0], ".zip") || !strings.HasSuffix(uploadedFileNames[1], ".zip") {
+		t.Fatalf("expected default .zip uploads, got names: %v", uploadedFileNames)
+	}
+	if !strings.Contains(out, "Imported 17 saved queries") {
+		t.Fatalf("expected 17 imported saved queries, got: %q", out)
 	}
 
 	// 3. Unpinned CE version fails closed unless --allow-unvalidated-ce is set.
@@ -1181,5 +1212,48 @@ func TestUploadCLIWithMockCE(t *testing.T) {
 	out, err = execute("upload", "--url", ce.URL, "--bearer-token", "tok", "--validate-only", "--allow-unvalidated-ce")
 	if err != nil || !strings.Contains(out, "WARNING [version]") {
 		t.Fatalf("expected warning with --allow-unvalidated-ce, got out=%q err=%v", out, err)
+	}
+}
+
+func TestCLI_EndpointsFileAndPrioritizeFromBH(t *testing.T) {
+	inEmptyDirectory(t)
+	epFile := filepath.Join(t.TempDir(), "endpoints.txt")
+	if err := os.WriteFile(epFile, []byte("192.0.2.10:8888\nhttps://192.0.2.20:8443\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	mapFile := filepath.Join(t.TempDir(), "map.json")
+	if err := os.WriteFile(mapFile, []byte(`{"192.0.2.10":"S-1-5-21-NORMAL","192.0.2.30":"S-1-5-21-TIER0"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	ce := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v2/extensions-edges":
+			_, _ = w.Write([]byte(`{"data":{"edges":[{"name":"MemberOf","is_traversable":true,"is_builtin":true}]}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v2/graphs/cypher":
+			_, _ = w.Write([]byte(`{"data":{"nodes":{"1":{"objectId":"S-1-5-21-TIER0","kinds":["Computer"]}}}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ce.Close()
+
+	out, err := execute(
+		"targets",
+		"--scope", "corp",
+		"--vantage", "v1",
+		"--targets", "192.0.2.10,192.0.2.30,192.0.2.99",
+		"--endpoints-file", epFile,
+		"--mapping-file", mapFile,
+		"--prioritize-from-bh",
+		"--bh-url", ce.URL,
+		"--bh-bearer-token", "tok",
+	)
+	if err != nil {
+		t.Fatalf("targets --prioritize-from-bh failed: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) != 5 || lines[0] != "192.0.2.30" || lines[1] != "192.0.2.10" || lines[2] != "192.0.2.99" {
+		t.Fatalf("unexpected prioritized output order: %v", lines)
 	}
 }

@@ -102,6 +102,7 @@ func TestOllama_AnonymousHappyPath(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.Scope = "corp-scope"
 	cfg.VantageKey = "vantage-01"
+	cfg.Content.Mode = config.ContentModeFull
 
 	var sink content.MemorySink
 	collector := ollama.New(cfg, ollama.WithContentSink(&sink))
@@ -275,6 +276,7 @@ func TestOllama_VersionFailurePartialCoverage(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.Scope = "corp-scope"
 	cfg.VantageKey = "vantage-01"
+	cfg.Content.Mode = config.ContentModeFull
 
 	collector := ollama.New(cfg)
 	ctx := context.Background()
@@ -334,6 +336,7 @@ func TestOllama_TagsDeniedAccess(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.Scope = "corp-scope"
 	cfg.VantageKey = "vantage-01"
+	cfg.Content.Mode = config.ContentModeFull
 
 	collector := ollama.New(cfg)
 	ctx := context.Background()
@@ -399,6 +402,7 @@ func TestOllama_Truncation(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.Scope = "corp-scope"
 	cfg.VantageKey = "vantage-01"
+	cfg.Content.Mode = config.ContentModeFull
 	cfg.Bounds.MaxItems = 2 // Cap at 2 models
 
 	collector := ollama.New(cfg)
@@ -460,10 +464,23 @@ func TestOllama_OptInSensitiveMetadata(t *testing.T) {
 	vantage := helperVantage(t, "corp-scope", "vantage-01")
 	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
 
-	// 1. Default policy (content enabled): /api/show IS called
+	// 1. Default secrets-only policy skips low-yield /api/show; full mode calls it.
+	cfgSecretsOnly := config.Defaults()
+	cfgSecretsOnly.Scope = "corp-scope"
+	cfgSecretsOnly.VantageKey = "vantage-01"
+	var sinkDefault content.MemorySink
+	if _, err := ollama.New(cfgSecretsOnly, ollama.WithContentSink(&sinkDefault)).Collect(ctx, ts.URL, vantage.scope, vantage.key, "scan-000", now, nil); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if showCalled {
+		t.Errorf("show endpoint must NOT be called under default secrets-only policy")
+	}
+
+	// 1b. Full content policy: /api/show IS called.
 	cfgDefault := config.Defaults()
 	cfgDefault.Scope = "corp-scope"
 	cfgDefault.VantageKey = "vantage-01"
+	cfgDefault.Content.Mode = config.ContentModeFull
 
 	var sink content.MemorySink
 	collectorDefault := ollama.New(cfgDefault, ollama.WithContentSink(&sink))
@@ -537,6 +554,7 @@ func TestOllama_TargetUnreachable(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.Scope = "corp-scope"
 	cfg.VantageKey = "vantage-01"
+	cfg.Content.Mode = config.ContentModeFull
 	cfg.Bounds.ConnectTimeout = 100 * time.Millisecond
 	cfg.Bounds.ResponseTimeout = 200 * time.Millisecond
 
@@ -579,6 +597,7 @@ func TestOllama_ComputerCorrelation(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.Scope = "corp-scope"
 	cfg.VantageKey = "vantage-01"
+	cfg.Content.Mode = config.ContentModeFull
 	cfg.Targets = []string{"ollama.corp.local"}
 	mappingFile := filepath.Join(t.TempDir(), "assets.csv")
 	if err := os.WriteFile(mappingFile, []byte("ollama.corp.local,S-1-5-21-123456789-1001,Computer\n"), 0o600); err != nil {
@@ -772,6 +791,7 @@ func TestOllama_HTMLResponseFails(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.Scope = "corp-scope"
 	cfg.VantageKey = "vantage-01"
+	cfg.Content.Mode = config.ContentModeFull
 
 	collector := ollama.New(cfg)
 	ctx := context.Background()
@@ -925,6 +945,7 @@ func TestOllama_ShowRecordsOnlyRedactedProvenance(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.Scope = "corp-scope"
 	cfg.VantageKey = "vantage-01"
+	cfg.Content.Mode = config.ContentModeFull
 
 	var sink content.MemorySink
 	vantage := helperVantage(t, cfg.Scope, cfg.VantageKey)
@@ -995,6 +1016,7 @@ func TestOllama_PSAndShowFailuresDowngradeCoverage(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.Scope = "corp-scope"
 	cfg.VantageKey = "vantage-01"
+	cfg.Content.Mode = config.ContentModeFull
 
 	var sink content.MemorySink
 	vantage := helperVantage(t, cfg.Scope, cfg.VantageKey)
@@ -1030,6 +1052,7 @@ func TestOllama_TruncatedTagsBodyReportedAsTruncation(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.Scope = "corp-scope"
 	cfg.VantageKey = "vantage-01"
+	cfg.Content.Mode = config.ContentModeFull
 	cfg.Bounds.MaxResponseBytes = 256
 
 	vantage := helperVantage(t, cfg.Scope, cfg.VantageKey)
@@ -1067,6 +1090,7 @@ func TestOllama_PSBoundedByMaxItems(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.Scope = "corp-scope"
 	cfg.VantageKey = "vantage-01"
+	cfg.Content.Mode = config.ContentModeFull
 	cfg.Bounds.MaxItems = 1
 
 	vantage := helperVantage(t, cfg.Scope, cfg.VantageKey)
@@ -1106,6 +1130,7 @@ func TestOllama_ShowTruncatedBodyReportedAsTruncation(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.Scope = "corp-scope"
 	cfg.VantageKey = "vantage-01"
+	cfg.Content.Mode = config.ContentModeFull
 	cfg.Bounds.MaxResponseBytes = 256
 
 	vantage := helperVantage(t, cfg.Scope, cfg.VantageKey)
@@ -1145,6 +1170,7 @@ func TestOllama_PSRedirectEvidenceRecorded(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.Scope = "corp-scope"
 	cfg.VantageKey = "vantage-01"
+	cfg.Content.Mode = config.ContentModeFull
 	cfg.Bounds.MaxRedirects = 2
 
 	vantage := helperVantage(t, cfg.Scope, cfg.VantageKey)
@@ -1185,6 +1211,7 @@ func TestOllama_ContentBudgetTruncationAndNonLeak(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.Scope = "corp-scope"
 	cfg.VantageKey = "vantage-01"
+	cfg.Content.Mode = config.ContentModeFull
 	cfg.Content.MaxItemBytes = 32
 	cfg.Content.MaxServiceBytes = 32
 
@@ -1243,6 +1270,7 @@ func TestOllama_IPv6EndpointAndFailedEmitsNoNodes(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.Scope = "corp-scope"
 	cfg.VantageKey = "vantage-01"
+	cfg.Content.Mode = config.ContentModeFull
 	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
 	res, err := ollama.New(cfg).Collect(context.Background(), ts.URL, "corp-scope", "vantage-01", "scan-001", now, nil)
 	if err != nil {
@@ -1275,6 +1303,7 @@ func TestOllama_ContentItemsPerModelBound(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.Scope = "corp-scope"
 	cfg.VantageKey = "vantage-01"
+	cfg.Content.Mode = config.ContentModeFull
 	cfg.Content.MaxItemsPerResource = 1
 	var sink content.MemorySink
 	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)

@@ -1,6 +1,6 @@
 # Starter saved queries
 
-> **Status: All 15 queries (`P1`–`P8` and `I1`–`I7`) are implemented, generated** (`extension/saved_searches/`, via `tools/gensearches`),
+> **Status: All 17 queries (`P1`–`P10` and `I1`–`I7`) are implemented, generated** (`extension/saved_searches/`, via `tools/gensearches`),
 > validated for syntax and schema kinds, and importable via `llmhound upload --import-queries`. Core queries (`P1`, `P2`, `P4`, `P6`)
 > were additionally validated live against CE 9.7.1 (`lab/scripts/run-d2-checks.sh`, [R2](05-ce-compatibility.md#follow-up-answers-for-the-tier-0-redesign-r1r9));
 > kind and property names follow the [graph model](02-graph-model.md) and the
@@ -140,9 +140,9 @@ RETURN m, t, h
 ```
 
 `capability_hint` is a heuristic over advertised descriptions (`declared`); it
-prioritizes review, it is not evidence of behavior. (*Note: `MCPTool.capability_hint`
-is specified in the schema and query `P7`, and is not yet populated by
-`internal/collectors/mcp`, so `P7` returns empty until a future update adds the classifier.*)
+prioritizes review, it is not evidence of behavior. `internal/collectors/mcp`
+populates `capability_hint` deterministically from advertised tool names,
+descriptions, and `inputSchema` keys.
 
 ### P8. AI hosts with an exposed secret, on a path
 
@@ -161,6 +161,26 @@ so the query also requires a recent `secret_last_confirmed` (`$cutoff` is an
 ISO-8601 UTC string; string comparison works). A result is a confirmed presence;
 a miss is not evidence of absence. The path is bounded variable-length, not
 `shortestPath`, because the service is joined first.
+
+### P9. High-risk AI services near Tier 0
+
+```cypher
+MATCH (s:AIService)-[:ObservedAt]->(h)
+WHERE NOT h:NetworkEndpoint
+  AND ('anon_exec_surface' IN s.risk_signals OR s.has_exposed_secret = true)
+MATCH p = (h)-[:<PATH_KINDS>*1..2]->(t:Tag_Tier_Zero)
+RETURN s, h, p
+LIMIT 100
+```
+
+### P10. Shortest path from Owned principals to AI hosts
+
+```cypher
+MATCH p = shortestPath((o:Tag_Owned)-[:<PATH_KINDS>*1..]->(h))
+WHERE (h)<-[:ObservedAt]-(:AIService)
+RETURN p
+LIMIT 100
+```
 
 ## Inventory and posture
 

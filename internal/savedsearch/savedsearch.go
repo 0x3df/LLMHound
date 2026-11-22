@@ -188,6 +188,20 @@ func GenerateWithOptions(pathKinds []string, opts GenerateOptions) []Query {
 				svc, obs, nep, CutoffPlaceholder, pk),
 		},
 		{
+			Name:        "LLMHound P9: high-risk AI services near Tier 0",
+			Description: "Mapped AI services with anonymous execution surfaces or confirmed exposed secrets within 1–2 traversable hops of Tag_Tier_Zero.",
+			Query: fmt.Sprintf("MATCH (s:%s)-[:%s]->(h)\n"+
+				"WHERE NOT h:%s\n  AND ('anon_exec_surface' IN s.risk_signals OR s.has_exposed_secret = true)\n"+
+				"MATCH p = (h)-[:%s*1..2]->(t:Tag_Tier_Zero)\nRETURN s, h, p\nLIMIT 100",
+				svc, obs, nep, pk),
+		},
+		{
+			Name:        "LLMHound P10: shortest path from Owned principals to AI hosts",
+			Description: "Shortest traversable paths from Owned principals (Tag_Owned) to any mapped host running an AI service.",
+			Query: fmt.Sprintf("MATCH p = shortestPath((o:Tag_Owned)-[:%s*1..]->(h))\n"+
+				"WHERE (h)<-[:%s]-(:%s)\nRETURN p\nLIMIT 100", pk, obs, svc),
+		},
+		{
 			Name:        "LLMHound I1: anonymous access to AI services",
 			Description: "Inventory of AI services whose enumeration endpoints answered anonymously or with mixed auth outcomes.",
 			Query:       fmt.Sprintf("MATCH (s:%s)\nWHERE s.auth_observed IN ['anonymous', 'mixed']\nRETURN s\nLIMIT 500", svc),

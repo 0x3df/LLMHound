@@ -1,6 +1,8 @@
 package bloodhound
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,6 +14,10 @@ import (
 	"github.com/0x3df/LLMHound/internal/emitter"
 	"github.com/0x3df/LLMHound/internal/graph"
 )
+
+// DefaultMaxChunkItems caps nodes+edges per BloodHound CE upload job so
+// multi-thousand-node enterprise scans do not overwhelm single ingest workers.
+const DefaultMaxChunkItems = 2500
 
 const (
 	jobStatusReady    = 0
@@ -46,12 +52,16 @@ type UploadOptions struct {
 	PollInterval        time.Duration
 	PollTimeout         time.Duration
 	MaxRetries          int
+	DisableZIP          bool
+	MaxChunkItems       int
 }
 
 // UploadReport summarizes a two-step upload including existence pre-flight.
 type UploadReport struct {
 	BaseJob      *JobResult    `json:"base_job,omitempty"`
+	BaseJobs     []JobResult   `json:"base_jobs,omitempty"`
 	LinkingJob   *JobResult    `json:"linking_job,omitempty"`
+	LinkingJobs  []JobResult   `json:"linking_jobs,omitempty"`
 	SkippedEdges []SkippedEdge `json:"skipped_edges,omitempty"`
 	KeptEdges    int           `json:"kept_edges"`
 }
@@ -255,12 +265,17 @@ func (c *Client) completedTaskErrors(ctx context.Context, jobID int64) ([]TaskEr
 
 // UploadScan enforces the M0 Q5 two-step upload safety contract and runs the
 // read-only existence pre-flight on any linking payload before uploading.
+// Oversized payloads are automatically chunked and compressed as ZIP (unless DisableZIP).
 func (c *Client) UploadScan(ctx context.Context, opts UploadOptions) (*UploadReport, error) {
 	if len(opts.BasePayloadBytes) == 0 && len(opts.LinkingPayloadBytes) == 0 {
 		return nil, errors.New("upload requires at least a base payload or linking payload")
 	}
 	if opts.MaxRetries < 0 {
 		opts.MaxRetries = 0
+	}
+	chunkLimit := opts.MaxChunkItems
+	if chunkLimit <= 0 {
+		chunkLimit = DefaultMaxChunkItems
 	}
 
 	report := &UploadReport{}
@@ -285,10 +300,15 @@ func (c *Client) UploadScan(ctx context.Context, opts UploadOptions) (*UploadRep
 		if name == "" {
 			name = "llmhound-base.json"
 		}
-		job, err := c.UploadFileJob(ctx, opts.BasePayloadBytes, "application/json", name, opts.PollInterval, opts.PollTimeout, opts.MaxRetries)
-		report.BaseJob = &job
-		if err != nil {
-			return report, fmt.Errorf("upload base payload: %w", err)
+		chunks := splitBasePayload(base, chunkLimit)
+		for idx, ch := range chunks {
+			job, err := c.uploadPayloadChunk(ctx, ch, baseChunkName(name, idx, len(chunks)), opts)
+			report.BaseJobs = append(report.BaseJobs, job)
+			jCopy := job
+			report.BaseJob = &jCopy
+			if err != nil {
+				return report, fmt.Errorf("upload base payload: %w", err)
+			}
 		}
 	}
 
@@ -309,21 +329,125 @@ func (c *Client) UploadScan(ctx context.Context, opts UploadOptions) (*UploadRep
 		report.KeptEdges = len(filtered.Graph.Edges)
 
 		if len(filtered.Graph.Edges) > 0 {
-			filteredBytes, err := json.Marshal(filtered)
-			if err != nil {
-				return report, fmt.Errorf("marshal filtered linking payload: %w", err)
-			}
 			name := opts.LinkingFileName
 			if name == "" {
 				name = "llmhound-linking.json"
 			}
-			job, err := c.UploadFileJob(ctx, filteredBytes, "application/json", name, opts.PollInterval, opts.PollTimeout, opts.MaxRetries)
-			report.LinkingJob = &job
-			if err != nil {
-				return report, fmt.Errorf("upload linking payload: %w", err)
+			chunks := splitLinkingPayload(filtered, chunkLimit)
+			for idx, ch := range chunks {
+				job, err := c.uploadPayloadChunk(ctx, ch, baseChunkName(name, idx, len(chunks)), opts)
+				report.LinkingJobs = append(report.LinkingJobs, job)
+				jCopy := job
+				report.LinkingJob = &jCopy
+				if err != nil {
+					return report, fmt.Errorf("upload linking payload: %w", err)
+				}
 			}
 		}
 	}
 
 	return report, nil
+}
+
+func (c *Client) uploadPayloadChunk(ctx context.Context, payload emitter.Payload, jsonName string, opts UploadOptions) (JobResult, error) {
+	rawBytes, err := json.Marshal(payload)
+	if err != nil {
+		return JobResult{}, fmt.Errorf("marshal chunk %s: %w", jsonName, err)
+	}
+	contentType := "application/json"
+	uploadBytes := rawBytes
+	uploadName := jsonName
+	if !opts.DisableZIP {
+		zipped, err := zipSingleFile(jsonName, rawBytes)
+		if err != nil {
+			return JobResult{}, fmt.Errorf("compress chunk %s: %w", jsonName, err)
+		}
+		contentType = "application/zip"
+		uploadBytes = zipped
+		uploadName = strings.TrimSuffix(jsonName, ".json") + ".zip"
+	}
+	return c.UploadFileJob(ctx, uploadBytes, contentType, uploadName, opts.PollInterval, opts.PollTimeout, opts.MaxRetries)
+}
+
+func zipSingleFile(innerName string, content []byte) ([]byte, error) {
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	fw, err := zw.Create(innerName)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := fw.Write(content); err != nil {
+		return nil, err
+	}
+	if err := zw.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func splitBasePayload(p emitter.Payload, limit int) []emitter.Payload {
+	if limit <= 0 || len(p.Graph.Nodes)+len(p.Graph.Edges) <= limit {
+		return []emitter.Payload{p}
+	}
+	var out []emitter.Payload
+	// Upload nodes before edges so owned edge targets exist first.
+	for i := 0; i < len(p.Graph.Nodes); i += limit {
+		end := i + limit
+		if end > len(p.Graph.Nodes) {
+			end = len(p.Graph.Nodes)
+		}
+		out = append(out, emitter.Payload{
+			Metadata: &emitter.Metadata{SourceKind: graph.SourceKind},
+			Graph: emitter.GraphPayload{
+				Nodes: p.Graph.Nodes[i:end],
+				Edges: []emitter.EdgePayload{},
+			},
+		})
+	}
+	for i := 0; i < len(p.Graph.Edges); i += limit {
+		end := i + limit
+		if end > len(p.Graph.Edges) {
+			end = len(p.Graph.Edges)
+		}
+		out = append(out, emitter.Payload{
+			Metadata: &emitter.Metadata{SourceKind: graph.SourceKind},
+			Graph: emitter.GraphPayload{
+				Nodes: []emitter.NodePayload{},
+				Edges: p.Graph.Edges[i:end],
+			},
+		})
+	}
+	if len(out) == 0 {
+		return []emitter.Payload{p}
+	}
+	return out
+}
+
+func splitLinkingPayload(p emitter.Payload, limit int) []emitter.Payload {
+	if limit <= 0 || len(p.Graph.Edges) <= limit {
+		return []emitter.Payload{p}
+	}
+	var out []emitter.Payload
+	for i := 0; i < len(p.Graph.Edges); i += limit {
+		end := i + limit
+		if end > len(p.Graph.Edges) {
+			end = len(p.Graph.Edges)
+		}
+		out = append(out, emitter.Payload{
+			Metadata: nil, // M0 Q5: must stay sourceless on every linking chunk.
+			Graph: emitter.GraphPayload{
+				Nodes: []emitter.NodePayload{},
+				Edges: p.Graph.Edges[i:end],
+			},
+		})
+	}
+	return out
+}
+
+func baseChunkName(name string, idx, total int) string {
+	if total <= 1 {
+		return name
+	}
+	stem := strings.TrimSuffix(name, ".json")
+	return fmt.Sprintf("%s-part%03d.json", stem, idx+1)
 }

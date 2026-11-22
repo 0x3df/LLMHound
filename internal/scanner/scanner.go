@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -38,6 +39,7 @@ import (
 	"github.com/0x3df/LLMHound/internal/emitter"
 	"github.com/0x3df/LLMHound/internal/graph"
 	"github.com/0x3df/LLMHound/internal/rules"
+	"github.com/0x3df/LLMHound/internal/targets"
 )
 
 // PlannedCheck describes an allowlisted check planned for a surface.
@@ -83,6 +85,7 @@ type Option func(*Scanner)
 func WithDefinitions(defs []discovery.Definition) Option {
 	return func(s *Scanner) {
 		s.definitions = defs
+		s.customDefs = true
 	}
 }
 
@@ -98,6 +101,38 @@ func WithResolver(r *correlate.Resolver) Option {
 func WithHTTPClient(client *http.Client) Option {
 	return func(s *Scanner) {
 		s.httpClient = client
+	}
+}
+
+// WithTCPDialer overrides the TCP dialer used during Stage 1 open-port sweeps.
+func WithTCPDialer(dialer discovery.TCPDialer) Option {
+	return func(s *Scanner) {
+		s.tcpDialer = dialer
+	}
+}
+
+// WithPriorityObjectIDs supplies BloodHound native ObjectIDs (e.g. hosts on or
+// near Tier 0) whose mapped targets are scanned in the highest-priority wave.
+func WithPriorityObjectIDs(ids map[string]bool) Option {
+	return func(s *Scanner) {
+		if len(ids) == 0 {
+			return
+		}
+		cp := make(map[string]bool, len(ids))
+		for k, v := range ids {
+			if v {
+				cp[k] = true
+			}
+		}
+		s.priorityObjectIDs = cp
+	}
+}
+
+// WithEndpoints provides explicit pre-scanned host:port (and optional scheme)
+// targets to probe directly across active definitions without port filtering.
+func WithEndpoints(endpoints []targets.EndpointTarget) Option {
+	return func(s *Scanner) {
+		s.endpoints = append([]targets.EndpointTarget(nil), endpoints...)
 	}
 }
 
@@ -117,12 +152,16 @@ func WithCollectorVersion(version string) Option {
 
 // Scanner coordinates discovery, collectors, checkpointing, and emission for a scan.
 type Scanner struct {
-	cfg              config.Config
-	definitions      []discovery.Definition
-	resolver         *correlate.Resolver
-	httpClient       *http.Client
-	now              func() time.Time
-	collectorVersion string
+	cfg               config.Config
+	definitions       []discovery.Definition
+	customDefs        bool
+	resolver          *correlate.Resolver
+	httpClient        *http.Client
+	tcpDialer         discovery.TCPDialer
+	priorityObjectIDs map[string]bool
+	endpoints         []targets.EndpointTarget
+	now               func() time.Time
+	collectorVersion  string
 }
 
 // New creates and initializes a Scanner instance.
@@ -131,9 +170,14 @@ func New(cfg config.Config, opts ...Option) (*Scanner, error) {
 		return nil, fmt.Errorf("invalid config: %w", err)
 	}
 
+	defs, err := discovery.DefinitionsForProfile(cfg.Scan.Profile, cfg.Scan.Surfaces)
+	if err != nil {
+		return nil, fmt.Errorf("select discovery profile: %w", err)
+	}
+
 	s := &Scanner{
 		cfg:              cfg,
-		definitions:      discovery.BuiltinDefinitions(),
+		definitions:      defs,
 		now:              func() time.Time { return time.Now().UTC() },
 		collectorVersion: "0.1.0",
 	}
@@ -750,7 +794,7 @@ func (s *Scanner) planSurfaces(_ string) []SurfacePlan {
 // Scan executes target enumeration across supported collectors, writing through
 // a checkpoint journal and emitting OpenGraph payload and evidence sidecars.
 func (s *Scanner) Scan(ctx context.Context, targets []string, outputDir, prefix string) (*ScanResult, error) {
-	if len(targets) == 0 {
+	if len(targets) == 0 && len(s.endpoints) == 0 {
 		return nil, fmt.Errorf("no targets to scan")
 	}
 
@@ -812,7 +856,7 @@ func (s *Scanner) Resume(ctx context.Context, journalPath string, targets []stri
 	if strings.TrimSpace(journalPath) == "" {
 		return nil, fmt.Errorf("resume requires a journal path")
 	}
-	if len(targets) == 0 {
+	if len(targets) == 0 && len(s.endpoints) == 0 {
 		return nil, fmt.Errorf("no targets to scan")
 	}
 
@@ -869,7 +913,7 @@ func (s *Scanner) Resume(ctx context.Context, journalPath string, targets []stri
 
 func (s *Scanner) runAndEmit(
 	ctx context.Context,
-	targets []string,
+	targetHosts []string,
 	outputDir, prefix, scanID string,
 	now time.Time,
 	resolver *correlate.Resolver,
@@ -881,6 +925,18 @@ func (s *Scanner) runAndEmit(
 ) (*ScanResult, error) {
 	closeContent := func() error { return contentWriter.Close() }
 
+	var contentSink content.Sink = contentWriter
+	secretsOnlyMode := strings.EqualFold(s.cfg.Content.Mode, config.ContentModeSecretsOnly)
+	if secretsOnlyMode {
+		contentSink = content.DiscardSink{}
+	}
+
+	var lookupObjID func(string) (string, bool)
+	if resolver != nil {
+		lookupObjID = resolver.ObjectIDForTarget
+	}
+	orderedTargets := targets.PrioritizeTargets(targetHosts, lookupObjID, s.priorityObjectIDs, s.cfg.Scan.MappedOnlyTargets)
+
 	// 3. Initialize collectors
 	jupCfg := jupyter.Config{
 		Scope:            s.cfg.Scope,
@@ -890,7 +946,7 @@ func (s *Scanner) runAndEmit(
 		Bounds:           s.cfg.Bounds,
 		Content:          s.cfg.Content,
 		Secrets:          s.cfg.Secrets,
-		ContentSink:      contentWriter,
+		ContentSink:      contentSink,
 		Insecure:         s.cfg.Insecure,
 		UserAgent:        s.cfg.UserAgent,
 		Resolver:         resolver,
@@ -905,28 +961,35 @@ func (s *Scanner) runAndEmit(
 	}
 
 	surfCfg := s.cfg
-	surfCfg.Targets = append([]string(nil), targets...)
-	ollamaCol := ollama.New(surfCfg, ollama.WithContentSink(contentWriter))
-	a2aCol := a2a.New(surfCfg, a2a.WithContentSink(contentWriter))
-	vllmCol := vllm.New(surfCfg)
-	qdrantCol := qdrant.New(surfCfg, qdrant.WithContentSink(contentWriter))
-	litellmCol := litellm.New(surfCfg, litellm.WithContentSink(contentWriter))
-	mlflowCol := mlflow.New(surfCfg, mlflow.WithContentSink(contentWriter))
-	openwebuiCol := openwebui.New(surfCfg, openwebui.WithContentSink(contentWriter))
-	langserveCol := langserve.New(surfCfg, langserve.WithContentSink(contentWriter))
-	rayCol := ray.New(surfCfg, ray.WithContentSink(contentWriter))
-	langflowCol := langflow.New(surfCfg, langflow.WithContentSink(contentWriter))
-	flowiseCol := flowise.New(surfCfg, flowise.WithContentSink(contentWriter))
-	chromadbCol := chromadb.New(surfCfg, chromadb.WithContentSink(contentWriter))
-	openaiCompatCol := openaicompat.New(surfCfg)
+	surfCfg.Targets = append([]string(nil), orderedTargets...)
+	cols := &collectorSet{
+		scanner:      s,
+		scanID:       scanID,
+		now:          now,
+		resolver:     resolver,
+		jupyter:      jupCol,
+		ollama:       ollama.New(surfCfg, ollama.WithContentSink(contentSink)),
+		a2a:          a2a.New(surfCfg, a2a.WithContentSink(contentSink)),
+		vllm:         vllm.New(surfCfg),
+		qdrant:       qdrant.New(surfCfg, qdrant.WithContentSink(contentSink)),
+		litellm:      litellm.New(surfCfg, litellm.WithContentSink(contentSink)),
+		mlflow:       mlflow.New(surfCfg, mlflow.WithContentSink(contentSink)),
+		openwebui:    openwebui.New(surfCfg, openwebui.WithContentSink(contentSink)),
+		langserve:    langserve.New(surfCfg, langserve.WithContentSink(contentSink)),
+		ray:          ray.New(surfCfg, ray.WithContentSink(contentSink)),
+		langflow:     langflow.New(surfCfg, langflow.WithContentSink(contentSink)),
+		flowise:      flowise.New(surfCfg, flowise.WithContentSink(contentSink)),
+		chromadb:     chromadb.New(surfCfg, chromadb.WithContentSink(contentSink)),
+		openaicompat: openaicompat.New(surfCfg),
+	}
 
 	mcpOpts := []collectormcp.Option{
 		collectormcp.WithScanID(scanID),
 		collectormcp.WithCollectorVersion(s.collectorVersion),
 		collectormcp.WithClock(s.now),
-		collectormcp.WithContentSink(contentWriter),
+		collectormcp.WithContentSink(contentSink),
+		collectormcp.WithCorrelator(resolver),
 	}
-	mcpOpts = append(mcpOpts, collectormcp.WithCorrelator(resolver))
 	if s.httpClient != nil {
 		mcpOpts = append(mcpOpts, collectormcp.WithHTTPClient(s.httpClient))
 	}
@@ -936,6 +999,7 @@ func (s *Scanner) runAndEmit(
 		_ = closeContent()
 		return nil, fmt.Errorf("initialize mcp collector: %w", err)
 	}
+	cols.mcp = mcpCol
 
 	probeClient := s.probeHTTPClient()
 	defer probeClient.CloseIdleConnections()
@@ -953,10 +1017,47 @@ func (s *Scanner) runAndEmit(
 		}
 	}
 
+	var activeDefs []discovery.Definition
+	for _, def := range s.definitions {
+		if isSupportedSurface(def.Surface) {
+			activeDefs = append(activeDefs, def)
+		}
+	}
+
+	sweptPorts := discovery.UniquePorts(activeDefs, s.cfg.Scan.ExtraPorts)
+	sweptPortsCSV := joinPortsCSV(sweptPorts)
+
+	// Stage 1: Fast TCP open-port sweep across deduplicated ports (bypassed only
+	// when a unit test injects a mock HTTP RoundTripper without a TCP dialer).
+	var openPorts map[string]map[int]bool
+	tcpSwept := false
+	if len(orderedTargets) > 0 && len(sweptPorts) > 0 && (s.httpClient == nil || s.tcpDialer != nil) {
+		tcpSwept = true
+		var toSweep []string
+		for _, host := range orderedTargets {
+			if priorState != nil && priorState.IsHostSweptEmpty(host, sweptPorts) {
+				continue
+			}
+			allCompleted := priorState != nil && len(activeDefs) > 0
+			if allCompleted {
+				for _, def := range activeDefs {
+					if !priorState.IsCompleted(host, string(def.Surface)) {
+						allCompleted = false
+						break
+					}
+				}
+			}
+			if !allCompleted {
+				toSweep = append(toSweep, host)
+			}
+		}
+		openPorts = discovery.SweepOpenPorts(ctx, toSweep, sweptPorts, s.cfg.Bounds.TCPConcurrency, s.cfg.Bounds.TCPTimeout, s.tcpDialer)
+	}
+
 	// 5. Worker pool for bounded concurrency
 	concurrency := s.cfg.Bounds.Concurrency
 	if concurrency <= 0 {
-		concurrency = 16
+		concurrency = 64
 	}
 
 	sem := make(chan struct{}, concurrency)
@@ -976,11 +1077,55 @@ func (s *Scanner) runAndEmit(
 		}
 	}
 
+	schemeMode := s.cfg.Scan.Scheme
+	if strings.TrimSpace(schemeMode) == "" {
+		schemeMode = config.SchemeAuto
+	}
+
 targetLoop:
-	for _, tgt := range targets {
+	for _, tgt := range orderedTargets {
 		if ctx.Err() != nil {
 			break targetLoop
 		}
+		if priorState != nil && priorState.IsHostSweptEmpty(tgt, sweptPorts) {
+			continue
+		}
+
+		// Fast path: TCP sweep found zero open ports on this host.
+		if tcpSwept && len(openPorts[tgt]) == 0 {
+			allDone := priorState != nil && len(activeDefs) > 0
+			if allDone {
+				for _, def := range activeDefs {
+					if !priorState.IsCompleted(tgt, string(def.Surface)) {
+						allDone = false
+						break
+					}
+				}
+			}
+			if !allDone {
+				if !s.cfg.Scan.RecordUnmatched {
+					if err := journal.RecordTarget(sweepEmptyTargetRecord(tgt, sweptPortsCSV, scanID, s.collectorVersion, s.cfg.VantageKey, now)); err != nil {
+						recordFailure(err)
+					}
+				} else {
+					for _, def := range activeDefs {
+						if priorState != nil && priorState.IsCompleted(tgt, string(def.Surface)) {
+							continue
+						}
+						baseURL := discovery.BaseURLForHost(tgt, def.DefaultPort, false)
+						probe := discovery.ProbeResult{
+							Matched:   false,
+							Surface:   def.Surface,
+							Reachable: false,
+							Reason:    "target unreachable on TCP port sweep",
+						}
+						record(unmatchedResult(tgt, baseURL, def.Surface, probe, s.cfg.Scope, s.cfg.VantageKey, scanID, s.collectorVersion, now))
+					}
+				}
+			}
+			continue
+		}
+
 		select {
 		case <-ctx.Done():
 			break targetLoop
@@ -991,231 +1136,131 @@ targetLoop:
 			break targetLoop
 		}
 		targetHost := tgt
+		hostOpen := openPorts[tgt]
 		wg.Add(1)
 
-		go func(host string) {
+		go func(host string, openMap map[int]bool) {
 			defer wg.Done()
 			defer func() { <-sem }()
 
+			cache := discovery.NewPortProbeCache()
 			matchedHostPort := make(map[string]bool)
-			for _, def := range s.definitions {
-				switch def.Surface {
-				case discovery.SurfaceJupyter, discovery.SurfaceOllama, discovery.SurfaceMCP,
-					discovery.SurfaceA2A, discovery.SurfaceVLLM, discovery.SurfaceQdrant,
-					discovery.SurfaceLiteLLM, discovery.SurfaceMLflow, discovery.SurfaceOpenWebUI, discovery.SurfaceLangServe,
-					discovery.SurfaceRay, discovery.SurfaceLangflow, discovery.SurfaceFlowise,
-					discovery.SurfaceChromaDB, discovery.SurfaceOpenAICompatible:
-				default:
-					continue
+
+			for _, def := range activeDefs {
+				// Build candidate ports for this definition: DefaultPort + ExtraPorts.
+				var candidatePorts []int
+				if !tcpSwept || openMap[def.DefaultPort] {
+					candidatePorts = append(candidatePorts, def.DefaultPort)
 				}
-				hostPortKey := fmt.Sprintf("%s:%d", host, def.DefaultPort)
-				if def.Surface == discovery.SurfaceOpenAICompatible && matchedHostPort[hostPortKey] {
-					continue
+				for _, ep := range s.cfg.Scan.ExtraPorts {
+					if ep == def.DefaultPort {
+						continue
+					}
+					if !tcpSwept || openMap[ep] {
+						candidatePorts = append(candidatePorts, ep)
+					}
 				}
-				if priorState != nil && priorState.IsCompleted(host, string(def.Surface)) {
-					if priorHasNodes[targetSurface{target: host, surface: string(def.Surface)}] {
-						matchedHostPort[hostPortKey] = true
+
+				if len(candidatePorts) == 0 {
+					if s.cfg.Scan.RecordUnmatched && (priorState == nil || !priorState.IsCompleted(host, string(def.Surface))) {
+						baseURL := discovery.BaseURLForHost(host, def.DefaultPort, false)
+						probe := discovery.ProbeResult{Matched: false, Surface: def.Surface, Reachable: false, Reason: "target port unreachable on TCP sweep"}
+						record(unmatchedResult(host, baseURL, def.Surface, probe, s.cfg.Scope, s.cfg.VantageKey, scanID, s.collectorVersion, now))
 					}
 					continue
 				}
-				baseURL := discovery.BaseURLForHost(host, def.DefaultPort, false)
 
-				probe, err := discovery.Probe(ctx, probeClient, baseURL, def)
+				if priorState != nil && priorState.IsCompleted(host, string(def.Surface)) {
+					if priorHasNodes[targetSurface{target: host, surface: string(def.Surface)}] {
+						for _, p := range candidatePorts {
+							matchedHostPort[fmt.Sprintf("%s:%d", host, p)] = true
+						}
+					}
+					continue
+				}
+
+				for _, port := range candidatePorts {
+					hostPortKey := fmt.Sprintf("%s:%d", host, port)
+					if def.Surface == discovery.SurfaceOpenAICompatible && matchedHostPort[hostPortKey] {
+						continue
+					}
+
+					probe, err := discovery.ProbeWithScheme(ctx, probeClient, host, port, schemeMode, def, cache)
+					if err != nil {
+						recordFailure(fmt.Errorf("probe %s %s: %w", def.Surface, host, err))
+						continue
+					}
+					if !probe.Matched {
+						if probe.Reachable || s.cfg.Scan.RecordUnmatched {
+							baseURL := probe.BaseURL
+							if baseURL == "" {
+								baseURL = discovery.BaseURLForHost(host, port, false)
+							}
+							record(unmatchedResult(host, baseURL, def.Surface, probe, s.cfg.Scope, s.cfg.VantageKey, scanID, s.collectorVersion, now))
+						}
+						continue
+					}
+					matchedHostPort[hostPortKey] = true
+					baseURL := probe.BaseURL
+					if baseURL == "" {
+						baseURL = discovery.BaseURLForHost(host, port, probe.Scheme == "https")
+					}
+					if err := cols.collect(ctx, def.Surface, host, baseURL, port, probe, journal, record); err != nil {
+						recordFailure(err)
+					}
+				}
+			}
+		}(targetHost, hostOpen)
+	}
+
+endpointLoop:
+	for _, ep := range s.endpoints {
+		if ctx.Err() != nil {
+			break endpointLoop
+		}
+		select {
+		case <-ctx.Done():
+			break endpointLoop
+		case sem <- struct{}{}:
+		}
+		if ctx.Err() != nil {
+			<-sem
+			break endpointLoop
+		}
+		epCopy := ep
+		wg.Add(1)
+		go func(endpoint targets.EndpointTarget) {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			cache := discovery.NewPortProbeCache()
+			matchedPort := false
+			mode := schemeMode
+			if endpoint.Scheme != "" {
+				mode = endpoint.Scheme
+			}
+			for _, def := range activeDefs {
+				if def.Surface == discovery.SurfaceOpenAICompatible && matchedPort {
+					continue
+				}
+				probe, err := discovery.ProbeWithScheme(ctx, probeClient, endpoint.Host, endpoint.Port, mode, def, cache)
 				if err != nil {
-					recordFailure(fmt.Errorf("probe %s %s: %w", def.Surface, host, err))
+					recordFailure(fmt.Errorf("probe %s %s: %w", def.Surface, endpoint.String(), err))
 					continue
 				}
 				if !probe.Matched {
-					record(unmatchedResult(host, baseURL, def.Surface, probe, s.cfg.Scope, s.cfg.VantageKey, scanID, s.collectorVersion, now))
 					continue
 				}
-				matchedHostPort[hostPortKey] = true
-
-				switch def.Surface {
-				case discovery.SurfaceJupyter:
-					target := host
-					if def.DefaultPort != 8888 {
-						target = baseURL
-					}
-					res, err := jupCol.CollectIdentified(ctx, target)
-					if err != nil {
-						recordFailure(fmt.Errorf("jupyter collect %s: %w", host, err))
-						continue
-					}
-					res.Target = host
-					record(res)
-				case discovery.SurfaceOllama:
-					target := host
-					if def.DefaultPort != 11434 {
-						target = baseURL
-					}
-					res, err := ollamaCol.Collect(ctx, target, s.cfg.Scope, s.cfg.VantageKey, scanID, now, resolver)
-					if err != nil {
-						recordFailure(fmt.Errorf("ollama collect %s: %w", host, err))
-						continue
-					}
-					res.Target = host
-					record(res)
-				case discovery.SurfaceMCP:
-					mcpURL := baseURL
-					if probe.MatchedPath == "/mcp" || probe.MatchedPath == "/sse" {
-						mcpURL = strings.TrimSuffix(baseURL, "/") + probe.MatchedPath
-					}
-					mcpTarget := collectormcp.Target{
-						URL:            mcpURL,
-						OriginalTarget: host,
-						Transport:      "auto",
-					}
-					if _, err := mcpCol.CollectTarget(ctx, mcpTarget, journal); err != nil {
-						recordFailure(fmt.Errorf("mcp collect %s: %w", host, err))
-					}
-				case discovery.SurfaceA2A:
-					target := host
-					if def.DefaultPort != a2a.DefaultPort {
-						target = baseURL
-					}
-					res, err := a2aCol.Collect(ctx, target, s.cfg.Scope, s.cfg.VantageKey, scanID, now, resolver)
-					if err != nil {
-						recordFailure(fmt.Errorf("a2a collect %s: %w", host, err))
-						continue
-					}
-					res.Target = host
-					record(res)
-				case discovery.SurfaceVLLM:
-					target := host
-					if def.DefaultPort != vllm.DefaultPort {
-						target = baseURL
-					}
-					res, err := vllmCol.Collect(ctx, target, s.cfg.Scope, s.cfg.VantageKey, scanID, now, resolver)
-					if err != nil {
-						recordFailure(fmt.Errorf("vllm collect %s: %w", host, err))
-						continue
-					}
-					res.Target = host
-					record(res)
-				case discovery.SurfaceQdrant:
-					target := host
-					if def.DefaultPort != qdrant.DefaultPort {
-						target = baseURL
-					}
-					res, err := qdrantCol.Collect(ctx, target, s.cfg.Scope, s.cfg.VantageKey, scanID, now, resolver)
-					if err != nil {
-						recordFailure(fmt.Errorf("qdrant collect %s: %w", host, err))
-						continue
-					}
-					res.Target = host
-					record(res)
-				case discovery.SurfaceLiteLLM:
-					target := host
-					if def.DefaultPort != litellm.DefaultPort {
-						target = baseURL
-					}
-					res, err := litellmCol.Collect(ctx, target, s.cfg.Scope, s.cfg.VantageKey, scanID, now, resolver)
-					if err != nil {
-						recordFailure(fmt.Errorf("litellm collect %s: %w", host, err))
-						continue
-					}
-					res.Target = host
-					record(res)
-				case discovery.SurfaceMLflow:
-					target := host
-					if def.DefaultPort != mlflow.DefaultPort {
-						target = baseURL
-					}
-					res, err := mlflowCol.Collect(ctx, target, s.cfg.Scope, s.cfg.VantageKey, scanID, now, resolver)
-					if err != nil {
-						recordFailure(fmt.Errorf("mlflow collect %s: %w", host, err))
-						continue
-					}
-					res.Target = host
-					record(res)
-				case discovery.SurfaceOpenWebUI:
-					target := host
-					if def.DefaultPort != openwebui.DefaultPort {
-						target = baseURL
-					}
-					res, err := openwebuiCol.Collect(ctx, target, s.cfg.Scope, s.cfg.VantageKey, scanID, now, resolver)
-					if err != nil {
-						recordFailure(fmt.Errorf("open_webui collect %s: %w", host, err))
-						continue
-					}
-					res.Target = host
-					record(res)
-				case discovery.SurfaceLangServe:
-					target := host
-					if def.DefaultPort != langserve.DefaultPort {
-						target = baseURL
-					}
-					res, err := langserveCol.Collect(ctx, target, s.cfg.Scope, s.cfg.VantageKey, scanID, now, resolver)
-					if err != nil {
-						recordFailure(fmt.Errorf("langserve collect %s: %w", host, err))
-						continue
-					}
-					res.Target = host
-					record(res)
-				case discovery.SurfaceRay:
-					target := host
-					if def.DefaultPort != ray.DefaultPort {
-						target = baseURL
-					}
-					res, err := rayCol.Collect(ctx, target, s.cfg.Scope, s.cfg.VantageKey, scanID, now, resolver)
-					if err != nil {
-						recordFailure(fmt.Errorf("ray collect %s: %w", host, err))
-						continue
-					}
-					res.Target = host
-					record(res)
-				case discovery.SurfaceLangflow:
-					target := host
-					if def.DefaultPort != langflow.DefaultPort {
-						target = baseURL
-					}
-					res, err := langflowCol.Collect(ctx, target, s.cfg.Scope, s.cfg.VantageKey, scanID, now, resolver)
-					if err != nil {
-						recordFailure(fmt.Errorf("langflow collect %s: %w", host, err))
-						continue
-					}
-					res.Target = host
-					record(res)
-				case discovery.SurfaceFlowise:
-					target := host
-					if def.DefaultPort != flowise.DefaultPort {
-						target = baseURL
-					}
-					res, err := flowiseCol.Collect(ctx, target, s.cfg.Scope, s.cfg.VantageKey, scanID, now, resolver)
-					if err != nil {
-						recordFailure(fmt.Errorf("flowise collect %s: %w", host, err))
-						continue
-					}
-					res.Target = host
-					record(res)
-				case discovery.SurfaceChromaDB:
-					target := host
-					if def.DefaultPort != chromadb.DefaultPort {
-						target = baseURL
-					}
-					res, err := chromadbCol.Collect(ctx, target, s.cfg.Scope, s.cfg.VantageKey, scanID, now, resolver)
-					if err != nil {
-						recordFailure(fmt.Errorf("chromadb collect %s: %w", host, err))
-						continue
-					}
-					res.Target = host
-					record(res)
-				case discovery.SurfaceOpenAICompatible:
-					target := host
-					if def.DefaultPort != openaicompat.DefaultPort {
-						target = baseURL
-					}
-					res, err := openaiCompatCol.Collect(ctx, target, s.cfg.Scope, s.cfg.VantageKey, scanID, now, resolver)
-					if err != nil {
-						recordFailure(fmt.Errorf("openai_compatible collect %s: %w", host, err))
-						continue
-					}
-					res.Target = host
-					record(res)
+				matchedPort = true
+				baseURL := probe.BaseURL
+				if baseURL == "" {
+					baseURL = discovery.BaseURLForHost(endpoint.Host, endpoint.Port, probe.Scheme == "https")
+				}
+				if err := cols.collect(ctx, def.Surface, endpoint.Host, baseURL, endpoint.Port, probe, journal, record); err != nil {
+					recordFailure(err)
 				}
 			}
-		}(targetHost)
+		}(epCopy)
 	}
 
 	wg.Wait()
@@ -1235,6 +1280,9 @@ targetLoop:
 		return nil, fmt.Errorf("close checkpoint journal: %w", closeErr)
 	}
 	writtenContentCount := contentWriter.Count()
+	if secretsOnlyMode {
+		writtenContentCount = 0
+	}
 	if closeErr := closeContent(); closeErr != nil {
 		return nil, fmt.Errorf("close content file: %w", closeErr)
 	}
@@ -1249,21 +1297,35 @@ targetLoop:
 	edges := state.Edges()
 	evRecords := state.Evidence()
 
-	// 7b. Evaluate opt-in path-qualification rules (M2d).
+	evalObs := graph.Observation{
+		SchemaVersion:    "1",
+		ScanID:           scanID,
+		CollectorVersion: s.collectorVersion,
+		EvidenceID:       "ev-enrich",
+		Source:           "scanner_enrichment",
+		Surface:          "correlation",
+		ObservedAt:       now,
+		DeploymentScope:  s.cfg.Scope,
+		VantageKey:       s.cfg.VantageKey,
+		Coverage:         graph.CoverageComplete,
+	}
+
+	// 7a. Resolve cross-host UsesBackend edges (populates P5).
+	backendEdges := ResolveBackendEdges(s.cfg.Scope, nodes, resolver, evalObs)
+	if len(backendEdges) > 0 {
+		edges = append(edges, backendEdges...)
+	}
+
+	// 7b. Derive flat risk_signals on AIService nodes (populates P9 & rapid triage).
+	EnrichRiskSignals(nodes, edges)
+
+	// 7c. Evaluate opt-in path-qualification rules (M2d).
 	if len(s.cfg.PathQualification.EnabledRules) > 0 {
-		evalObs := graph.Observation{
-			SchemaVersion:    "1",
-			ScanID:           scanID,
-			CollectorVersion: s.collectorVersion,
-			EvidenceID:       "ev-rules",
-			Source:           "path_qualification",
-			Surface:          "rules",
-			ObservedAt:       now,
-			DeploymentScope:  s.cfg.Scope,
-			VantageKey:       s.cfg.VantageKey,
-			Coverage:         graph.CoverageComplete,
-		}
-		ruleEdges, ruleEv, err := rules.Evaluate(s.cfg.PathQualification, nodes, edges, evRecords, evalObs)
+		ruleObs := evalObs
+		ruleObs.EvidenceID = "ev-rules"
+		ruleObs.Source = "path_qualification"
+		ruleObs.Surface = "rules"
+		ruleEdges, ruleEv, err := rules.Evaluate(s.cfg.PathQualification, nodes, edges, evRecords, ruleObs)
 		if err != nil {
 			return nil, fmt.Errorf("evaluate path-qualification rules: %w", err)
 		}
@@ -1271,8 +1333,16 @@ targetLoop:
 		evRecords = append(evRecords, ruleEv...)
 	}
 
+	// 7d. Filter graph nodes/edges for compact attack-path mode & mapped-only policy.
+	emitNodes, emitEdges := emitter.FilterAttackPathGraph(nodes, edges, emitter.FilterOptions{
+		CompactAttackPath: strings.EqualFold(s.cfg.Scan.GraphMode, config.GraphModeAttackPath),
+		MappedOnly:        s.cfg.Scan.MappedOnly,
+	})
+
 	// 8. Emit OpenGraph payload and evidence sidecar
-	artifacts, err := emitter.EmitScan(outputDir, prefix, nodes, edges, evRecords)
+	artifacts, err := emitter.EmitScanWithOptions(outputDir, prefix, emitNodes, emitEdges, evRecords, emitter.EmitScanOptions{
+		CompactJSON: s.cfg.Scan.CompactJSON,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("emit scan artifacts: %w", err)
 	}
@@ -1280,7 +1350,7 @@ targetLoop:
 	recordedContentPath := ""
 	if writtenContentCount > 0 {
 		recordedContentPath = contentPath
-	} else if priorState != nil {
+	} else if !secretsOnlyMode && priorState != nil {
 		if _, statErr := os.Stat(contentPath); statErr == nil {
 			recordedContentPath = contentPath
 		}
@@ -1293,9 +1363,147 @@ targetLoop:
 		JournalPath:  journalPath,
 		ContentPath:  recordedContentPath,
 		Artifacts:    artifacts,
-		TargetsCount: len(targets),
+		TargetsCount: len(orderedTargets) + len(s.endpoints),
 		State:        state,
 	}, nil
+}
+
+type collectorSet struct {
+	scanner      *Scanner
+	scanID       string
+	now          time.Time
+	resolver     *correlate.Resolver
+	jupyter      *jupyter.Collector
+	ollama       *ollama.Collector
+	mcp          *collectormcp.Collector
+	a2a          *a2a.Collector
+	vllm         *vllm.Collector
+	qdrant       *qdrant.Collector
+	litellm      *litellm.Collector
+	mlflow       *mlflow.Collector
+	openwebui    *openwebui.Collector
+	langserve    *langserve.Collector
+	ray          *ray.Collector
+	langflow     *langflow.Collector
+	flowise      *flowise.Collector
+	chromadb     *chromadb.Collector
+	openaicompat *openaicompat.Collector
+}
+
+func (c *collectorSet) collect(
+	ctx context.Context,
+	surface discovery.Surface,
+	host, baseURL string,
+	port int,
+	probe discovery.ProbeResult,
+	journal *checkpoint.FileJournal,
+	record func(checkpoint.Result),
+) error {
+	targetFor := func(defaultPort int) string {
+		if port != defaultPort || probe.Scheme == "https" {
+			return baseURL
+		}
+		return host
+	}
+
+	var res checkpoint.Result
+	var err error
+
+	switch surface {
+	case discovery.SurfaceJupyter:
+		res, err = c.jupyter.CollectIdentified(ctx, targetFor(8888))
+	case discovery.SurfaceOllama:
+		res, err = c.ollama.Collect(ctx, targetFor(ollama.DefaultPort), c.scanner.cfg.Scope, c.scanner.cfg.VantageKey, c.scanID, c.now, c.resolver)
+	case discovery.SurfaceMCP:
+		mcpURL := baseURL
+		if probe.MatchedPath == "/mcp" || probe.MatchedPath == "/sse" {
+			mcpURL = strings.TrimSuffix(baseURL, "/") + probe.MatchedPath
+		}
+		mcpTarget := collectormcp.Target{
+			URL:            mcpURL,
+			OriginalTarget: host,
+			Transport:      "auto",
+		}
+		if _, cerr := c.mcp.CollectTarget(ctx, mcpTarget, journal); cerr != nil {
+			return fmt.Errorf("mcp collect %s: %w", host, cerr)
+		}
+		return nil
+	case discovery.SurfaceA2A:
+		res, err = c.a2a.Collect(ctx, targetFor(a2a.DefaultPort), c.scanner.cfg.Scope, c.scanner.cfg.VantageKey, c.scanID, c.now, c.resolver)
+	case discovery.SurfaceVLLM:
+		res, err = c.vllm.Collect(ctx, targetFor(vllm.DefaultPort), c.scanner.cfg.Scope, c.scanner.cfg.VantageKey, c.scanID, c.now, c.resolver)
+	case discovery.SurfaceQdrant:
+		res, err = c.qdrant.Collect(ctx, targetFor(qdrant.DefaultPort), c.scanner.cfg.Scope, c.scanner.cfg.VantageKey, c.scanID, c.now, c.resolver)
+	case discovery.SurfaceLiteLLM:
+		res, err = c.litellm.Collect(ctx, targetFor(litellm.DefaultPort), c.scanner.cfg.Scope, c.scanner.cfg.VantageKey, c.scanID, c.now, c.resolver)
+	case discovery.SurfaceMLflow:
+		res, err = c.mlflow.Collect(ctx, targetFor(mlflow.DefaultPort), c.scanner.cfg.Scope, c.scanner.cfg.VantageKey, c.scanID, c.now, c.resolver)
+	case discovery.SurfaceOpenWebUI:
+		res, err = c.openwebui.Collect(ctx, targetFor(openwebui.DefaultPort), c.scanner.cfg.Scope, c.scanner.cfg.VantageKey, c.scanID, c.now, c.resolver)
+	case discovery.SurfaceLangServe:
+		res, err = c.langserve.Collect(ctx, targetFor(langserve.DefaultPort), c.scanner.cfg.Scope, c.scanner.cfg.VantageKey, c.scanID, c.now, c.resolver)
+	case discovery.SurfaceRay:
+		res, err = c.ray.Collect(ctx, targetFor(ray.DefaultPort), c.scanner.cfg.Scope, c.scanner.cfg.VantageKey, c.scanID, c.now, c.resolver)
+	case discovery.SurfaceLangflow:
+		res, err = c.langflow.Collect(ctx, targetFor(langflow.DefaultPort), c.scanner.cfg.Scope, c.scanner.cfg.VantageKey, c.scanID, c.now, c.resolver)
+	case discovery.SurfaceFlowise:
+		res, err = c.flowise.Collect(ctx, targetFor(flowise.DefaultPort), c.scanner.cfg.Scope, c.scanner.cfg.VantageKey, c.scanID, c.now, c.resolver)
+	case discovery.SurfaceChromaDB:
+		res, err = c.chromadb.Collect(ctx, targetFor(chromadb.DefaultPort), c.scanner.cfg.Scope, c.scanner.cfg.VantageKey, c.scanID, c.now, c.resolver)
+	case discovery.SurfaceOpenAICompatible:
+		res, err = c.openaicompat.Collect(ctx, targetFor(openaicompat.DefaultPort), c.scanner.cfg.Scope, c.scanner.cfg.VantageKey, c.scanID, c.now, c.resolver)
+	default:
+		return nil
+	}
+
+	if err != nil {
+		return fmt.Errorf("%s collect %s: %w", surface, host, err)
+	}
+	res.Target = host
+	record(res)
+	return nil
+}
+
+func isSupportedSurface(s discovery.Surface) bool {
+	switch s {
+	case discovery.SurfaceJupyter, discovery.SurfaceOllama, discovery.SurfaceMCP,
+		discovery.SurfaceA2A, discovery.SurfaceVLLM, discovery.SurfaceQdrant,
+		discovery.SurfaceLiteLLM, discovery.SurfaceMLflow, discovery.SurfaceOpenWebUI, discovery.SurfaceLangServe,
+		discovery.SurfaceRay, discovery.SurfaceLangflow, discovery.SurfaceFlowise,
+		discovery.SurfaceChromaDB, discovery.SurfaceOpenAICompatible:
+		return true
+	}
+	return false
+}
+
+func joinPortsCSV(ports []int) string {
+	parts := make([]string, len(ports))
+	for i, p := range ports {
+		parts[i] = strconv.Itoa(p)
+	}
+	return strings.Join(parts, ",")
+}
+
+func sweepEmptyTargetRecord(host, sweptPortsCSV, scanID, collectorVersion, vantageKey string, now time.Time) checkpoint.TargetRecord {
+	sum := sha256.Sum256([]byte(scanID + "|" + host + "|" + checkpoint.SweepMarkerSurface))
+	return checkpoint.TargetRecord{
+		Target:  host,
+		Surface: checkpoint.SweepMarkerSurface,
+		Status:  checkpoint.TargetStatusCompleted,
+		Observation: &checkpoint.ObservationRecord{
+			SchemaVersion:    "1",
+			ScanID:           scanID,
+			CollectorVersion: collectorVersion,
+			EvidenceID:       "ev-sweep-" + hex.EncodeToString(sum[:8]),
+			Source:           host,
+			Surface:          checkpoint.SweepMarkerSurface,
+			ObservedAt:       now.UTC().Format(time.RFC3339),
+			VantageKey:       vantageKey,
+			Coverage:         string(graph.CoverageComplete),
+			CoverageReason:   "no open discovery ports on TCP sweep",
+		},
+		Details: map[string]any{"swept_ports": sweptPortsCSV},
+	}
 }
 
 type uaTransport struct {
@@ -1323,12 +1531,17 @@ func (s *Scanner) probeHTTPClient() *http.Client {
 	if responseTimeout <= 0 {
 		responseTimeout = 10 * time.Second
 	}
+	maxIdle := s.cfg.Bounds.Concurrency * 2
+	if maxIdle < 64 {
+		maxIdle = 64
+	}
 	tr := &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
 		DialContext:           (&net.Dialer{Timeout: connectTimeout, KeepAlive: 30 * time.Second}).DialContext,
 		TLSHandshakeTimeout:   connectTimeout,
 		ResponseHeaderTimeout: responseTimeout,
-		MaxIdleConns:          64,
+		MaxIdleConns:          maxIdle,
+		MaxIdleConnsPerHost:   8,
 		IdleConnTimeout:       30 * time.Second,
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: s.cfg.Insecure,

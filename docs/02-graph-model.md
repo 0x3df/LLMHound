@@ -1,9 +1,9 @@
 # LLMHound graph model
 
-> **Status: v1 graph model, 15 collectors, opt-in `CanExecuteOn` rules, `mapping_source` provenance, 15 saved queries, and two-step upload are implemented.**
+> **Status: v1 graph model, 15 collectors, MCP `capability_hint`, cross-host `UsesBackend`, `risk_signals`, opt-in `CanExecuteOn` rules, `mapping_source` provenance, 17 saved queries (`P1`–`P10`, `I1`–`I7`), compact attack-path defaults, and two-step ZIP upload are implemented.**
 > Companion to [design](01-design.md). See the
 > [Implementation status](#implementation-status) table for remaining optional
-> property fields (`capability_hint`, `image_digest`, etc.) and CE behavior in
+> property fields (`image_digest`, etc.) and CE behavior in
 > [05-ce-compatibility.md](05-ce-compatibility.md).
 
 This is the **canonical home** for node/edge kinds, identity, attachment to
@@ -244,7 +244,8 @@ work named in the [roadmap](06-roadmap.md):
 | Product | `product`, `vendor` *(built)*; `software_version`, `software_version_raw`, `api_version`, `protocol_version`, `build_id`, `commit` (`build_id` and `commit` emitted where reported, e.g. Qdrant and Ray). Specified, not built: `image_digest`, and per-field `*_source` / `*_basis` labels |
 | Auth *(built)* | `auth_observed` (`anonymous`/`denied`/`mixed`/`unknown`, `observed`), `anon_operations` (sorted array of succeeded `check_id`s only). `auth_advertised` (`none`/`required`/`mixed`, `declared`, with `auth_advertised_basis`) is built in `graph.ServiceFacts` and emitted by A2A, Open WebUI, and Langflow. Jupyter also keeps `auth_required` |
 | Execution surface *(built)* | `exec_surface` (sorted array: `code_kernel`, `terminal`, `job_submit`, `code_eval`, `workflow_exec`, `tool_invocation`, `model_mutation`; only positively identified surfaces are listed, never `unknown`), `exec_surface_basis` (`observed`/`declared`/`inferred`). Emitted across Jupyter, Ollama, MCP, A2A, MLflow, Ray, Langflow, and Flowise where identified. It says a surface exists, not that anything was run |
-| Dependencies *(built)* | `backend_refs` (sanitized array), `store_refs` (sanitized array), `backend_refs_basis` (supported by `graph.ServiceFacts`; `backend_refs` emitted by A2A, LiteLLM, and Open WebUI; `store_refs` emitted by MLflow) |
+| Dependencies *(built)* | `backend_refs` (sanitized array), `store_refs` (sanitized array), `backend_refs_basis` (supported by `graph.ServiceFacts`; `backend_refs` emitted by A2A, LiteLLM, and Open WebUI; `store_refs` emitted by MLflow; unique same-scope host:port or mapped ObjectID matches emit `UsesBackend` edges) |
+| Risk triage *(built)* | `risk_signals` (sorted string array of deterministic triage tags: `anon_exec_surface`, `exposed_secret`, `high_risk_mcp_tool`, `cross_host_backend`, `anon_signup_enabled`, `cloud_artifact_store`; omitted when empty) |
 | Inventory *(built)* | `model_count`, `tool_count`, `resource_count`, `collection_count`, `skill_count` (supported by `graph.ServiceFacts`; emitted where enumerated, including vLLM, Qdrant, A2A, LiteLLM, MLflow, Open WebUI, OpenAI-compatible, and ChromaDB) |
 | Content *(built)* | `system_prompt_present`, `config_collected`, `content_bytes`, `content_truncated`, `has_exposed_secret` (`true` or unset), `secret_last_confirmed`, `secret_types` (sorted array of detector names); bodies and secret values never appear in the graph, see [Content and secrets](#content-and-secrets) |
 | TLS *(built)* | `tls_verification` (`ok`/`failed`/`insecure_override`/`n_a`; `n_a` for plain `http`, absent when no handshake was observed), `tls_failure_reason` (bounded; kept under `insecure_override` when the certificate would not have verified), `tls_leaf_sha256` (lower-case hex), `tls_issuer`, `tls_not_after`, `tls_negotiated_version` |
@@ -375,8 +376,9 @@ execution on this host as the service's account", which may not be privileged.
 **Implemented rules** (disabled by default in `llmhound.yaml`; require `path_qualification.enabled_rules`
 and non-empty `path_qualification.assumed_reach_principals` + verified native host mapping):
 `jupyter-auth-disabled` (Jupyter with authentication disabled), `ray-anonymous-jobs` (Ray
-dashboard with anonymous jobs API), and `langflow-unauthenticated-exec` (Langflow with
-anonymous auto-login / open flow access).
+dashboard with anonymous jobs API), `langflow-unauthenticated-exec` (Langflow with
+anonymous auto-login / open flow access), and `flowise-unauthenticated-exec` (Flowise
+with anonymous chatflow API access).
 
 **Do not qualify:** advertised MCP/A2A tools or skills, anonymous model
 listing, vector-store or registry inventory, any state based on a login page, a
@@ -419,16 +421,17 @@ backlog, in the order the [roadmap](06-roadmap.md) schedules it.
 | High-precision secret detection over content bodies (`private_key` parse-verified PEM, `github_token` CRC32-verified, `aws_access_key` id+secret pair), `[secret:<type>]` redaction, `detected_exposures` sidecar details | `internal/secrets`, `internal/content`, collectors, `internal/scanner` |
 | Base payload (`source_kind`) and sourceless linking payload; evidence sidecar | `internal/emitter`, `internal/evidence` |
 | Checkpoint journal, deterministic replay, torn-tail repair, and `llmhound resume` | `internal/checkpoint`, `internal/scanner`, `cmd/llmhound` |
-| All 15 collectors (Jupyter, MCP, Ollama, A2A, vLLM, Qdrant, LiteLLM, MLflow, Open WebUI, LangServe, Generic OpenAI-compatible, Ray, Langflow, Flowise, ChromaDB); discovery; `plan` and `scan` | `internal/collectors`, `internal/discovery`, `internal/scanner` |
-| Opt-in `CanExecuteOn` path-qualification rule engine (`jupyter-auth-disabled`, `ray-anonymous-jobs`, `langflow-unauthenticated-exec`) | `internal/rules`, `extension/rules`, `internal/config`, `internal/scanner` |
-| BloodHound CE API client, `v9.7.1` adapter validation gate, M0 Q5 two-step upload with read-only Cypher pre-flight, schema registration, and saved-query import (`llmhound upload`) | `internal/bloodhound`, `cmd/llmhound`, `lab/scripts/run-m3-gate.sh` |
-| Shipped BloodHound CE saved queries (`P1`–`P8`, `I1`–`I7`) and generator | `internal/savedsearch`, `extension/saved_searches/`, `tools/gensearches` |
+| All 15 collectors (Jupyter, MCP, Ollama, A2A, vLLM, Qdrant, LiteLLM, MLflow, Open WebUI, LangServe, Generic OpenAI-compatible, Ray, Langflow, Flowise, ChromaDB); Stage 1 TCP-first sweep, shared-port probe cache, HTTPS auto-upgrade; `MCPTool.capability_hint`, cross-host `UsesBackend`, and `risk_signals` | `internal/collectors`, `internal/discovery`, `internal/scanner` |
+| Opt-in `CanExecuteOn` path-qualification rule engine (`jupyter-auth-disabled`, `ray-anonymous-jobs`, `langflow-unauthenticated-exec`, `flowise-unauthenticated-exec`) | `internal/rules`, `extension/rules`, `internal/config`, `internal/scanner` |
+| BloodHound CE API client, `v9.7.1` adapter validation gate, M0 Q5 two-step ZIP/chunked upload with parallel read-only Cypher pre-flight, schema registration, Tier-0-adjacent seed query, and saved-query import (`llmhound upload`) | `internal/bloodhound`, `cmd/llmhound`, `lab/scripts/run-m3-gate.sh` |
+| Shipped BloodHound CE saved queries (`P1`–`P10`, `I1`–`I7`) and generator | `internal/savedsearch`, `extension/saved_searches/`, `tools/gensearches` |
+| Attack-path-first compact graph emission (`attack-path` default vs `full`) and compact JSON formatting | `internal/emitter`, `internal/config` |
 
 **Specified, not yet built**
 
 | Area | Specified behavior |
 |---|---|
-| Remaining property contract | Optional per-field version `*_source`/`*_basis` labels beyond shared `version_basis`/`build_id`/`commit`, `image_digest`, `schema_version`, `first_observed`, `coverage_reason`, and `MCPTool.capability_hint` (referenced by saved query `P7`) |
+| Remaining property contract | Optional per-field version `*_source`/`*_basis` labels beyond shared `version_basis`/`build_id`/`commit`, `image_digest`, `schema_version`, `first_observed`, `coverage_reason`, and `MCPTool.capability_hint` `browser` classifier category |
 | Future milestones | Credentialed enumeration (M4); per-kind reference pages and community library listing (M5) |
 
 ## Implementation acceptance checks

@@ -14,6 +14,18 @@ type Sink interface {
 	Write(Record) error
 }
 
+// DiscardSink validates content-tier records (so secret scanning can still run
+// over bounded bodies) without persisting any bytes to disk. Used in secrets-only
+// content mode.
+type DiscardSink struct{}
+
+func (DiscardSink) Write(r Record) error {
+	if err := r.Validate(); err != nil {
+		return fmt.Errorf("invalid content record: %w", err)
+	}
+	return nil
+}
+
 // MemorySink collects content records in memory for unit tests.
 type MemorySink struct {
 	mu      sync.Mutex

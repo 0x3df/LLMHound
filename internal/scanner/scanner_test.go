@@ -26,10 +26,27 @@ import (
 )
 
 func TestScanner_Plan(t *testing.T) {
+	// Default optimal profile: 10 high-value surfaces, secrets-only content mode.
+	defCfg := config.Defaults()
+	defCfg.Scope = "corp-scope"
+	defCfg.VantageKey = "scanner-01"
+	defCfg.Targets = []string{"192.0.2.1"}
+	sDef, err := scanner.New(defCfg)
+	if err != nil {
+		t.Fatalf("scanner.New (default) failed: %v", err)
+	}
+	defPlans := sDef.Plan([]string{"192.0.2.1"})
+	if len(defPlans) != 1 || len(defPlans[0].Surfaces) != 10 {
+		t.Fatalf("default attack-path profile expected 10 surfaces, got %d", len(defPlans[0].Surfaces))
+	}
+
+	// Explicit full profile + full content mode: all 15 surfaces and all content checks active.
 	cfg := config.Defaults()
 	cfg.Scope = "corp-scope"
 	cfg.VantageKey = "scanner-01"
 	cfg.Targets = []string{"192.0.2.1", "ai.example.test"}
+	cfg.Scan.Profile = config.ProfileFull
+	cfg.Content.Mode = config.ContentModeFull
 
 	s, err := scanner.New(cfg)
 	if err != nil {
@@ -44,7 +61,7 @@ func TestScanner_Plan(t *testing.T) {
 
 	for _, tp := range plans {
 		if len(tp.Surfaces) != 15 {
-			t.Fatalf("target %s expected 15 surfaces, got %d", tp.Target, len(tp.Surfaces))
+			t.Fatalf("target %s expected 15 surfaces in full profile, got %d", tp.Target, len(tp.Surfaces))
 		}
 
 		surfaceNames := make(map[discovery.Surface]bool)
@@ -322,6 +339,9 @@ func TestScanner_EndToEndScan(t *testing.T) {
 	cfg.Scope = "test-scope"
 	cfg.VantageKey = "vantage-test"
 	cfg.Targets = []string{"127.0.0.1"}
+	cfg.Scan.GraphMode = config.GraphModeFull
+	cfg.Scan.CompactJSON = false
+	cfg.Content.Mode = config.ContentModeFull
 
 	fixedNow := time.Date(2026, 10, 1, 20, 0, 0, 0, time.UTC)
 	s, err := scanner.New(cfg,
@@ -644,8 +664,10 @@ func TestScanner_MixedTargetsAndHonestCoverage(t *testing.T) {
 		t.Errorf("denied reason %q should mention authentication required", targetRec.Observation.CoverageReason)
 	}
 
-	// Unreachable port
-	sUnreachable, err := scanner.New(cfg, scanner.WithDefinitions([]discovery.Definition{
+	// Unreachable port (with explicit RecordUnmatched to verify per-surface failed audit)
+	cfgUnreach := cfg
+	cfgUnreach.Scan.RecordUnmatched = true
+	sUnreachable, err := scanner.New(cfgUnreach, scanner.WithDefinitions([]discovery.Definition{
 		{
 			Surface:     discovery.SurfaceOllama,
 			DefaultPort: 54321, // random unused port
@@ -801,6 +823,7 @@ func TestScanner_UnreachableSurfaceJournaledWithoutCollectorRequests(t *testing.
 	cfg.Scope = "gate-scope"
 	cfg.Targets = []string{"127.0.0.1"}
 	cfg.VantageKey = "vantage-test"
+	cfg.Scan.RecordUnmatched = true
 	s, err := scanner.New(cfg, scanner.WithDefinitions([]discovery.Definition{{
 		Surface:     discovery.SurfaceOllama,
 		DefaultPort: port,
@@ -1008,6 +1031,8 @@ func TestScanner_M2bCohortEndToEnd(t *testing.T) {
 	cfg.Scope = "m2b-scope"
 	cfg.VantageKey = "vantage-m2b"
 	cfg.Targets = []string{"127.0.0.1"}
+	cfg.Scan.GraphMode = config.GraphModeFull
+	cfg.Content.Mode = config.ContentModeFull
 
 	s, err := scanner.New(cfg, scanner.WithDefinitions(defs))
 	if err != nil {

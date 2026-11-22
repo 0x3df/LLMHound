@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -731,15 +732,22 @@ type ProbeResult struct {
 	Matched     bool
 	Surface     Surface
 	MatchedPath string
+	BaseURL     string
+	Scheme      string
 	StatusCode  int
 	Latency     time.Duration
 	Reachable   bool
+	NeedsTLS    bool
 	Reason      string
 }
 
 // Probe executes fingerprint probing for a target URL against a definition.
 func Probe(ctx context.Context, client *http.Client, baseURL string, def Definition) (ProbeResult, error) {
 	baseURL = strings.TrimRight(baseURL, "/")
+	scheme := "http"
+	if strings.HasPrefix(strings.ToLower(baseURL), "https://") {
+		scheme = "https"
+	}
 	probeClient := http.DefaultClient
 	if client != nil {
 		copyClient := *client
@@ -757,6 +765,7 @@ func Probe(ctx context.Context, client *http.Client, baseURL string, def Definit
 	}
 
 	reachable := false
+	needsTLS := false
 	for _, p := range def.ProbePaths {
 		targetURL := baseURL + p
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
@@ -772,6 +781,16 @@ func Probe(ctx context.Context, client *http.Client, baseURL string, def Definit
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return ProbeResult{}, ctxErr
 			}
+			if scheme == "http" && isTLSMismatchError(err) {
+				reachable = true
+				needsTLS = true
+				break
+			}
+			// Short-circuit remaining paths if the socket could not be dialed or
+			// timed out before any HTTP response was ever observed on this endpoint.
+			if !reachable && isDialOrConnectError(err) {
+				break
+			}
 			continue
 		}
 
@@ -779,11 +798,18 @@ func Probe(ctx context.Context, client *http.Client, baseURL string, def Definit
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 		_ = resp.Body.Close()
 
+		if scheme == "http" && isHTTPToHTTPSMismatch(resp.StatusCode, body) {
+			needsTLS = true
+			break
+		}
+
 		if def.Match != nil && def.Match(resp.StatusCode, resp.Header, body) {
 			return ProbeResult{
 				Matched:     true,
 				Surface:     def.Surface,
 				MatchedPath: p,
+				BaseURL:     baseURL,
+				Scheme:      scheme,
 				StatusCode:  resp.StatusCode,
 				Latency:     latency,
 				Reachable:   true,
@@ -794,13 +820,50 @@ func Probe(ctx context.Context, client *http.Client, baseURL string, def Definit
 	reason := "no " + string(def.Surface) + "-specific evidence on probed paths"
 	if !reachable {
 		reason = "target unreachable on all probed paths"
+	} else if needsTLS {
+		reason = "endpoint requires HTTPS"
 	}
 	return ProbeResult{
 		Matched:   false,
 		Surface:   def.Surface,
+		BaseURL:   baseURL,
+		Scheme:    scheme,
 		Reachable: reachable,
+		NeedsTLS:  needsTLS,
 		Reason:    reason,
 	}, nil
+}
+
+func isDialOrConnectError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return true
+	}
+	var opErr *net.OpError
+	return errors.As(err, &opErr)
+}
+
+func isTLSMismatchError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "malformed HTTP response") &&
+		(strings.Contains(msg, `\x15\x03`) || strings.Contains(msg, "\x15\x03"))
+}
+
+func isHTTPToHTTPSMismatch(status int, body []byte) bool {
+	if status != http.StatusBadRequest {
+		return false
+	}
+	lower := strings.ToLower(string(body))
+	return strings.Contains(lower, "sent an http request to an https server") ||
+		strings.Contains(lower, "plain http request was sent to https port") ||
+		strings.Contains(lower, "client sent an http request to an https") ||
+		strings.Contains(lower, "this combination of host and port requires tls")
 }
 
 // DefinitionFileEntry represents a single fingerprint definition in JSON/YAML.

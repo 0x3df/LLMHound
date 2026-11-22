@@ -58,8 +58,10 @@
 - **Evidence sidecar:** per-check results, a fingerprint record (product, version, protocol
   version), TLS and redirect records, and the correlation decision.
 
-## Not yet implemented
+## Graph & capability classification
 
-`capability_hint` on tools is specified in the
-[graph model](../02-graph-model.md#property-contract) and scheduled as a remaining
-property-contract item in the [roadmap](../06-roadmap.md).
+`internal/collectors/mcp` populates `capability_hint` (`declared` basis) over
+advertised tool names, descriptions, and `inputSchema` property keys across
+`shell`, `filesystem`, `secrets`, `code`, `database`, and `network`. Note that
+this is a declared heuristic for triage (used by saved query `P7` and compact
+`attack-path` graph filtering), not proof of execution behavior.

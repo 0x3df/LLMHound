@@ -100,28 +100,48 @@ func BuildLinkingPayload(edges []graph.Edge) (Payload, error) {
 
 // Emit writes an OpenGraph Payload formatted as indented JSON.
 func Emit(w io.Writer, p Payload) error {
+	return emitJSON(w, p, true)
+}
+
+// EmitCompact writes an OpenGraph Payload as compact (non-indented) JSON,
+// reducing large payload sizes by ~40%.
+func EmitCompact(w io.Writer, p Payload) error {
+	return emitJSON(w, p, false)
+}
+
+func emitJSON(w io.Writer, p Payload, indent bool) error {
 	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
+	if indent {
+		enc.SetIndent("", "  ")
+	}
 	enc.SetEscapeHTML(false)
 	return enc.Encode(p)
 }
 
 // EmitBasePayload builds and writes the base payload to w.
 func EmitBasePayload(w io.Writer, nodes []NodeItem, edges []graph.Edge) error {
+	return emitBasePayload(w, nodes, edges, true)
+}
+
+func emitBasePayload(w io.Writer, nodes []NodeItem, edges []graph.Edge, indent bool) error {
 	p, err := BuildBasePayload(nodes, edges)
 	if err != nil {
 		return err
 	}
-	return Emit(w, p)
+	return emitJSON(w, p, indent)
 }
 
 // EmitLinkingPayload builds and writes the linking payload to w.
 func EmitLinkingPayload(w io.Writer, edges []graph.Edge) error {
+	return emitLinkingPayload(w, edges, true)
+}
+
+func emitLinkingPayload(w io.Writer, edges []graph.Edge, indent bool) error {
 	p, err := BuildLinkingPayload(edges)
 	if err != nil {
 		return err
 	}
-	return Emit(w, p)
+	return emitJSON(w, p, indent)
 }
 
 // EmitSplit automatically splits edges into owned and native-linking sets and writes
@@ -155,14 +175,26 @@ type ScanArtifacts struct {
 	EvidenceSidecarPath string
 }
 
-// EmitScan emits all scan artifacts:
+// EmitScanOptions controls formatting during EmitScanWithOptions.
+type EmitScanOptions struct {
+	CompactJSON bool
+}
+
+// EmitScan emits all scan artifacts using indented JSON formatting.
+func EmitScan(dir, prefix string, nodes []NodeItem, edges []graph.Edge, records []evidence.Record) (ScanArtifacts, error) {
+	return EmitScanWithOptions(dir, prefix, nodes, edges, records, EmitScanOptions{})
+}
+
+// EmitScanWithOptions emits all scan artifacts with configurable formatting:
 // - Base payload JSON: <dir>/<prefix>.json (or <dir>/<prefix>-base.json if linking edges exist)
 // - Linking payload JSON: <dir>/<prefix>-linking.json (if linking edges exist)
 // - Evidence sidecar JSONL: <dir>/<prefix>.evidence.jsonl
-func EmitScan(dir, prefix string, nodes []NodeItem, edges []graph.Edge, records []evidence.Record) (ScanArtifacts, error) {
+func EmitScanWithOptions(dir, prefix string, nodes []NodeItem, edges []graph.Edge, records []evidence.Record, opts EmitScanOptions) (ScanArtifacts, error) {
 	if err := os.MkdirAll(dir, 0750); err != nil {
 		return ScanArtifacts{}, fmt.Errorf("create output directory: %w", err)
 	}
+
+	indent := !opts.CompactJSON
 
 	var ownedEdges, linkingEdges []graph.Edge
 	for _, e := range edges {
@@ -204,14 +236,14 @@ func EmitScan(dir, prefix string, nodes []NodeItem, edges []graph.Edge, records 
 	}
 
 	if err := writeFile(artifacts.BasePayloadPath, func(w io.Writer) error {
-		return EmitBasePayload(w, nodes, ownedEdges)
+		return emitBasePayload(w, nodes, ownedEdges, indent)
 	}); err != nil {
 		return fail(fmt.Errorf("write base payload: %w", err))
 	}
 
 	if len(linkingEdges) > 0 {
 		if err := writeFile(artifacts.LinkingPayloadPath, func(w io.Writer) error {
-			return EmitLinkingPayload(w, linkingEdges)
+			return emitLinkingPayload(w, linkingEdges, indent)
 		}); err != nil {
 			return fail(fmt.Errorf("write linking payload: %w", err))
 		}

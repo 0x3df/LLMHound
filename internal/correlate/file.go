@@ -14,7 +14,7 @@ import (
 	"github.com/0x3df/LLMHound/internal/graph"
 )
 
-const MaxMappingFileBytes = 1 << 20 // 1 MiB
+const MaxMappingFileBytes = 32 << 20 // 32 MiB
 
 // LoadMappingFile reads asset-mapping entries (target to existing BloodHound
 // objectid and kind) from a JSON or line-delimited file.

@@ -80,6 +80,7 @@ overrides for scan configuration (`llmhound.yaml`); only `llmhound upload` reads
 | `targets` | `--targets` | IP/FQDN/CIDR inputs |
 | `cidrs` | `--cidr` | Canonical IP prefixes only |
 | `targets_files` | `--targets-file` | Line-oriented target inputs |
+| `endpoints_files` | `--endpoints-file` | Pre-scanned `host:port` or `http(s)://host:port` endpoints |
 | `exclude` | `--exclude` | Exact normalized IP/FQDN or CIDR exclusions |
 | `exclude_files` | `--exclude-file` | Line-oriented exclusion inputs |
 
@@ -135,9 +136,11 @@ see per-collector references.
 
 | Key | Default | Accepted range |
 |---|---:|---|
-| `max_targets` | 4096 | 1–65536 raw expanded inputs |
-| `concurrency` | 16 | 1–256 |
-| `per_host_rate` | 2 | finite 0.1–1000 requests/second |
+| `max_targets` | 65536 | 1–1048576 raw expanded inputs |
+| `concurrency` | 64 | 1–1024 |
+| `tcp_concurrency` | 512 | 1–4096 |
+| `tcp_timeout` | `750ms` | `50ms`–`30s` |
+| `per_host_rate` | 5 | finite 0.1–1000 requests/second |
 | `connect_timeout` | `3s` | `1ms`–`5m` |
 | `response_timeout` | `10s` | `1ms`–`5m` |
 | `max_response_bytes` | 1048576 | 1–67108864 |
@@ -148,11 +151,41 @@ see per-collector references.
 Raw expansion counts duplicates **before** deduplication and exclusions. A large
 CIDR is rejected before iterating, even if exclusions would remove most of it.
 Overlapping CIDRs consume their full expansion budgets; raise `max_targets`
-within the cap or reduce inputs explicitly. Additional hard limits: 65536 total
-input entries, 128 files, 1 MiB aggregate file bytes, and file lines shorter than
-4096 bytes. Files must be regular files. These bounds prevent accidental
-unbounded memory expansion; they are not an authorization system for future
-DNS connections or redirects.
+within the cap or reduce inputs explicitly. Additional hard limits: 1,048,576
+total input entries, 128 files, 16 MiB aggregate input file bytes, 32 MiB
+mapping file bytes, and file lines shorter than 4096 bytes. Files must be
+regular files. These bounds prevent accidental unbounded memory expansion; they
+are not an authorization system for future DNS connections or redirects.
+
+### Scan profile, graph mode & scheme (`scan.*`)
+
+- `scan.profile` (`--profile`): `attack-path` *(default)* probes the 10
+  highest-signal surfaces across 9 unique ports (`jupyter`, `ray`, `langflow`,
+  `flowise`, `mcp`, `litellm`, `mlflow`, `open_webui`, `qdrant`, `ollama`);
+  `rce-only` narrows to 5 direct execution/tool surfaces; `full` scans all 15
+  surfaces; `--surfaces` overrides with an explicit comma-separated list.
+- `scan.graph_mode` (`--graph-mode`): `attack-path` *(default)* keeps
+  BloodHound CE ingestion fast by emitting `AIService` nodes (with summary
+  counts and `risk_signals`), `NetworkEndpoint`s (unless `--mapped-only`),
+  `ObservedAt`/`UsesBackend`/`CanExecuteOn` edges, and **only high-risk
+  `MCPTool` nodes** (`capability_hint` in `shell`/`filesystem`/`secrets`/`code`),
+  keeping verbose child inventories in `.evidence.jsonl`; `full` emits all child nodes.
+- `scan.scheme` (`--scheme`): `auto` *(default)* tries HTTP and upgrades to
+  verified HTTPS when a TLS mismatch is detected (trying HTTPS first on
+  443/8443); `http` and `https` force one scheme.
+- `scan.compact_json` (override with `--pretty-json`): `true` *(default)* emits
+  non-indented OpenGraph JSON (~40% smaller).
+- `scan.record_unmatched` (`--record-unmatched`): `false` *(default)* writes
+  one lightweight `_tcp_sweep` checkpoint marker for dead hosts instead of
+  10–15 failed result/evidence rows.
+- `scan.mapped_only` (`--mapped-only`) omits unmapped `NetworkEndpoint` nodes
+  from BloodHound payloads; `scan.mapped_only_targets` (`--mapped-only-targets`)
+  restricts scanning to hosts in `mapping_file`; `scan.extra_ports`
+  (`--extra-ports`) sweeps additional ports (e.g. `443,8443`).
+- `scan` and `targets` also accept `--prioritize-from-bh` (`--bh-url`,
+  `--bh-token-id`, `--bh-token-key`, `--bh-bearer-token`, `--bh-hops`) to query
+  BloodHound CE read-only for `Tag_Tier_Zero`-adjacent nodes and scan mapped
+  crown-jewel targets first.
 
 ### Collection and correlation policy
 
@@ -163,11 +196,13 @@ These values are parsed/validated. Scan collectors apply TLS, User-Agent, the
   Verification failure must never silently retry unverified.
 - `user_agent` (`--user-agent`): default `LLMHound/dev`; nonblank printable ASCII
   up to 256 bytes. Add non-secret operator contact information if desired.
-- `content.enabled` (`--content`): default `true`; collect bounded existing
-  content (prompts, modelfiles, templates, configurations, notebook/flow bodies,
-  and bounded non-vector samples across all content-capable surfaces) into
-  `<prefix>.content.jsonl` (mode `0600`) without leaking bodies into payloads,
-  sidecars, checkpoints, or logs.
+- `content.enabled` (`--content`): default `true`; `content.mode` (`--content-mode`):
+  `secrets-only` *(default)* scans high-secret-yield surfaces (`jupyter`,
+  `litellm`, `langflow`, `flowise`, `ray`, `open_webui`) in memory with zero
+  `.content.jsonl` disk output while still setting `has_exposed_secret`;
+  `metadata` skips all content-body fetches; `full` collects and writes
+  bounded content across all enabled surfaces into `<prefix>.content.jsonl`
+  (mode `0600`) without leaking bodies into payloads, sidecars, checkpoints, or logs.
 - `content.max_item_bytes` (`--content-max-item-bytes`): default `262144`
   (256 KiB; range `1`–`16777216`).
 - `content.max_items_per_resource` (`--content-max-items-per-resource`):
@@ -225,7 +260,7 @@ links because an edge to a missing objectid creates an empty stub node.
 Top-level YAML key `path_qualification` (disabled by default):
 
 - `enabled_rules`: list of rule IDs to enable (`jupyter-auth-disabled`,
-  `ray-anonymous-jobs`, `langflow-unauthenticated-exec`). Must be empty unless
+  `ray-anonymous-jobs`, `langflow-unauthenticated-exec`, `flowise-unauthenticated-exec`). Must be empty unless
   `assumed_reach_principals` is non-empty.
 - `assumed_reach_principals`: list of `{object_id, kind}` existing BloodHound
   principals (e.g. Domain Users `S-1-5-21-...-513`) used as `CanExecuteOn` start nodes.
@@ -245,6 +280,8 @@ Top-level YAML key `path_qualification` (disabled by default):
 
 `upload` flags fall back to `BLOODHOUND_URL`, `BLOODHOUND_TOKEN_ID`, `BLOODHOUND_TOKEN_KEY`,
 `BLOODHOUND_BEARER_TOKEN`, `BLOODHOUND_USERNAME`, and `BLOODHOUND_PASSWORD`.
+Payloads are automatically ZIP-compressed (`--no-zip` disables) and chunked at
+2,500 items (`--chunk-size`).
 Pass `--enable-rules-schema` with `--register-schema` (and `--include-can-execute-on`
 with `--import-queries`) only when opt-in path-qualification rules are active.
 

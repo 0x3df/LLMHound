@@ -102,7 +102,7 @@ func newMockCE(t *testing.T) (*mockCEServer, *httptest.Server) {
 					idx++
 				}
 			}
-			if strings.Contains(req.Query, "LIMIT 1") {
+			if strings.Contains(req.Query, "Tag_Tier_Zero") || strings.Contains(req.Query, "Tag_Owned") || strings.Contains(req.Query, "LIMIT 1") {
 				nodes["n0"] = bloodhound.CypherNode{ObjectID: "S-1-5-21-1103", Kinds: []string{"Computer"}}
 			}
 			if len(nodes) == 0 {
@@ -139,8 +139,19 @@ func newMockCE(t *testing.T) (*mockCEServer, *httptest.Server) {
 			var jid int64
 			_, _ = fmt.Sscanf(r.URL.Path, "/api/v2/file-upload/%d", &jid)
 			body, _ := io.ReadAll(r.Body)
+			jsonBody := body
+			if strings.Contains(r.Header.Get("Content-Type"), "application/zip") || (len(body) >= 2 && body[0] == 'P' && body[1] == 'K') {
+				zr, err := zip.NewReader(bytes.NewReader(body), int64(len(body)))
+				if err == nil && len(zr.File) > 0 {
+					rc, oerr := zr.File[0].Open()
+					if oerr == nil {
+						jsonBody, _ = io.ReadAll(rc)
+						_ = rc.Close()
+					}
+				}
+			}
 			var p emitter.Payload
-			_ = json.Unmarshal(body, &p)
+			_ = json.Unmarshal(jsonBody, &p)
 			m.mu.Lock()
 			for i := range m.uploadedJobs {
 				if m.uploadedJobs[i].ID == jid {
@@ -365,6 +376,88 @@ func TestClientRefusesRedirects(t *testing.T) {
 	}
 	if targetHit.get() {
 		t.Fatal("client followed redirect and could leak credentials/HMAC headers")
+	}
+}
+
+func TestChunkedZIPUploadAndTier0AdjacentSeed(t *testing.T) {
+	m, srv := newMockCE(t)
+	defer srv.Close()
+
+	client, err := bloodhound.NewClient(bloodhound.ClientConfig{
+		BaseURL: srv.URL,
+		Auth:    bloodhound.AuthConfig{BearerToken: "jwt"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	basePayload := emitter.Payload{
+		Metadata: &emitter.Metadata{SourceKind: "LLMHound"},
+		Graph: emitter.GraphPayload{
+			Nodes: []emitter.NodePayload{
+				{ID: "SVC-1", Kinds: []string{"LLMHound_OllamaInstance", "LLMHound_AIService"}},
+				{ID: "SVC-2", Kinds: []string{"LLMHound_JupyterServer", "LLMHound_AIService"}},
+				{ID: "SVC-3", Kinds: []string{"LLMHound_RayDashboard", "LLMHound_AIService"}},
+			},
+			Edges: []emitter.EdgePayload{
+				{Kind: "LLMHound_UsesBackend", Start: emitter.EndpointPayload{MatchBy: "id", Value: "SVC-2"}, End: emitter.EndpointPayload{MatchBy: "id", Value: "SVC-1"}},
+			},
+		},
+	}
+	baseBytes, _ := json.Marshal(basePayload)
+
+	linkPayload := emitter.Payload{
+		Metadata: nil,
+		Graph: emitter.GraphPayload{
+			Nodes: []emitter.NodePayload{},
+			Edges: []emitter.EdgePayload{
+				{Kind: "LLMHound_ObservedAt", Start: emitter.EndpointPayload{MatchBy: "id", Value: "SVC-1"}, End: emitter.EndpointPayload{MatchBy: "id", Value: "S-1-5-21-1103"}},
+				{Kind: "LLMHound_ObservedAt", Start: emitter.EndpointPayload{MatchBy: "id", Value: "SVC-2"}, End: emitter.EndpointPayload{MatchBy: "id", Value: "S-1-5-21-1103"}},
+				{Kind: "LLMHound_ObservedAt", Start: emitter.EndpointPayload{MatchBy: "id", Value: "SVC-3"}, End: emitter.EndpointPayload{MatchBy: "id", Value: "S-1-5-21-1103"}},
+			},
+		},
+	}
+	linkBytes, _ := json.Marshal(linkPayload)
+
+	rep, err := client.UploadScan(context.Background(), bloodhound.UploadOptions{
+		BasePayloadBytes:    baseBytes,
+		BaseFileName:        "base.json",
+		LinkingPayloadBytes: linkBytes,
+		LinkingFileName:     "linking.json",
+		PollInterval:        10 * time.Millisecond,
+		PollTimeout:         5 * time.Second,
+		MaxChunkItems:       2,
+	})
+	if err != nil {
+		t.Fatalf("chunked UploadScan failed: %v", err)
+	}
+	if len(rep.BaseJobs) != 3 { // 2 node chunks (2 + 1) + 1 edge chunk
+		t.Fatalf("BaseJobs = %d, want 3", len(rep.BaseJobs))
+	}
+	if len(rep.LinkingJobs) != 2 { // 2 linking chunks (2 + 1)
+		t.Fatalf("LinkingJobs = %d, want 2", len(rep.LinkingJobs))
+	}
+
+	m.mu.Lock()
+	jobs := append([]mockJob(nil), m.uploadedJobs...)
+	m.mu.Unlock()
+	for i := 0; i < 3; i++ {
+		if !strings.HasSuffix(jobs[i].FileName, ".zip") || jobs[i].Payload.Metadata == nil || jobs[i].Payload.Metadata.SourceKind != "LLMHound" {
+			t.Fatalf("base chunk %d violated ZIP/M0Q5: %+v", i, jobs[i])
+		}
+	}
+	for i := 3; i < 5; i++ {
+		if !strings.HasSuffix(jobs[i].FileName, ".zip") || jobs[i].Payload.Metadata != nil {
+			t.Fatalf("linking chunk %d violated ZIP/M0Q5: %+v", i, jobs[i])
+		}
+	}
+
+	ids, err := client.Tier0AdjacentObjectIDs(context.Background(), 2, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ids["S-1-5-21-1103"] {
+		t.Fatalf("expected Tier-0 adjacent objectid S-1-5-21-1103, got %+v", ids)
 	}
 }
 

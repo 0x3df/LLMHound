@@ -109,8 +109,8 @@ func TestBuiltinRulesAndSemver(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuiltinRules: %v", err)
 	}
-	if len(loaded) != 3 {
-		t.Fatalf("expected 3 rules, got %d", len(loaded))
+	if len(loaded) != 4 {
+		t.Fatalf("expected 4 rules, got %d", len(loaded))
 	}
 
 	for _, tc := range []struct {

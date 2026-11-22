@@ -36,21 +36,55 @@ const (
 	HardMaxContentSamplePoints     int   = 1000
 )
 
+// Optimal scan profile, graph mode, URL scheme, and content mode constants.
+const (
+	ProfileAttackPath = "attack-path"
+	ProfileRCEOnly    = "rce-only"
+	ProfileFull       = "full"
+
+	GraphModeAttackPath = "attack-path"
+	GraphModeFull       = "full"
+
+	SchemeAuto  = "auto"
+	SchemeHTTP  = "http"
+	SchemeHTTPS = "https"
+
+	ContentModeSecretsOnly = "secrets-only"
+	ContentModeMetadata    = "metadata"
+	ContentModeFull        = "full"
+)
+
 type Config struct {
 	Scope             string            `yaml:"scope"`
 	VantageKey        string            `yaml:"vantage_key"`
 	Targets           []string          `yaml:"targets"`
 	CIDRs             []string          `yaml:"cidrs"`
 	TargetsFiles      []string          `yaml:"targets_files"`
+	EndpointsFiles    []string          `yaml:"endpoints_files"`
 	Exclude           []string          `yaml:"exclude"`
 	ExcludeFiles      []string          `yaml:"exclude_files"`
 	Bounds            Bounds            `yaml:"bounds"`
+	Scan              ScanPolicy        `yaml:"scan"`
 	Insecure          bool              `yaml:"insecure"`
 	UserAgent         string            `yaml:"user_agent"`
 	Content           Content           `yaml:"content"`
 	Secrets           Secrets           `yaml:"secrets"`
 	Correlation       Correlation       `yaml:"correlation"`
 	PathQualification PathQualification `yaml:"path_qualification"`
+}
+
+// ScanPolicy controls discovery profile, transport scheme, checkpoint density,
+// and BloodHound graph emission granularity.
+type ScanPolicy struct {
+	Profile           string   `yaml:"profile"`
+	Surfaces          []string `yaml:"surfaces"`
+	GraphMode         string   `yaml:"graph_mode"`
+	Scheme            string   `yaml:"scheme"`
+	RecordUnmatched   bool     `yaml:"record_unmatched"`
+	CompactJSON       bool     `yaml:"compact_json"`
+	MappedOnly        bool     `yaml:"mapped_only"`
+	MappedOnlyTargets bool     `yaml:"mapped_only_targets"`
+	ExtraPorts        []int    `yaml:"extra_ports"`
 }
 
 // ReachPrincipal identifies an existing BloodHound native principal (e.g.
@@ -136,6 +170,8 @@ func (s Secrets) DetectorEnabled(name string) bool {
 
 type Bounds struct {
 	Concurrency      int           `yaml:"concurrency"`
+	TCPConcurrency   int           `yaml:"tcp_concurrency"`
+	TCPTimeout       time.Duration `yaml:"tcp_timeout"`
 	PerHostRate      float64       `yaml:"per_host_rate"`
 	ConnectTimeout   time.Duration `yaml:"connect_timeout"`
 	ResponseTimeout  time.Duration `yaml:"response_timeout"`
@@ -148,9 +184,10 @@ type Bounds struct {
 
 // Content controls bounded, anonymous, read-only collection of existing service
 // content (system prompts, modelfiles, configuration, workspace files, MCP
-// resource bodies, flow definitions, and bounded samples) into .content.jsonl.
+// resource bodies, flow definitions, and bounded samples).
 type Content struct {
 	Enabled             bool            `yaml:"enabled"`
+	Mode                string          `yaml:"mode"`
 	MaxItemBytes        int64           `yaml:"max_item_bytes"`
 	MaxItemsPerResource int             `yaml:"max_items_per_resource"`
 	MaxServiceBytes     int64           `yaml:"max_service_bytes"`
@@ -158,10 +195,25 @@ type Content struct {
 	Surfaces            map[string]bool `yaml:"surfaces"`
 }
 
-// DefaultContent returns the default content-tier policy: enabled and bounded.
+// HighYieldSecretSurfaces returns the surfaces scanned for exposed secrets by
+// default in secrets-only content mode.
+func HighYieldSecretSurfaces() map[string]bool {
+	return map[string]bool{
+		"jupyter":    true,
+		"litellm":    true,
+		"langflow":   true,
+		"flowise":    true,
+		"ray":        true,
+		"open_webui": true,
+	}
+}
+
+// DefaultContent returns the default content-tier policy: in-memory secrets-only
+// scanning on high-yield surfaces with zero .content.jsonl disk bloat.
 func DefaultContent() Content {
 	return Content{
 		Enabled:             true,
+		Mode:                ContentModeSecretsOnly,
 		MaxItemBytes:        DefaultContentMaxItemBytes,
 		MaxItemsPerResource: DefaultContentMaxItemsPerResource,
 		MaxServiceBytes:     DefaultContentMaxServiceBytes,
@@ -174,11 +226,18 @@ func (c Content) EnabledFor(surface string) bool {
 	if !c.Enabled {
 		return false
 	}
-	if len(c.Surfaces) == 0 {
-		return true
+	mode := strings.ToLower(strings.TrimSpace(c.Mode))
+	if mode == ContentModeMetadata {
+		return false
 	}
-	if v, ok := c.Surfaces[strings.ToLower(strings.TrimSpace(surface))]; ok {
-		return v
+	norm := strings.ToLower(strings.TrimSpace(surface))
+	if len(c.Surfaces) > 0 {
+		if v, ok := c.Surfaces[norm]; ok {
+			return v
+		}
+	}
+	if mode == ContentModeSecretsOnly {
+		return HighYieldSecretSurfaces()[norm]
 	}
 	return true
 }
@@ -205,15 +264,24 @@ type Correlation struct {
 func Defaults() Config {
 	return Config{
 		Bounds: Bounds{
-			Concurrency:      16,
-			PerHostRate:      2,
+			Concurrency:      64,
+			TCPConcurrency:   512,
+			TCPTimeout:       750 * time.Millisecond,
+			PerHostRate:      5,
 			ConnectTimeout:   3 * time.Second,
 			ResponseTimeout:  10 * time.Second,
 			MaxResponseBytes: 1 << 20,
 			MaxPages:         100,
 			MaxItems:         10000,
 			MaxRedirects:     0,
-			MaxTargets:       4096,
+			MaxTargets:       65536,
+		},
+		Scan: ScanPolicy{
+			Profile:         ProfileAttackPath,
+			GraphMode:       GraphModeAttackPath,
+			Scheme:          SchemeAuto,
+			RecordUnmatched: false,
+			CompactJSON:     true,
 		},
 		UserAgent: "LLMHound/dev",
 		Content:   DefaultContent(),
@@ -283,6 +351,9 @@ func Load(path string) (Config, error) {
 	}
 	for i, p := range c.TargetsFiles {
 		c.TargetsFiles[i] = relative(p)
+	}
+	for i, p := range c.EndpointsFiles {
+		c.EndpointsFiles[i] = relative(p)
 	}
 	for i, p := range c.ExcludeFiles {
 		c.ExcludeFiles[i] = relative(p)
@@ -398,12 +469,18 @@ func Apply(c, flags Config, fields []string) (Config, error) {
 			c.CIDRs = flags.CIDRs
 		case "targets-file":
 			c.TargetsFiles = flags.TargetsFiles
+		case "endpoints-file":
+			c.EndpointsFiles = flags.EndpointsFiles
 		case "exclude":
 			c.Exclude = flags.Exclude
 		case "exclude-file":
 			c.ExcludeFiles = flags.ExcludeFiles
 		case "concurrency":
 			c.Bounds.Concurrency = flags.Bounds.Concurrency
+		case "tcp-concurrency":
+			c.Bounds.TCPConcurrency = flags.Bounds.TCPConcurrency
+		case "tcp-timeout":
+			c.Bounds.TCPTimeout = flags.Bounds.TCPTimeout
 		case "per-host-rate":
 			c.Bounds.PerHostRate = flags.Bounds.PerHostRate
 		case "connect-timeout":
@@ -420,12 +497,32 @@ func Apply(c, flags Config, fields []string) (Config, error) {
 			c.Bounds.MaxRedirects = flags.Bounds.MaxRedirects
 		case "max-targets":
 			c.Bounds.MaxTargets = flags.Bounds.MaxTargets
+		case "profile":
+			c.Scan.Profile = flags.Scan.Profile
+		case "surfaces":
+			c.Scan.Surfaces = flags.Scan.Surfaces
+		case "graph-mode":
+			c.Scan.GraphMode = flags.Scan.GraphMode
+		case "scheme":
+			c.Scan.Scheme = flags.Scan.Scheme
+		case "record-unmatched":
+			c.Scan.RecordUnmatched = flags.Scan.RecordUnmatched
+		case "compact-json":
+			c.Scan.CompactJSON = flags.Scan.CompactJSON
+		case "mapped-only":
+			c.Scan.MappedOnly = flags.Scan.MappedOnly
+		case "mapped-only-targets":
+			c.Scan.MappedOnlyTargets = flags.Scan.MappedOnlyTargets
+		case "extra-ports":
+			c.Scan.ExtraPorts = flags.Scan.ExtraPorts
 		case "insecure":
 			c.Insecure = flags.Insecure
 		case "user-agent":
 			c.UserAgent = flags.UserAgent
 		case "content":
 			c.Content.Enabled = flags.Content.Enabled
+		case "content-mode":
+			c.Content.Mode = flags.Content.Mode
 		case "content-max-item-bytes":
 			c.Content.MaxItemBytes = flags.Content.MaxItemBytes
 		case "content-max-items-per-resource":
@@ -460,10 +557,10 @@ func (c Config) Validate() error {
 			return fmt.Errorf("%s is required and must be a stable nonblank key of at most 128 bytes without surrounding whitespace or control characters", name)
 		}
 	}
-	if len(c.Targets)+len(c.CIDRs)+len(c.TargetsFiles) == 0 {
-		return fmt.Errorf("at least one target, CIDR, or targets file is required")
+	if len(c.Targets)+len(c.CIDRs)+len(c.TargetsFiles)+len(c.EndpointsFiles) == 0 {
+		return fmt.Errorf("at least one target, CIDR, targets file, or endpoints file is required")
 	}
-	if len(c.Targets)+len(c.CIDRs)+len(c.TargetsFiles)+len(c.Exclude)+len(c.ExcludeFiles) > targets.MaxInputEntries {
+	if len(c.Targets)+len(c.CIDRs)+len(c.TargetsFiles)+len(c.EndpointsFiles)+len(c.Exclude)+len(c.ExcludeFiles) > targets.MaxInputEntries {
 		return fmt.Errorf("too many target/exclusion input entries")
 	}
 	for _, value := range c.CIDRs {
@@ -472,7 +569,7 @@ func (c Config) Validate() error {
 			return fmt.Errorf("cidrs must contain canonical IP prefixes with no host bits")
 		}
 	}
-	for name, list := range map[string][]string{"targets_files": c.TargetsFiles, "exclude_files": c.ExcludeFiles} {
+	for name, list := range map[string][]string{"targets_files": c.TargetsFiles, "endpoints_files": c.EndpointsFiles, "exclude_files": c.ExcludeFiles} {
 		for _, p := range list {
 			if strings.TrimSpace(p) == "" || strings.ContainsFunc(p, unicode.IsControl) {
 				return fmt.Errorf("%s contains an empty or invalid path", name)
@@ -487,7 +584,9 @@ func (c Config) Validate() error {
 		name            string
 		value, min, max int64
 	}{
-		{"concurrency", int64(b.Concurrency), 1, 256},
+		{"concurrency", int64(b.Concurrency), 1, 1024},
+		{"tcp_concurrency", int64(b.TCPConcurrency), 1, 4096},
+		{"tcp_timeout", int64(b.TCPTimeout), int64(50 * time.Millisecond), int64(30 * time.Second)},
 		{"connect_timeout", int64(b.ConnectTimeout), int64(time.Millisecond), int64(5 * time.Minute)},
 		{"response_timeout", int64(b.ResponseTimeout), int64(time.Millisecond), int64(5 * time.Minute)},
 		{"max_response_bytes", b.MaxResponseBytes, 1, 64 << 20},
@@ -499,6 +598,39 @@ func (c Config) Validate() error {
 		if limit.value < limit.min || limit.value > limit.max {
 			return fmt.Errorf("bounds.%s must be between %d and %d", limit.name, limit.min, limit.max)
 		}
+	}
+	switch strings.ToLower(strings.TrimSpace(c.Scan.Profile)) {
+	case "", ProfileAttackPath, ProfileRCEOnly, ProfileFull:
+	default:
+		return fmt.Errorf("scan.profile %q must be one of %q, %q, or %q", c.Scan.Profile, ProfileAttackPath, ProfileRCEOnly, ProfileFull)
+	}
+	for _, surf := range c.Scan.Surfaces {
+		if !IsKnownContentSurface(surf) {
+			return fmt.Errorf("scan.surfaces contains unknown surface %q", surf)
+		}
+	}
+	switch strings.ToLower(strings.TrimSpace(c.Scan.GraphMode)) {
+	case "", GraphModeAttackPath, GraphModeFull:
+	default:
+		return fmt.Errorf("scan.graph_mode %q must be %q or %q", c.Scan.GraphMode, GraphModeAttackPath, GraphModeFull)
+	}
+	switch strings.ToLower(strings.TrimSpace(c.Scan.Scheme)) {
+	case "", SchemeAuto, SchemeHTTP, SchemeHTTPS:
+	default:
+		return fmt.Errorf("scan.scheme %q must be %q, %q, or %q", c.Scan.Scheme, SchemeAuto, SchemeHTTP, SchemeHTTPS)
+	}
+	for _, port := range c.Scan.ExtraPorts {
+		if port < 1 || port > 65535 {
+			return fmt.Errorf("scan.extra_ports contains invalid port %d (must be 1-65535)", port)
+		}
+	}
+	if c.Scan.MappedOnlyTargets && strings.TrimSpace(c.Correlation.MappingFile) == "" {
+		return fmt.Errorf("scan.mapped_only_targets requires correlation.mapping_file")
+	}
+	switch strings.ToLower(strings.TrimSpace(c.Content.Mode)) {
+	case "", ContentModeSecretsOnly, ContentModeMetadata, ContentModeFull:
+	default:
+		return fmt.Errorf("content.mode %q must be %q, %q, or %q", c.Content.Mode, ContentModeSecretsOnly, ContentModeMetadata, ContentModeFull)
 	}
 	if math.IsNaN(b.PerHostRate) || math.IsInf(b.PerHostRate, 0) || b.PerHostRate < 0.1 || b.PerHostRate > 1000 {
 		return fmt.Errorf("bounds.per_host_rate must be finite and between 0.1 and 1000 requests/second")

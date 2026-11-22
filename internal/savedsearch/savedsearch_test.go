@@ -41,8 +41,8 @@ func TestShippedFilesAreCurrent(t *testing.T) {
 
 func TestQueriesUseEmittedKindsAndTypedPaths(t *testing.T) {
 	all := Generate(loadKinds(t))
-	if len(all) != 15 {
-		t.Fatalf("expected 15 saved queries (P1-P8, I1-I7), got %d", len(all))
+	if len(all) != 17 {
+		t.Fatalf("expected 17 saved queries (P1-P10, I1-I7), got %d", len(all))
 	}
 	for _, q := range all {
 		for _, bad := range []string{"[*", ":AIService", ":ObservedAt", ":NetworkEndpoint", "IN n.system_tags"} {

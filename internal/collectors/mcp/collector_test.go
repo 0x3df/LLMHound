@@ -31,6 +31,7 @@ func testConfig() config.Config {
 	cfg.Scope = "test-deployment"
 	cfg.VantageKey = "test-vantage"
 	cfg.Targets = []string{"127.0.0.1"}
+	cfg.Content.Mode = config.ContentModeFull
 	return cfg
 }
 

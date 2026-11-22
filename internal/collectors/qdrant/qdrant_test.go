@@ -39,6 +39,7 @@ func baseCfg() config.Config {
 	cfg.Scope = "qdrant-scope"
 	cfg.VantageKey = "vantage-qdrant"
 	cfg.Targets = []string{"127.0.0.1"}
+	cfg.Content.Mode = config.ContentModeFull
 	return cfg
 }
 

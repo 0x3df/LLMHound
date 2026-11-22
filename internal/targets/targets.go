@@ -13,11 +13,11 @@ import (
 
 const (
 	// HardMaxTargets caps raw expansion, including duplicates, before exclusions.
-	HardMaxTargets  = 65536
-	MaxInputEntries = 65536
+	HardMaxTargets  = 1048576
+	MaxInputEntries = 1048576
 	MaxInputFiles   = 128
 	// MaxInputBytes caps the aggregate size of all input files.
-	MaxInputBytes = 1 << 20
+	MaxInputBytes = 16 << 20
 )
 
 type Input struct {
@@ -87,8 +87,8 @@ func Prepare(in Input) ([]string, error) {
 			continue
 		}
 		bits := prefix.Addr().BitLen() - prefix.Bits()
-		// Avoid shifts/overflow and reject enormous IPv6 ranges before iteration.
-		if bits > 16 || (1<<uint(bits)) > in.MaxTargets-expanded {
+		// Avoid shifts/overflow and reject enormous IPv6/IPv4 ranges before iteration.
+		if bits > 20 || (1<<uint(bits)) > in.MaxTargets-expanded {
 			return nil, fmt.Errorf("%s: CIDR expansion exceeds remaining max_targets %d (before exclusions)", e.source, in.MaxTargets-expanded)
 		}
 		n := 1 << uint(bits)

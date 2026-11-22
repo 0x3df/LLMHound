@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/0x3df/LLMHound/internal/targets"
 )
 
 func writeConfig(t *testing.T, data string) string {
@@ -98,13 +100,22 @@ func TestValidateBounds(t *testing.T) {
 		"scope-whitespace": func(c *Config) { c.Scope = " tenant" }, "vantage-control": func(c *Config) { c.VantageKey = "scan\nkey" }, "targets": func(c *Config) { c.Targets = nil },
 		"cidr-name":       func(c *Config) { c.CIDRs = []string{"ai.example.test"} },
 		"cidr-hostbits":   func(c *Config) { c.CIDRs = []string{"192.0.2.1/24"} },
-		"concurrency-low": func(c *Config) { c.Bounds.Concurrency = 0 }, "concurrency-high": func(c *Config) { c.Bounds.Concurrency = 257 },
-		"rate": func(c *Config) { c.Bounds.PerHostRate = 0 }, "rate-nan": func(c *Config) { c.Bounds.PerHostRate = math.NaN() }, "rate-inf": func(c *Config) { c.Bounds.PerHostRate = math.Inf(1) },
+		"concurrency-low": func(c *Config) { c.Bounds.Concurrency = 0 }, "concurrency-high": func(c *Config) { c.Bounds.Concurrency = 1025 },
+		"tcp-conc-high":   func(c *Config) { c.Bounds.TCPConcurrency = 4097 },
+		"tcp-timeout-low": func(c *Config) { c.Bounds.TCPTimeout = time.Millisecond },
+		"rate":            func(c *Config) { c.Bounds.PerHostRate = 0 }, "rate-nan": func(c *Config) { c.Bounds.PerHostRate = math.NaN() }, "rate-inf": func(c *Config) { c.Bounds.PerHostRate = math.Inf(1) },
 		"connect": func(c *Config) { c.Bounds.ConnectTimeout = 0 }, "response": func(c *Config) { c.Bounds.ResponseTimeout = time.Hour },
 		"bytes": func(c *Config) { c.Bounds.MaxResponseBytes = 0 }, "bytes-high": func(c *Config) { c.Bounds.MaxResponseBytes = 1 << 30 },
 		"pages": func(c *Config) { c.Bounds.MaxPages = 0 }, "items": func(c *Config) { c.Bounds.MaxItems = -1 }, "redirects": func(c *Config) { c.Bounds.MaxRedirects = -1 },
-		"target-limit": func(c *Config) { c.Bounds.MaxTargets = 65537 }, "user-agent": func(c *Config) { c.UserAgent = "x\r\ny" }, "user-agent-empty": func(c *Config) { c.UserAgent = "" },
-		"empty-file": func(c *Config) { c.TargetsFiles = []string{""} }, "empty-mapping": func(c *Config) { c.Correlation.MappingFile = " " },
+		"target-limit": func(c *Config) { c.Bounds.MaxTargets = targets.HardMaxTargets + 1 }, "user-agent": func(c *Config) { c.UserAgent = "x\r\ny" }, "user-agent-empty": func(c *Config) { c.UserAgent = "" },
+		"bad-profile":      func(c *Config) { c.Scan.Profile = "fast" },
+		"bad-surface":      func(c *Config) { c.Scan.Surfaces = []string{"nonexistent"} },
+		"bad-graph-mode":   func(c *Config) { c.Scan.GraphMode = "mini" },
+		"bad-scheme":       func(c *Config) { c.Scan.Scheme = "ftp" },
+		"bad-extra-port":   func(c *Config) { c.Scan.ExtraPorts = []int{70000} },
+		"mapped-only-reqs": func(c *Config) { c.Scan.MappedOnlyTargets = true; c.Correlation.MappingFile = "" },
+		"bad-content-mode": func(c *Config) { c.Content.Mode = "everything" },
+		"empty-file":       func(c *Config) { c.TargetsFiles = []string{""} }, "empty-mapping": func(c *Config) { c.Correlation.MappingFile = " " },
 		"content-item-bytes": func(c *Config) { c.Content.MaxItemBytes = 0 }, "content-items": func(c *Config) { c.Content.MaxItemsPerResource = 0 },
 		"content-service-bytes": func(c *Config) { c.Content.MaxServiceBytes = HardMaxContentServiceBytes + 1 }, "content-samples": func(c *Config) { c.Content.MaxSamplePoints = 0 },
 		"content-unknown-surface": func(c *Config) { c.Content.Surfaces = map[string]bool{"olama": false} }, "content-case-surface": func(c *Config) { c.Content.Surfaces = map[string]bool{"Ollama": false} },
@@ -149,11 +160,83 @@ func TestLoadPreservesInvalidBlankPathsForValidation(t *testing.T) {
 }
 
 func TestApplyAllFields(t *testing.T) {
-	flags := Config{Scope: "x", VantageKey: "v", Targets: []string{"a.example.test"}, CIDRs: []string{"192.0.2.0/30"}, TargetsFiles: []string{"a.txt"}, Exclude: []string{"b.example.test"}, ExcludeFiles: []string{"b.txt"}, Bounds: Bounds{Concurrency: 2, PerHostRate: 3, ConnectTimeout: time.Second, ResponseTimeout: 2 * time.Second, MaxResponseBytes: 10, MaxPages: 20, MaxItems: 30, MaxRedirects: 1, MaxTargets: 40}, Insecure: true, UserAgent: "test", Content: Content{Enabled: false, MaxItemBytes: 100, MaxItemsPerResource: 2, MaxServiceBytes: 300, MaxSamplePoints: 3, Surfaces: map[string]bool{"ollama": false}}, Correlation: Correlation{MappingFile: "m.json"}}
-	keys := []string{"scope", "vantage", "targets", "cidr", "targets-file", "exclude", "exclude-file", "concurrency", "per-host-rate", "connect-timeout", "response-timeout", "max-response-bytes", "max-pages", "max-items", "max-redirects", "max-targets", "insecure", "user-agent", "content", "content-max-item-bytes", "content-max-items-per-resource", "content-max-service-bytes", "content-max-sample-points", "content-disable", "mapping-file"}
+	flags := Config{
+		Scope:          "x",
+		VantageKey:     "v",
+		Targets:        []string{"a.example.test"},
+		CIDRs:          []string{"192.0.2.0/30"},
+		TargetsFiles:   []string{"a.txt"},
+		EndpointsFiles: []string{"ep.txt"},
+		Exclude:        []string{"b.example.test"},
+		ExcludeFiles:   []string{"b.txt"},
+		Bounds: Bounds{
+			Concurrency:      2,
+			TCPConcurrency:   128,
+			TCPTimeout:       500 * time.Millisecond,
+			PerHostRate:      3,
+			ConnectTimeout:   time.Second,
+			ResponseTimeout:  2 * time.Second,
+			MaxResponseBytes: 10,
+			MaxPages:         20,
+			MaxItems:         30,
+			MaxRedirects:     1,
+			MaxTargets:       40,
+		},
+		Scan: ScanPolicy{
+			Profile:           ProfileRCEOnly,
+			Surfaces:          []string{"jupyter"},
+			GraphMode:         GraphModeFull,
+			Scheme:            SchemeHTTPS,
+			RecordUnmatched:   true,
+			CompactJSON:       false,
+			MappedOnly:        true,
+			MappedOnlyTargets: true,
+			ExtraPorts:        []int{8443},
+		},
+		Insecure:  true,
+		UserAgent: "test",
+		Content: Content{
+			Enabled:             false,
+			Mode:                ContentModeFull,
+			MaxItemBytes:        100,
+			MaxItemsPerResource: 2,
+			MaxServiceBytes:     300,
+			MaxSamplePoints:     3,
+			Surfaces:            map[string]bool{"ollama": false},
+		},
+		Correlation: Correlation{MappingFile: "m.json"},
+	}
+	keys := []string{
+		"scope", "vantage", "targets", "cidr", "targets-file", "endpoints-file", "exclude", "exclude-file",
+		"concurrency", "tcp-concurrency", "tcp-timeout", "per-host-rate", "connect-timeout", "response-timeout",
+		"max-response-bytes", "max-pages", "max-items", "max-redirects", "max-targets",
+		"profile", "surfaces", "graph-mode", "scheme", "record-unmatched", "compact-json",
+		"mapped-only", "mapped-only-targets", "extra-ports",
+		"insecure", "user-agent", "content", "content-mode", "content-max-item-bytes",
+		"content-max-items-per-resource", "content-max-service-bytes", "content-max-sample-points",
+		"content-disable", "mapping-file",
+	}
 	got, err := Apply(Defaults(), flags, keys)
 	if err != nil || !reflect.DeepEqual(got, flags) {
 		t.Fatalf("incomplete overrides: %+v %v", got, err)
+	}
+}
+
+func TestContentModes(t *testing.T) {
+	c := DefaultContent()
+	if c.Mode != ContentModeSecretsOnly {
+		t.Fatalf("default mode = %q, want secrets-only", c.Mode)
+	}
+	if !c.EnabledFor("jupyter") || !c.EnabledFor("litellm") || c.EnabledFor("vllm") || c.EnabledFor("ollama") {
+		t.Fatalf("secrets-only surface selection unexpected")
+	}
+	c.Mode = ContentModeMetadata
+	if c.EnabledFor("jupyter") {
+		t.Fatalf("metadata mode must disable all content reads")
+	}
+	c.Mode = ContentModeFull
+	if !c.EnabledFor("ollama") || !c.EnabledFor("jupyter") {
+		t.Fatalf("full mode must enable all surfaces")
 	}
 }
 

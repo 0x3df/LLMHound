@@ -194,3 +194,66 @@ func appendSSHString(d, s []byte) []byte {
 	d = binary.BigEndian.AppendUint32(d, uint32(len(s)))
 	return append(d, s...)
 }
+
+// OpenSSHECDSAPEM returns a fresh P-256 key in the unencrypted openssh-key-v1
+// container. When mismatch is true the private scalar does not derive the
+// embedded public point, which the detector must reject.
+func OpenSSHECDSAPEM(t testing.TB, mismatch bool) string {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate ECDSA OpenSSH fixture: %v", err)
+	}
+	point, err := key.PublicKey.Bytes()
+	if err != nil {
+		t.Fatalf("encode ECDSA public key: %v", err)
+	}
+	scalar, err := key.Bytes()
+	if err != nil {
+		t.Fatalf("encode ECDSA private key: %v", err)
+	}
+	if mismatch {
+		other, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			t.Fatalf("generate mismatched scalar: %v", err)
+		}
+		if scalar, err = other.Bytes(); err != nil {
+			t.Fatalf("encode mismatched scalar: %v", err)
+		}
+	}
+	// SSH mpint: positive, so prefix 0x00 when the high bit is set.
+	mpint := append([]byte(nil), scalar...)
+	for len(mpint) > 1 && mpint[0] == 0 && mpint[1]&0x80 == 0 {
+		mpint = mpint[1:]
+	}
+	if mpint[0]&0x80 != 0 {
+		mpint = append([]byte{0}, mpint...)
+	}
+
+	const keyType, curve = "ecdsa-sha2-nistp256", "nistp256"
+	var pubBlob []byte
+	pubBlob = appendSSHString(pubBlob, []byte(keyType))
+	pubBlob = appendSSHString(pubBlob, []byte(curve))
+	pubBlob = appendSSHString(pubBlob, point)
+
+	privBlock := binary.BigEndian.AppendUint32(nil, 0x5eed5eed)
+	privBlock = binary.BigEndian.AppendUint32(privBlock, 0x5eed5eed)
+	privBlock = appendSSHString(privBlock, []byte(keyType))
+	privBlock = appendSSHString(privBlock, []byte(curve))
+	privBlock = appendSSHString(privBlock, point)
+	privBlock = appendSSHString(privBlock, mpint)
+	privBlock = appendSSHString(privBlock, []byte("secretstest"))
+	pad := 8 - len(privBlock)%8
+	for i := 1; i <= pad; i++ {
+		privBlock = append(privBlock, byte(i))
+	}
+
+	out := []byte("openssh-key-v1\x00")
+	out = appendSSHString(out, []byte("none"))
+	out = appendSSHString(out, []byte("none"))
+	out = appendSSHString(out, nil)
+	out = binary.BigEndian.AppendUint32(out, 1)
+	out = appendSSHString(out, pubBlob)
+	out = appendSSHString(out, privBlock)
+	return string(pem.EncodeToMemory(&pem.Block{Type: "OPENSSH PRIVATE KEY", Bytes: out}))
+}

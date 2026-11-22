@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -467,7 +468,7 @@ func TestScanner_EndToEndScan(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat content file: %v", err)
 	}
-	if info.Mode().Perm() != 0600 {
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0600 {
 		t.Errorf("content file permissions = %o, want 0600", info.Mode().Perm())
 	}
 	contentRaw, err := os.ReadFile(res.ContentPath)

@@ -2,16 +2,19 @@ package discovery
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"strings"
 	"time"
+
+	"github.com/0x3df/LLMHound/internal/transport"
 )
 
 // Surface identifies a supported AI infrastructure service.
@@ -738,104 +741,64 @@ type ProbeResult struct {
 	Latency     time.Duration
 	Reachable   bool
 	NeedsTLS    bool
-	Reason      string
+	// TLSFailed is set when the endpoint answered a TLS handshake but its
+	// certificate failed verification (and --insecure was not set).
+	TLSFailed bool
+	Reason    string
 }
 
 // Probe executes fingerprint probing for a target URL against a definition.
+// It never follows redirects and reads at most 64 KiB per probed path.
 func Probe(ctx context.Context, client *http.Client, baseURL string, def Definition) (ProbeResult, error) {
-	baseURL = strings.TrimRight(baseURL, "/")
-	scheme := "http"
-	if strings.HasPrefix(strings.ToLower(baseURL), "https://") {
-		scheme = "https"
+	return probeCachedOne(ctx, client, baseURL, def, nil)
+}
+
+// tlsFailureReason reports whether err is a TLS certificate verification or
+// handshake failure and returns a bounded, URL-free description. Such a
+// failure proves the endpoint is reachable; it must never be reported as
+// "unreachable".
+func tlsFailureReason(err error) (string, bool) {
+	if err == nil {
+		return "", false
 	}
-	probeClient := http.DefaultClient
-	if client != nil {
-		copyClient := *client
-		copyClient.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse
-		}
-		probeClient = &copyClient
-	} else {
-		probeClient = &http.Client{
-			Timeout: 10 * time.Second,
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
-		}
+	var certErr *tls.CertificateVerificationError
+	if errors.As(err, &certErr) {
+		return boundReason("TLS certificate verification failed: " + certErr.Err.Error()), true
 	}
-
-	reachable := false
-	needsTLS := false
-	for _, p := range def.ProbePaths {
-		targetURL := baseURL + p
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
-		if err != nil {
-			return ProbeResult{}, fmt.Errorf("create probe request: %w", err)
-		}
-		req.Header.Set("Accept", "application/json, text/html;q=0.9, */*;q=0.8")
-
-		start := time.Now()
-		resp, err := probeClient.Do(req)
-		latency := time.Since(start)
-		if err != nil {
-			if ctxErr := ctx.Err(); ctxErr != nil {
-				return ProbeResult{}, ctxErr
-			}
-			if scheme == "http" && isTLSMismatchError(err) {
-				reachable = true
-				needsTLS = true
-				break
-			}
-			// Short-circuit remaining paths if the socket could not be dialed or
-			// timed out before any HTTP response was ever observed on this endpoint.
-			if !reachable && isDialOrConnectError(err) {
-				break
-			}
-			continue
-		}
-
-		reachable = true
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
-		_ = resp.Body.Close()
-
-		if scheme == "http" && isHTTPToHTTPSMismatch(resp.StatusCode, body) {
-			needsTLS = true
-			break
-		}
-
-		if def.Match != nil && def.Match(resp.StatusCode, resp.Header, body) {
-			return ProbeResult{
-				Matched:     true,
-				Surface:     def.Surface,
-				MatchedPath: p,
-				BaseURL:     baseURL,
-				Scheme:      scheme,
-				StatusCode:  resp.StatusCode,
-				Latency:     latency,
-				Reachable:   true,
-			}, nil
-		}
+	var unknownAuth x509.UnknownAuthorityError
+	if errors.As(err, &unknownAuth) {
+		return boundReason("TLS certificate verification failed: " + unknownAuth.Error()), true
 	}
-
-	reason := "no " + string(def.Surface) + "-specific evidence on probed paths"
-	if !reachable {
-		reason = "target unreachable on all probed paths"
-	} else if needsTLS {
-		reason = "endpoint requires HTTPS"
+	var hostErr x509.HostnameError
+	if errors.As(err, &hostErr) {
+		return boundReason("TLS certificate verification failed: " + hostErr.Error()), true
 	}
-	return ProbeResult{
-		Matched:   false,
-		Surface:   def.Surface,
-		BaseURL:   baseURL,
-		Scheme:    scheme,
-		Reachable: reachable,
-		NeedsTLS:  needsTLS,
-		Reason:    reason,
-	}, nil
+	var invalidErr x509.CertificateInvalidError
+	if errors.As(err, &invalidErr) {
+		return boundReason("TLS certificate verification failed: " + invalidErr.Error()), true
+	}
+	var alertErr tls.AlertError
+	if errors.As(err, &alertErr) {
+		return boundReason("TLS handshake failed: " + alertErr.Error()), true
+	}
+	return "", false
+}
+
+func boundReason(s string) string {
+	const max = 240
+	if len(s) > max {
+		return s[:max] + "..."
+	}
+	return s
 }
 
 func isDialOrConnectError(err error) bool {
 	if err == nil {
+		return false
+	}
+	// *url.Error implements net.Error, so TLS verification failures would
+	// otherwise be misread as a dead socket.
+	if _, isTLS := tlsFailureReason(err); isTLS {
 		return false
 	}
 	var netErr net.Error
@@ -898,6 +861,11 @@ func LoadDefinitions(data []byte) ([]Definition, error) {
 		if len(paths) == 0 {
 			paths = []string{"/"}
 		}
+		for _, p := range paths {
+			if err := validateProbePath(p); err != nil {
+				return nil, fmt.Errorf("surface %s probe path %q: %w", s, p, err)
+			}
+		}
 
 		// Inherit builtin matcher if available
 		var match MatchFunc
@@ -918,6 +886,29 @@ func LoadDefinitions(data []byte) ([]Definition, error) {
 		})
 	}
 	return out, nil
+}
+
+// validateProbePath rejects custom probe paths that could change the request's
+// host or reach a mutating endpoint. Probes are appended to a base URL, so a
+// path such as "@evil.example/" would otherwise redirect the probe to another
+// host.
+func validateProbePath(p string) error {
+	if !strings.HasPrefix(p, "/") || strings.HasPrefix(p, "//") {
+		return errors.New("must start with a single '/'")
+	}
+	if strings.ContainsAny(p, "@\\#") || strings.ContainsFunc(p, func(r rune) bool { return r <= ' ' || r == 0x7f }) {
+		return errors.New("must not contain '@', '\\', '#', whitespace, or control characters")
+	}
+	pathOnly, _, _ := strings.Cut(p, "?")
+	for _, seg := range strings.Split(pathOnly, "/") {
+		if seg == ".." {
+			return errors.New("must not contain '..' segments")
+		}
+	}
+	if err := transport.CheckSafety(http.MethodGet, pathOnly); err != nil {
+		return err
+	}
+	return nil
 }
 
 // LoadDefinitionsFile reads and parses a fingerprint definitions JSON file.

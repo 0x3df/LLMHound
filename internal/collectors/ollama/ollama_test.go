@@ -100,6 +100,7 @@ func TestOllama_AnonymousHappyPath(t *testing.T) {
 	defer ts.Close()
 
 	cfg := config.Defaults()
+	cfg.Targets = []string{"127.0.0.1"}
 	cfg.Scope = "corp-scope"
 	cfg.VantageKey = "vantage-01"
 	cfg.Content.Mode = config.ContentModeFull
@@ -274,6 +275,7 @@ func TestOllama_VersionFailurePartialCoverage(t *testing.T) {
 	defer ts.Close()
 
 	cfg := config.Defaults()
+	cfg.Targets = []string{"127.0.0.1"}
 	cfg.Scope = "corp-scope"
 	cfg.VantageKey = "vantage-01"
 	cfg.Content.Mode = config.ContentModeFull
@@ -334,6 +336,7 @@ func TestOllama_TagsDeniedAccess(t *testing.T) {
 	defer ts.Close()
 
 	cfg := config.Defaults()
+	cfg.Targets = []string{"127.0.0.1"}
 	cfg.Scope = "corp-scope"
 	cfg.VantageKey = "vantage-01"
 	cfg.Content.Mode = config.ContentModeFull
@@ -400,6 +403,7 @@ func TestOllama_Truncation(t *testing.T) {
 	defer ts.Close()
 
 	cfg := config.Defaults()
+	cfg.Targets = []string{"127.0.0.1"}
 	cfg.Scope = "corp-scope"
 	cfg.VantageKey = "vantage-01"
 	cfg.Content.Mode = config.ContentModeFull
@@ -466,6 +470,7 @@ func TestOllama_OptInSensitiveMetadata(t *testing.T) {
 
 	// 1. Default secrets-only policy skips low-yield /api/show; full mode calls it.
 	cfgSecretsOnly := config.Defaults()
+	cfgSecretsOnly.Targets = []string{"127.0.0.1"}
 	cfgSecretsOnly.Scope = "corp-scope"
 	cfgSecretsOnly.VantageKey = "vantage-01"
 	var sinkDefault content.MemorySink
@@ -478,6 +483,7 @@ func TestOllama_OptInSensitiveMetadata(t *testing.T) {
 
 	// 1b. Full content policy: /api/show IS called.
 	cfgDefault := config.Defaults()
+	cfgDefault.Targets = []string{"127.0.0.1"}
 	cfgDefault.Scope = "corp-scope"
 	cfgDefault.VantageKey = "vantage-01"
 	cfgDefault.Content.Mode = config.ContentModeFull
@@ -508,6 +514,7 @@ func TestOllama_OptInSensitiveMetadata(t *testing.T) {
 	// 2. Global content opt-out: /api/show must NOT be called
 	showCalled = false
 	cfgDisabled := config.Defaults()
+	cfgDisabled.Targets = []string{"127.0.0.1"}
 	cfgDisabled.Scope = "corp-scope"
 	cfgDisabled.VantageKey = "vantage-01"
 	cfgDisabled.Content.Enabled = false
@@ -534,6 +541,7 @@ func TestOllama_OptInSensitiveMetadata(t *testing.T) {
 	// 3. Per-surface opt-out: /api/show must NOT be called
 	showCalled = false
 	cfgSurfaceOff := config.Defaults()
+	cfgSurfaceOff.Targets = []string{"127.0.0.1"}
 	cfgSurfaceOff.Scope = "corp-scope"
 	cfgSurfaceOff.VantageKey = "vantage-01"
 	cfgSurfaceOff.Content.Surfaces = map[string]bool{"ollama": false}
@@ -552,6 +560,7 @@ func TestOllama_TargetUnreachable(t *testing.T) {
 	badURL := "http://127.0.0.1:49999"
 
 	cfg := config.Defaults()
+	cfg.Targets = []string{"127.0.0.1"}
 	cfg.Scope = "corp-scope"
 	cfg.VantageKey = "vantage-01"
 	cfg.Content.Mode = config.ContentModeFull
@@ -595,6 +604,7 @@ func TestOllama_ComputerCorrelation(t *testing.T) {
 	defer ts.Close()
 
 	cfg := config.Defaults()
+	cfg.Targets = []string{"127.0.0.1"}
 	cfg.Scope = "corp-scope"
 	cfg.VantageKey = "vantage-01"
 	cfg.Content.Mode = config.ContentModeFull
@@ -617,7 +627,8 @@ func TestOllama_ComputerCorrelation(t *testing.T) {
 
 	// 1. Test verified correlation match with custom dialer routing to ts.Listener
 	customTransport := transport.NewClient(transport.Config{
-		Bounds: cfg.Bounds,
+		Bounds:          cfg.Bounds,
+		AuthorizedHosts: []string{"ollama.corp.local", "127.0.0.1"},
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			return net.Dial(network, ts.Listener.Addr().String())
 		},
@@ -706,6 +717,7 @@ func TestOllama_CheckpointJournalAndEmissionRoundtrip(t *testing.T) {
 	}
 
 	cfg := config.Defaults()
+	cfg.Targets = []string{"127.0.0.1"}
 	cfg.Scope = "corp-scope"
 	cfg.VantageKey = "vantage-dc01"
 
@@ -789,6 +801,7 @@ func TestOllama_HTMLResponseFails(t *testing.T) {
 	defer ts.Close()
 
 	cfg := config.Defaults()
+	cfg.Targets = []string{"127.0.0.1"}
 	cfg.Scope = "corp-scope"
 	cfg.VantageKey = "vantage-01"
 	cfg.Content.Mode = config.ContentModeFull
@@ -839,6 +852,7 @@ func TestOllama_TLSVerification(t *testing.T) {
 
 	// 1. Strict TLS (insecure = false): self-signed cert should fail verification
 	cfgStrict := config.Defaults()
+	cfgStrict.Targets = []string{"127.0.0.1"}
 	cfgStrict.Scope = "corp-scope"
 	cfgStrict.VantageKey = "vantage-01"
 	cfgStrict.Insecure = false
@@ -871,6 +885,7 @@ func TestOllama_TLSVerification(t *testing.T) {
 
 	// 2. Explicit insecure override (insecure = true)
 	cfgInsecure := config.Defaults()
+	cfgInsecure.Targets = []string{"127.0.0.1"}
 	cfgInsecure.Scope = "corp-scope"
 	cfgInsecure.VantageKey = "vantage-01"
 	cfgInsecure.Insecure = true
@@ -943,6 +958,7 @@ func TestOllama_ShowRecordsOnlyRedactedProvenance(t *testing.T) {
 	defer ts.Close()
 
 	cfg := config.Defaults()
+	cfg.Targets = []string{"127.0.0.1"}
 	cfg.Scope = "corp-scope"
 	cfg.VantageKey = "vantage-01"
 	cfg.Content.Mode = config.ContentModeFull
@@ -1014,6 +1030,7 @@ func TestOllama_PSAndShowFailuresDowngradeCoverage(t *testing.T) {
 	defer ts.Close()
 
 	cfg := config.Defaults()
+	cfg.Targets = []string{"127.0.0.1"}
 	cfg.Scope = "corp-scope"
 	cfg.VantageKey = "vantage-01"
 	cfg.Content.Mode = config.ContentModeFull
@@ -1050,6 +1067,7 @@ func TestOllama_TruncatedTagsBodyReportedAsTruncation(t *testing.T) {
 	defer ts.Close()
 
 	cfg := config.Defaults()
+	cfg.Targets = []string{"127.0.0.1"}
 	cfg.Scope = "corp-scope"
 	cfg.VantageKey = "vantage-01"
 	cfg.Content.Mode = config.ContentModeFull
@@ -1088,6 +1106,7 @@ func TestOllama_PSBoundedByMaxItems(t *testing.T) {
 	defer ts.Close()
 
 	cfg := config.Defaults()
+	cfg.Targets = []string{"127.0.0.1"}
 	cfg.Scope = "corp-scope"
 	cfg.VantageKey = "vantage-01"
 	cfg.Content.Mode = config.ContentModeFull
@@ -1128,6 +1147,7 @@ func TestOllama_ShowTruncatedBodyReportedAsTruncation(t *testing.T) {
 	defer ts.Close()
 
 	cfg := config.Defaults()
+	cfg.Targets = []string{"127.0.0.1"}
 	cfg.Scope = "corp-scope"
 	cfg.VantageKey = "vantage-01"
 	cfg.Content.Mode = config.ContentModeFull
@@ -1168,6 +1188,7 @@ func TestOllama_PSRedirectEvidenceRecorded(t *testing.T) {
 	defer ts.Close()
 
 	cfg := config.Defaults()
+	cfg.Targets = []string{"127.0.0.1"}
 	cfg.Scope = "corp-scope"
 	cfg.VantageKey = "vantage-01"
 	cfg.Content.Mode = config.ContentModeFull
@@ -1209,6 +1230,7 @@ func TestOllama_ContentBudgetTruncationAndNonLeak(t *testing.T) {
 	defer ts.Close()
 
 	cfg := config.Defaults()
+	cfg.Targets = []string{"127.0.0.1"}
 	cfg.Scope = "corp-scope"
 	cfg.VantageKey = "vantage-01"
 	cfg.Content.Mode = config.ContentModeFull
@@ -1268,6 +1290,7 @@ func TestOllama_IPv6EndpointAndFailedEmitsNoNodes(t *testing.T) {
 	defer ts.Close()
 
 	cfg := config.Defaults()
+	cfg.Targets = []string{"127.0.0.1"}
 	cfg.Scope = "corp-scope"
 	cfg.VantageKey = "vantage-01"
 	cfg.Content.Mode = config.ContentModeFull
@@ -1301,6 +1324,7 @@ func TestOllama_ContentItemsPerModelBound(t *testing.T) {
 	defer ts.Close()
 
 	cfg := config.Defaults()
+	cfg.Targets = []string{"127.0.0.1"}
 	cfg.Scope = "corp-scope"
 	cfg.VantageKey = "vantage-01"
 	cfg.Content.Mode = config.ContentModeFull

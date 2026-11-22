@@ -11,7 +11,9 @@
   servers are out of scope.
 - **Anonymous only:** no credentials are sent. The protocol session is initialized, then only
   metadata list operations and (when enabled by `content.*`) bounded text resource reads are
-  issued. No tool is ever called and no prompt is rendered.
+  issued. No tool is ever called and no prompt is rendered. Only `GET` and `POST` reach the
+  server: the HTTP `DELETE` the MCP SDK sends to end a Streamable HTTP session is suppressed in
+  the transport, so the server expires the abandoned session on its own timeout.
 - **Default-on bounded content tier (`mcp_resources_read`):** when `content.enabled` and
   `content.surfaces.mcp` allow (default `true`), non-binary listed resources are read via
   `resources/read` within `content.*` byte/item limits into `<prefix>.content.jsonl` (mode

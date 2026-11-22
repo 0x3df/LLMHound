@@ -2,6 +2,11 @@ name: Go CI
 
 on:
   pull_request:
+  # Direct pushes to the integration and release branches must be validated
+  # too; a PR-only trigger let unreviewed commits reach QA without CI.
+  push:
+    branches: [QA, main]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -63,3 +68,34 @@ jobs:
         run: go build ./...
       - name: Build without cgo
         run: CGO_ENABLED=0 go build ./...
+      - name: Cross-build and vet for Windows (production collection host)
+        run: |
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build ./...
+          GOOS=windows GOARCH=amd64 go vet ./...
+      - name: Staticcheck (pinned)
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@v0.8.2
+          "$(go env GOPATH)/bin/staticcheck" ./...
+          GOOS=windows "$(go env GOPATH)/bin/staticcheck" ./...
+      - name: Govulncheck (pinned)
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.10.0
+          "$(go env GOPATH)/bin/govulncheck" ./...
+          GOOS=windows "$(go env GOPATH)/bin/govulncheck" ./...
+
+  windows:
+    name: Windows tests (production platform)
+    needs: module
+    if: needs.module.outputs.present == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Test
+        run: go test ./...

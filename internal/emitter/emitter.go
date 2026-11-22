@@ -11,6 +11,8 @@ import (
 
 	"github.com/0x3df/LLMHound/internal/evidence"
 	"github.com/0x3df/LLMHound/internal/graph"
+
+	"github.com/0x3df/LLMHound/internal/securefile"
 )
 
 // BuildBasePayload builds the source-owned OpenGraph payload with metadata.source_kind: "LLMHound".
@@ -259,7 +261,7 @@ func EmitScanWithOptions(dir, prefix string, nodes []NodeItem, edges []graph.Edg
 }
 
 func writeFile(path string, write func(io.Writer) error) (err error) {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
+	f, err := securefile.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY)
 	if err != nil {
 		return err
 	}

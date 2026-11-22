@@ -19,6 +19,7 @@ import (
 	"github.com/0x3df/LLMHound/internal/evidence"
 	"github.com/0x3df/LLMHound/internal/graph"
 	"github.com/0x3df/LLMHound/internal/secrets"
+	llmtransport "github.com/0x3df/LLMHound/internal/transport"
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -77,6 +78,14 @@ func WithCollectorVersion(version string) Option {
 	}
 }
 
+// WithHostRateLimiter shares the scan-wide per-host limiter so MCP traffic
+// counts against the same bounds.per_host_rate as every other collector.
+func WithHostRateLimiter(limiter *llmtransport.HostRateLimiter) Option {
+	return func(c *Collector) {
+		c.limiter = limiter
+	}
+}
+
 // WithContentSink configures where bounded content-tier records are written.
 func WithContentSink(sink content.Sink) Option {
 	return func(c *Collector) {
@@ -95,6 +104,7 @@ type Collector struct {
 	evidenceID         string
 	explicitEvidenceID bool
 	collectorVersion   string
+	limiter            *llmtransport.HostRateLimiter
 }
 
 // New creates a new MCP Collector.
@@ -113,6 +123,12 @@ func New(cfg config.Config, opts ...Option) (*Collector, error) {
 
 	for _, opt := range opts {
 		opt(c)
+	}
+	if c.limiter == nil {
+		c.limiter = llmtransport.NewHostRateLimiter(cfg.Bounds.PerHostRate)
+	}
+	if _, err := llmtransport.ProxyFunc(cfg.Proxy); err != nil {
+		return nil, fmt.Errorf("mcp collector: %w", err)
 	}
 
 	return c, nil
@@ -242,8 +258,9 @@ func (c *Collector) collectInternal(
 	if c.customHTTPClient != nil && c.customHTTPClient.Transport != nil {
 		baseTransport = c.customHTTPClient.Transport
 	} else {
+		proxy, _ := llmtransport.ProxyFunc(c.config.Proxy) // validated in New
 		tr := &http.Transport{
-			Proxy:                 http.ProxyFromEnvironment,
+			Proxy:                 proxy,
 			DialContext:           (&net.Dialer{Timeout: c.config.Bounds.ConnectTimeout, KeepAlive: 30 * time.Second}).DialContext,
 			TLSHandshakeTimeout:   c.config.Bounds.ConnectTimeout,
 			ResponseHeaderTimeout: c.config.Bounds.ResponseTimeout,
@@ -259,7 +276,7 @@ func (c *Collector) collectInternal(
 
 	tracker := newTrackingTransport(
 		baseTransport,
-		c.config.Bounds.PerHostRate,
+		c.limiter,
 		c.config.Bounds.MaxResponseBytes,
 		c.config.UserAgent,
 		c.config.Insecure,

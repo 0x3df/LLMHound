@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+
+	"github.com/0x3df/LLMHound/internal/securefile"
 )
 
 // Sink receives validated content-tier records.
@@ -117,13 +119,9 @@ func (l *LazyFileWriter) Write(r Record) error {
 		if l.append {
 			flags = os.O_CREATE | os.O_APPEND | os.O_WRONLY
 		}
-		f, err := os.OpenFile(l.path, flags, 0o600)
+		f, err := securefile.OpenFile(l.path, flags)
 		if err != nil {
 			return fmt.Errorf("open content file: %w", err)
-		}
-		if err := f.Chmod(0o600); err != nil {
-			_ = f.Close()
-			return fmt.Errorf("restrict content file permissions: %w", err)
 		}
 		l.file = f
 		l.writer = NewWriter(f)

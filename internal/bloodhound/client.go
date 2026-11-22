@@ -42,6 +42,20 @@ type Client struct {
 
 	mu          sync.Mutex
 	bearerToken string
+	// noUploadIDFilter records that CE rejected ?id=eq: on the upload list.
+	noUploadIDFilter bool
+}
+
+func (c *Client) uploadIDFilterUnsupported() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.noUploadIDFilter
+}
+
+func (c *Client) setUploadIDFilterUnsupported() {
+	c.mu.Lock()
+	c.noUploadIDFilter = true
+	c.mu.Unlock()
 }
 
 // NewClient validates cfg and returns a BloodHound CE API client.

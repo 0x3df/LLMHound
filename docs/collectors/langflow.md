@@ -19,6 +19,11 @@ validating code, or retaining any auto-login tokens.
   for posture (`token_type`, `auto_login`); any `access_token` or
   `refresh_token` in the response is discarded at decode time and never enters
   node properties, evidence, checkpoints, logs, or `.content.jsonl`.
+- **Rules-of-engagement note:** when auto-login is enabled, this `GET` makes
+  Langflow issue a superuser session token to the scanner (and, depending on
+  version, record a superuser login). The token is never stored, sent back, or
+  used, but the target's audit trail will show it; tell the service owner
+  before scanning, or exclude Langflow with `--surfaces`/`--profile`.
 - **Content Tier (`langflow_flow_bodies`):** When `content.enabled` and
   `content.surfaces.langflow` allow (default `true`), bounded flow `data`
   definitions go to `<prefix>.content.jsonl` (mode `0600`) through

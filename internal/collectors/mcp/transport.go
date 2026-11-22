@@ -1,13 +1,13 @@
 package mcp
 
 import (
-	"context"
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	llmtransport "github.com/0x3df/LLMHound/internal/transport"
 	"io"
 	"net"
 	"net/http"
@@ -23,45 +23,6 @@ type redirectInfo struct {
 	StatusCode int
 	Authorized bool
 	Reason     string
-}
-
-type rateLimiter struct {
-	mu       sync.Mutex
-	interval time.Duration
-	last     time.Time
-}
-
-func newRateLimiter(rate float64) *rateLimiter {
-	if rate <= 0 {
-		return nil
-	}
-	return &rateLimiter{
-		interval: time.Duration(float64(time.Second) / rate),
-	}
-}
-
-func (r *rateLimiter) Wait(ctx context.Context) error {
-	if r == nil {
-		return nil
-	}
-	r.mu.Lock()
-	now := time.Now()
-	wait := r.interval - now.Sub(r.last)
-	if wait > 0 {
-		r.last = now.Add(wait)
-		r.mu.Unlock()
-		timer := time.NewTimer(wait)
-		defer timer.Stop()
-		select {
-		case <-timer.C:
-			return nil
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	}
-	r.last = now
-	r.mu.Unlock()
-	return nil
 }
 
 type limitReadCloser struct {
@@ -86,7 +47,7 @@ func (l *limitReadCloser) Close() error {
 
 type trackingTransport struct {
 	base             http.RoundTripper
-	limiter          *rateLimiter
+	limiter          *llmtransport.HostRateLimiter
 	maxResponseBytes int64
 	userAgent        string
 	insecure         bool
@@ -103,7 +64,7 @@ type trackingTransport struct {
 	redirects      []redirectInfo
 }
 
-func newTrackingTransport(base http.RoundTripper, rate float64, maxResponseBytes int64, userAgent string, insecure bool, targetHost, canonicalURL string) *trackingTransport {
+func newTrackingTransport(base http.RoundTripper, limiter *llmtransport.HostRateLimiter, maxResponseBytes int64, userAgent string, insecure bool, targetHost, canonicalURL string) *trackingTransport {
 	if base == nil {
 		base = http.DefaultTransport
 	}
@@ -114,7 +75,7 @@ func newTrackingTransport(base http.RoundTripper, rate float64, maxResponseBytes
 	}
 	return &trackingTransport{
 		base:             base,
-		limiter:          newRateLimiter(rate),
+		limiter:          limiter,
 		maxResponseBytes: maxResponseBytes,
 		userAgent:        userAgent,
 		insecure:         insecure,
@@ -155,6 +116,13 @@ func (t *trackingTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	if req.URL.User != nil {
 		return nil, errors.New("mcp embedded URL credentials are forbidden")
 	}
+	// Read-only collection uses GET and POST only. The MCP SDK sends an HTTP
+	// DELETE to terminate a Streamable HTTP session on Close; it is suppressed
+	// here so no method outside the allowlist ever reaches a target. The
+	// server expires the abandoned session on its own timeout.
+	if req.Method != http.MethodGet && req.Method != http.MethodPost {
+		return nil, fmt.Errorf("%w: mcp %s", llmtransport.ErrForbiddenMethod, req.Method)
+	}
 	if t.initialScheme == "https" && scheme != "https" {
 		return nil, errors.New("mcp https to http downgrade forbidden")
 	}
@@ -165,10 +133,8 @@ func (t *trackingTransport) RoundTrip(req *http.Request) (*http.Response, error)
 		return nil, fmt.Errorf("mcp request endpoint %q outside authorized authority %q", req.URL.Host, t.targetAuthority)
 	}
 
-	if t.limiter != nil {
-		if err := t.limiter.Wait(req.Context()); err != nil {
-			return nil, err
-		}
+	if err := t.limiter.Wait(req.Context(), req.URL.Hostname()); err != nil {
+		return nil, err
 	}
 
 	if t.userAgent != "" && req.Header.Get("User-Agent") == "" {

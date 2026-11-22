@@ -9,14 +9,6 @@ type apiVersionResponse struct {
 	JupyterServerVersion string `json:"jupyter_server_version,omitempty"`
 }
 
-// statusResponse parses the response from GET /api/status.
-type statusResponse struct {
-	Started      string `json:"started,omitempty"`
-	LastActivity string `json:"last_activity,omitempty"`
-	Kernels      int    `json:"kernels,omitempty"`
-	Connections  int    `json:"connections,omitempty"`
-}
-
 // sessionResponse parses elements from GET /api/sessions.
 type sessionResponse struct {
 	ID     string          `json:"id"`

@@ -1,0 +1,5 @@
+# Goldens, journals, and fixtures are compared byte-for-byte; keep LF on
+# every checkout, including the Windows CI runner and collection hosts.
+* text=auto eol=lf
+*.png binary
+*.zip binary

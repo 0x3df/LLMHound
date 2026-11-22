@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"math"
 	"net/netip"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -37,6 +38,10 @@ const (
 )
 
 // Optimal scan profile, graph mode, URL scheme, and content mode constants.
+// DefaultUserAgent is the placeholder User-Agent; the CLI replaces it with
+// "LLMHound/<build version>" unless the operator sets one explicitly.
+const DefaultUserAgent = "LLMHound/dev"
+
 const (
 	ProfileAttackPath = "attack-path"
 	ProfileRCEOnly    = "rce-only"
@@ -55,17 +60,20 @@ const (
 )
 
 type Config struct {
-	Scope             string            `yaml:"scope"`
-	VantageKey        string            `yaml:"vantage_key"`
-	Targets           []string          `yaml:"targets"`
-	CIDRs             []string          `yaml:"cidrs"`
-	TargetsFiles      []string          `yaml:"targets_files"`
-	EndpointsFiles    []string          `yaml:"endpoints_files"`
-	Exclude           []string          `yaml:"exclude"`
-	ExcludeFiles      []string          `yaml:"exclude_files"`
-	Bounds            Bounds            `yaml:"bounds"`
-	Scan              ScanPolicy        `yaml:"scan"`
-	Insecure          bool              `yaml:"insecure"`
+	Scope          string     `yaml:"scope"`
+	VantageKey     string     `yaml:"vantage_key"`
+	Targets        []string   `yaml:"targets"`
+	CIDRs          []string   `yaml:"cidrs"`
+	TargetsFiles   []string   `yaml:"targets_files"`
+	EndpointsFiles []string   `yaml:"endpoints_files"`
+	Exclude        []string   `yaml:"exclude"`
+	ExcludeFiles   []string   `yaml:"exclude_files"`
+	Bounds         Bounds     `yaml:"bounds"`
+	Scan           ScanPolicy `yaml:"scan"`
+	Insecure       bool       `yaml:"insecure"`
+	// Proxy is an explicit HTTP(S)/SOCKS5 proxy for scan traffic. Empty means
+	// direct connections; HTTP_PROXY/HTTPS_PROXY are never consulted.
+	Proxy             string            `yaml:"proxy"`
 	UserAgent         string            `yaml:"user_agent"`
 	Content           Content           `yaml:"content"`
 	Secrets           Secrets           `yaml:"secrets"`
@@ -111,6 +119,12 @@ type PathQualification struct {
 	EnabledRules           []string                    `yaml:"enabled_rules"`
 	AssumedReachPrincipals []ReachPrincipal            `yaml:"assumed_reach_principals"`
 	VantagePrincipals      map[string][]ReachPrincipal `yaml:"vantage_principals"`
+	// ClusterFanout opts in to CanExecuteOn edges toward cluster worker hosts
+	// that a scanned service declares (Ray worker_hosts). Off by default: the
+	// worker list is self-reported by the target, so a hostile or spoofed
+	// dashboard could name any mapped host. Even when enabled, a worker must be
+	// one of the scan's own input targets.
+	ClusterFanout bool `yaml:"cluster_fanout"`
 }
 
 var knownRuleIDs = loadKnownRuleIDs()
@@ -284,7 +298,7 @@ func Defaults() Config {
 			RecordUnmatched: false,
 			CompactJSON:     true,
 		},
-		UserAgent: "LLMHound/dev",
+		UserAgent: DefaultUserAgent,
 		Content:   DefaultContent(),
 	}
 }
@@ -520,6 +534,8 @@ func Apply(c, flags Config, fields []string) (Config, error) {
 			c.Insecure = flags.Insecure
 		case "user-agent":
 			c.UserAgent = flags.UserAgent
+		case "proxy":
+			c.Proxy = flags.Proxy
 		case "content":
 			c.Content.Enabled = flags.Content.Enabled
 		case "content-mode":
@@ -636,6 +652,9 @@ func (c Config) Validate() error {
 	if math.IsNaN(b.PerHostRate) || math.IsInf(b.PerHostRate, 0) || b.PerHostRate < 0.1 || b.PerHostRate > 1000 {
 		return fmt.Errorf("bounds.per_host_rate must be finite and between 0.1 and 1000 requests/second")
 	}
+	if err := validateProxy(c.Proxy); err != nil {
+		return err
+	}
 	if strings.TrimSpace(c.UserAgent) == "" || len(c.UserAgent) > 256 {
 		return fmt.Errorf("user_agent must be nonblank and at most 256 bytes")
 	}
@@ -701,6 +720,28 @@ func (c Config) Validate() error {
 		if _, err := graph.ExistingNodeByID(p.EffectiveKind(), p.ObjectID); err != nil {
 			return fmt.Errorf("path_qualification.assumed_reach_principals[%d]: %w", i, err)
 		}
+	}
+	return nil
+}
+
+func validateProxy(raw string) error {
+	if raw == "" {
+		return nil
+	}
+	if raw != strings.TrimSpace(raw) || strings.ContainsFunc(raw, unicode.IsControl) {
+		return fmt.Errorf("proxy must be a URL without surrounding whitespace or control characters")
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("proxy must be a valid URL: %w", err)
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "http", "https", "socks5":
+	default:
+		return fmt.Errorf("proxy scheme %q must be http, https, or socks5", u.Scheme)
+	}
+	if u.Hostname() == "" {
+		return fmt.Errorf("proxy URL requires a host")
 	}
 	return nil
 }

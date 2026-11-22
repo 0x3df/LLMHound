@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -404,7 +405,7 @@ func TestScanCLIEndToEndLoopbackFixtures(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if contentInfo.Mode().Perm() != 0600 {
+	if runtime.GOOS != "windows" && contentInfo.Mode().Perm() != 0600 {
 		t.Errorf("content file mode = %o, want 0600", contentInfo.Mode().Perm())
 	}
 	contentRaw, err := os.ReadFile(filepath.Join(outDir, "cli-live.content.jsonl"))
@@ -680,7 +681,7 @@ func TestScanCLIM2bCohortLoopbackFixtures(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cInfo.Mode().Perm() != 0600 {
+	if runtime.GOOS != "windows" && cInfo.Mode().Perm() != 0600 {
 		t.Errorf("content file mode = %o, want 0600", cInfo.Mode().Perm())
 	}
 	contentRaw, err := os.ReadFile(contentPath)
@@ -918,7 +919,7 @@ func TestScanCLID5D6CohortLoopbackFixtures(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cInfo.Mode().Perm() != 0600 {
+	if runtime.GOOS != "windows" && cInfo.Mode().Perm() != 0600 {
 		t.Errorf("content file mode = %o, want 0600", cInfo.Mode().Perm())
 	}
 
@@ -1093,7 +1094,7 @@ func TestUploadCLIWithMockCE(t *testing.T) {
 		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/completed-tasks"):
 			_, _ = w.Write([]byte(`{"data":[]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v2/saved-queries":
-			_, _ = w.Write([]byte(`{"data":[{"id":42,"name":"LLMHound_Old","description":"old","query":"MATCH (n) RETURN n"}]}`))
+			_, _ = w.Write([]byte(`{"data":[{"id":42,"name":"LLMHound P1: previous title","description":"old","query":"MATCH (n) RETURN n"},{"id":43,"name":"LLMHound - analyst notes","description":"mine","query":"MATCH (n) RETURN n"}]}`))
 		case r.Method == http.MethodDelete && r.URL.Path == "/api/v2/saved-queries/42":
 			deletedIDs = append(deletedIDs, 42)
 			w.WriteHeader(http.StatusNoContent)
@@ -1238,6 +1239,7 @@ func TestCLI_EndpointsFileAndPrioritizeFromBH(t *testing.T) {
 	}))
 	defer ce.Close()
 
+	t.Setenv("BLOODHOUND_BEARER_TOKEN", "tok") // credentials come from the environment, not argv
 	out, err := execute(
 		"targets",
 		"--scope", "corp",
@@ -1247,13 +1249,22 @@ func TestCLI_EndpointsFileAndPrioritizeFromBH(t *testing.T) {
 		"--mapping-file", mapFile,
 		"--prioritize-from-bh",
 		"--bh-url", ce.URL,
-		"--bh-bearer-token", "tok",
 	)
+	if strings.Contains(out, "WARNING") {
+		t.Fatalf("environment-supplied credentials must not warn: %s", out)
+	}
 	if err != nil {
 		t.Fatalf("targets --prioritize-from-bh failed: %v", err)
 	}
 	lines := strings.Split(strings.TrimSpace(out), "\n")
 	if len(lines) != 5 || lines[0] != "192.0.2.30" || lines[1] != "192.0.2.10" || lines[2] != "192.0.2.99" {
 		t.Fatalf("unexpected prioritized output order: %v", lines)
+	}
+}
+
+func TestCLI_WarnsOnCredentialFlags(t *testing.T) {
+	out, _ := execute("upload", "--url", "http://127.0.0.1:1", "--password", "pw", "--username", "u", "--validate-only", "--timeout", "100ms")
+	if !strings.Contains(out, "WARNING: --password exposes a credential") || strings.Contains(out, "pw ") {
+		t.Fatalf("expected credential-flag warning without echoing the value, got: %s", out)
 	}
 }

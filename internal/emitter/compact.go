@@ -26,10 +26,13 @@ var highRiskCapabilityHints = map[string]bool{
 }
 
 // FilterAttackPathGraph filters nodes and edges for high-signal, low-bloat
-// BloodHound CE ingestion according to opts.
+// BloodHound CE ingestion according to opts. In every mode, including full
+// graph mode, an edge whose LLMHound-owned endpoint is not an emitted node is
+// dropped: CE would otherwise create a kindless stub for the missing endpoint
+// (and tag it with source_kind in the base payload).
 func FilterAttackPathGraph(nodes []NodeItem, edges []graph.Edge, opts FilterOptions) ([]NodeItem, []graph.Edge) {
 	if !opts.CompactAttackPath && !opts.MappedOnly {
-		return nodes, edges
+		return nodes, DropDanglingEdges(nodes, edges)
 	}
 
 	keptNodes := make([]NodeItem, 0, len(nodes))
@@ -80,6 +83,27 @@ func FilterAttackPathGraph(nodes []NodeItem, edges []graph.Edge, opts FilterOpti
 	}
 
 	return keptNodes, keptEdges
+}
+
+// DropDanglingEdges removes edges with an LLMHound-owned endpoint (start or
+// end) that is not among nodes. Native endpoints are verified separately by
+// the upload pre-flight.
+func DropDanglingEdges(nodes []NodeItem, edges []graph.Edge) []graph.Edge {
+	ids := make(map[string]bool, len(nodes))
+	for _, item := range nodes {
+		ids[strings.ToUpper(item.Node.Identity().ID())] = true
+	}
+	kept := make([]graph.Edge, 0, len(edges))
+	for _, e := range edges {
+		if !e.Start().IsNative() && !ids[strings.ToUpper(e.Start().ID())] {
+			continue
+		}
+		if !e.End().IsNative() && !ids[strings.ToUpper(e.End().ID())] {
+			continue
+		}
+		kept = append(kept, e)
+	}
+	return kept
 }
 
 func hasHighRiskCapabilityHint(props map[string]any) bool {

@@ -31,6 +31,8 @@ asset mapping. Why and for whom: [executive summary](docs/00-executive-summary.m
 ```bash
 CGO_ENABLED=0 go build -o llmhound ./cmd/llmhound
 gofmt -l . && go vet ./... && go test -race ./...    # all must pass; includes ./docs
+go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./... && go run golang.org/x/vuln/cmd/govulncheck@v1.10.0 ./...
+GOOS=windows CGO_ENABLED=0 go build ./... && GOOS=windows go vet ./...   # Windows is the production host
 UPDATE_GOLDEN=1 go test ./internal/emitter -run TestGoldenEmission   # then review the diff
 ```
 
@@ -38,6 +40,7 @@ UPDATE_GOLDEN=1 go test ./internal/emitter -run TestGoldenEmission   # then revi
 
 `cmd/llmhound` CLI · `internal/config` YAML + flags · `internal/targets` target prep ·
 `internal/discovery` data-driven fingerprints · `internal/transport` bounded TLS-aware HTTP ·
+`internal/securefile` owner-only artifact files (0600 / Windows DACL) ·
 `internal/collectors/<surface>` one package per surface (jupyter, mcp, ollama, a2a, vllm, qdrant,
 litellm, mlflow, openwebui, langserve, openaicompat, ray, langflow, flowise, chromadb) · `internal/content`
 bounded content-tier records + 0600 writer · `internal/secrets` high-precision
@@ -56,9 +59,11 @@ access summary · `internal/rules` & `extension/rules` opt-in traversable rule e
 1. Anonymous and read-only. Never send, guess, test, validate, or use a credential. Never call a
    mutating or workload-starting operation (tool call, prompt, inference, job submit). Validate
    operation semantics, not just the HTTP verb.
-2. TLS verification is on; a failure stops collection. Only explicit `--insecure` bypasses it, and
-   it is recorded. Recheck authorization on every redirect hop; advertised URLs are evidence, not
-   permission to fetch.
+2. TLS verification is on; a failure stops collection and is recorded as a TLS failure, never
+   "unreachable". Only explicit `--insecure` bypasses it. Recheck authorization on every redirect
+   hop; advertised URLs are evidence, not permission to fetch. Scan traffic uses one shared
+   transport per scan (fail-closed host allowlist = targets + endpoints, one per-host limiter,
+   explicit `--proxy` only, GET/POST only).
 3. Everything is bounded (time, pages, items, bytes). Hitting a bound records `truncated`.
 4. Descriptions, annotations, and banners from a scanned service are **untrusted input**.
 5. Secrets are never stored: a boolean and a type only, and only from structure-verified

@@ -56,6 +56,7 @@ func extractCapabilities(caps *mcpsdk.ServerCapabilities) []string {
 	if caps.Prompts != nil {
 		out = append(out, "prompts")
 	}
+	//lint:ignore SA1019 servers on pre-2026-07-28 protocol versions still advertise logging; reporting it is observation, not use.
 	if caps.Logging != nil {
 		out = append(out, "logging")
 	}

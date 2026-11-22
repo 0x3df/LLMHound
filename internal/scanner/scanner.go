@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/0x3df/LLMHound/internal/checkpoint"
@@ -40,6 +42,7 @@ import (
 	"github.com/0x3df/LLMHound/internal/graph"
 	"github.com/0x3df/LLMHound/internal/rules"
 	"github.com/0x3df/LLMHound/internal/targets"
+	"github.com/0x3df/LLMHound/internal/transport"
 )
 
 // PlannedCheck describes an allowlisted check planned for a surface.
@@ -76,7 +79,17 @@ type ScanResult struct {
 	Artifacts    emitter.ScanArtifacts
 	TargetsCount int
 	State        *checkpoint.State
+	// TargetErrors lists per-target collection errors (bounded). Each one was
+	// journaled as a failed result, so `resume` retries it; the scan still
+	// emitted everything else.
+	TargetErrors []string
+	// TargetErrorCount is the total number of target errors, including any
+	// beyond the retained TargetErrors list.
+	TargetErrorCount int
 }
+
+// maxRetainedTargetErrors bounds ScanResult.TargetErrors.
+const maxRetainedTargetErrors = 1000
 
 // Option configures Scanner behavior.
 type Option func(*Scanner)
@@ -143,6 +156,15 @@ func WithNow(now func() time.Time) Option {
 	}
 }
 
+// WithProgress writes a one-line progress summary to w every interval while a
+// scan or resume runs. A nil writer disables progress output.
+func WithProgress(w io.Writer, interval time.Duration) Option {
+	return func(s *Scanner) {
+		s.progress = w
+		s.progressInterval = interval
+	}
+}
+
 // WithCollectorVersion sets the collector version reported in headers and evidence.
 func WithCollectorVersion(version string) Option {
 	return func(s *Scanner) {
@@ -162,6 +184,11 @@ type Scanner struct {
 	endpoints         []targets.EndpointTarget
 	now               func() time.Time
 	collectorVersion  string
+	progress          io.Writer
+	progressInterval  time.Duration
+	// collectFault is a test seam (see export_test.go) that injects a
+	// collector error for chosen targets.
+	collectFault func(surface discovery.Surface, host string) error
 }
 
 // New creates and initializes a Scanner instance.
@@ -439,7 +466,7 @@ func (s *Scanner) planSurfaces(_ string) []SurfacePlan {
 				CheckID:   litellm.CheckConfig,
 				Operation: litellm.CheckConfig,
 				Method:    http.MethodGet,
-				Endpoint:  "/model/info",
+				Endpoint:  "/model/info, /settings",
 				Purpose:   "Capture bounded LiteLLM configuration into restricted .content.jsonl",
 				Active:    contentActive,
 			}
@@ -638,6 +665,14 @@ func (s *Scanner) planSurfaces(_ string) []SurfacePlan {
 					Purpose:   "Retrieve Ray actor count metadata",
 					Active:    true,
 				},
+				{
+					CheckID:   ray.CheckNodes,
+					Operation: ray.CheckNodes,
+					Method:    http.MethodGet,
+					Endpoint:  "/nodes?view=summary",
+					Purpose:   "Retrieve alive worker host IPs (worker_hosts) without scheduling work",
+					Active:    true,
+				},
 				jobContentCheck,
 			}
 
@@ -668,7 +703,7 @@ func (s *Scanner) planSurfaces(_ string) []SurfacePlan {
 					Operation: langflow.CheckAutoLogin,
 					Method:    http.MethodGet,
 					Endpoint:  "/api/v1/auto_login",
-					Purpose:   "Inspect auto-login posture without retaining token values",
+					Purpose:   "Inspect auto-login posture. When auto-login is on, Langflow issues a superuser session token to the scanner and may log a superuser login; the token is discarded, never stored or used",
 					Active:    true,
 				},
 				{
@@ -937,7 +972,26 @@ func (s *Scanner) runAndEmit(
 	}
 	orderedTargets := targets.PrioritizeTargets(targetHosts, lookupObjID, s.priorityObjectIDs, s.cfg.Scan.MappedOnlyTargets)
 
-	// 3. Initialize collectors
+	// 3. Initialize collectors. Every collector shares one transport: one
+	// authorized-host list (prepared targets plus explicit endpoints, so
+	// nothing outside the operator's input is ever contacted), one per-host
+	// rate limiter, and one proxy policy.
+	authorized := make([]string, 0, len(orderedTargets)+len(s.endpoints))
+	authorized = append(authorized, orderedTargets...)
+	for _, ep := range s.endpoints {
+		authorized = append(authorized, ep.Host)
+	}
+	limiter := transport.NewHostRateLimiter(s.cfg.Bounds.PerHostRate)
+	shared := transport.NewClient(transport.Config{
+		Bounds:          s.cfg.Bounds,
+		Insecure:        s.cfg.Insecure,
+		UserAgent:       s.cfg.UserAgent,
+		AuthorizedHosts: authorized,
+		Proxy:           s.cfg.Proxy,
+		RateLimiter:     limiter,
+	})
+	defer shared.CloseIdleConnections()
+
 	jupCfg := jupyter.Config{
 		Scope:            s.cfg.Scope,
 		VantageKey:       s.cfg.VantageKey,
@@ -952,6 +1006,8 @@ func (s *Scanner) runAndEmit(
 		Resolver:         resolver,
 		Now:              s.now,
 		HTTPClient:       s.httpClient,
+		Proxy:            s.cfg.Proxy,
+		RateLimiter:      limiter,
 	}
 	jupCol, err := jupyter.New(jupCfg)
 	if err != nil {
@@ -961,26 +1017,26 @@ func (s *Scanner) runAndEmit(
 	}
 
 	surfCfg := s.cfg
-	surfCfg.Targets = append([]string(nil), orderedTargets...)
+	surfCfg.Targets = authorized
 	cols := &collectorSet{
 		scanner:      s,
 		scanID:       scanID,
 		now:          now,
 		resolver:     resolver,
 		jupyter:      jupCol,
-		ollama:       ollama.New(surfCfg, ollama.WithContentSink(contentSink)),
-		a2a:          a2a.New(surfCfg, a2a.WithContentSink(contentSink)),
-		vllm:         vllm.New(surfCfg),
-		qdrant:       qdrant.New(surfCfg, qdrant.WithContentSink(contentSink)),
-		litellm:      litellm.New(surfCfg, litellm.WithContentSink(contentSink)),
-		mlflow:       mlflow.New(surfCfg, mlflow.WithContentSink(contentSink)),
-		openwebui:    openwebui.New(surfCfg, openwebui.WithContentSink(contentSink)),
-		langserve:    langserve.New(surfCfg, langserve.WithContentSink(contentSink)),
-		ray:          ray.New(surfCfg, ray.WithContentSink(contentSink)),
-		langflow:     langflow.New(surfCfg, langflow.WithContentSink(contentSink)),
-		flowise:      flowise.New(surfCfg, flowise.WithContentSink(contentSink)),
-		chromadb:     chromadb.New(surfCfg, chromadb.WithContentSink(contentSink)),
-		openaicompat: openaicompat.New(surfCfg),
+		ollama:       ollama.New(surfCfg, ollama.WithContentSink(contentSink), ollama.WithTransport(shared)),
+		a2a:          a2a.New(surfCfg, a2a.WithContentSink(contentSink), a2a.WithTransport(shared)),
+		vllm:         vllm.New(surfCfg, vllm.WithTransport(shared)),
+		qdrant:       qdrant.New(surfCfg, qdrant.WithContentSink(contentSink), qdrant.WithTransport(shared)),
+		litellm:      litellm.New(surfCfg, litellm.WithContentSink(contentSink), litellm.WithTransport(shared)),
+		mlflow:       mlflow.New(surfCfg, mlflow.WithContentSink(contentSink), mlflow.WithTransport(shared)),
+		openwebui:    openwebui.New(surfCfg, openwebui.WithContentSink(contentSink), openwebui.WithTransport(shared)),
+		langserve:    langserve.New(surfCfg, langserve.WithContentSink(contentSink), langserve.WithTransport(shared)),
+		ray:          ray.New(surfCfg, ray.WithContentSink(contentSink), ray.WithTransport(shared)),
+		langflow:     langflow.New(surfCfg, langflow.WithContentSink(contentSink), langflow.WithTransport(shared)),
+		flowise:      flowise.New(surfCfg, flowise.WithContentSink(contentSink), flowise.WithTransport(shared)),
+		chromadb:     chromadb.New(surfCfg, chromadb.WithContentSink(contentSink), chromadb.WithTransport(shared)),
+		openaicompat: openaicompat.New(surfCfg, openaicompat.WithTransport(shared)),
 	}
 
 	mcpOpts := []collectormcp.Option{
@@ -989,11 +1045,12 @@ func (s *Scanner) runAndEmit(
 		collectormcp.WithClock(s.now),
 		collectormcp.WithContentSink(contentSink),
 		collectormcp.WithCorrelator(resolver),
+		collectormcp.WithHostRateLimiter(limiter),
 	}
 	if s.httpClient != nil {
 		mcpOpts = append(mcpOpts, collectormcp.WithHTTPClient(s.httpClient))
 	}
-	mcpCol, err := collectormcp.New(s.cfg, mcpOpts...)
+	mcpCol, err := collectormcp.New(surfCfg, mcpOpts...)
 	if err != nil {
 		_ = journal.Close()
 		_ = closeContent()
@@ -1001,7 +1058,12 @@ func (s *Scanner) runAndEmit(
 	}
 	cols.mcp = mcpCol
 
-	probeClient := s.probeHTTPClient()
+	probeClient, err := s.probeHTTPClient(limiter)
+	if err != nil {
+		_ = journal.Close()
+		_ = closeContent()
+		return nil, err
+	}
 	defer probeClient.CloseIdleConnections()
 
 	type targetSurface struct {
@@ -1077,6 +1139,37 @@ func (s *Scanner) runAndEmit(
 		}
 	}
 
+	// A failure confined to one target (an unexpected probe or collector
+	// error) is journaled as a failed result for that target and the scan
+	// continues; only journal failures and interruption abort the run. One bad
+	// host must never discard the output of every other host, and because the
+	// result is "failed", resume retries it.
+	var targetErrMu sync.Mutex
+	var targetErrs []string
+	targetErrCount := 0
+	targetFailure := func(host, baseURL string, surface discovery.Surface, err error) {
+		if ctx.Err() != nil {
+			return // interruption is reported once, with a resume hint
+		}
+		msg := fmt.Sprintf("%s %s: %v", surface, host, err)
+		targetErrMu.Lock()
+		targetErrCount++
+		if len(targetErrs) < maxRetainedTargetErrors {
+			targetErrs = append(targetErrs, msg)
+		}
+		targetErrMu.Unlock()
+		record(collectorErrorResult(host, baseURL, surface, err, s.cfg.Scope, s.cfg.VantageKey, scanID, s.collectorVersion, now))
+	}
+
+	var hostsDone, servicesFound atomic.Int64
+	totalUnits := len(orderedTargets) + len(s.endpoints)
+	stopProgress := s.startProgress(ctx, totalUnits, &hostsDone, &servicesFound, func() int {
+		targetErrMu.Lock()
+		defer targetErrMu.Unlock()
+		return targetErrCount
+	})
+	defer stopProgress()
+
 	schemeMode := s.cfg.Scan.Scheme
 	if strings.TrimSpace(schemeMode) == "" {
 		schemeMode = config.SchemeAuto
@@ -1088,6 +1181,7 @@ targetLoop:
 			break targetLoop
 		}
 		if priorState != nil && priorState.IsHostSweptEmpty(tgt, sweptPorts) {
+			hostsDone.Add(1)
 			continue
 		}
 
@@ -1123,6 +1217,7 @@ targetLoop:
 					}
 				}
 			}
+			hostsDone.Add(1)
 			continue
 		}
 
@@ -1141,10 +1236,15 @@ targetLoop:
 
 		go func(host string, openMap map[int]bool) {
 			defer wg.Done()
+			defer hostsDone.Add(1)
 			defer func() { <-sem }()
 
 			cache := discovery.NewPortProbeCache()
 			matchedHostPort := make(map[string]bool)
+			// Journal status is keyed by (host, surface). Once a surface matched
+			// on one port, an unmatched extra port must not overwrite that
+			// result as "failed" (which made resume re-collect the host).
+			matchedSurface := make(map[discovery.Surface]bool)
 
 			for _, def := range activeDefs {
 				// Build candidate ports for this definition: DefaultPort + ExtraPorts.
@@ -1187,10 +1287,13 @@ targetLoop:
 
 					probe, err := discovery.ProbeWithScheme(ctx, probeClient, host, port, schemeMode, def, cache)
 					if err != nil {
-						recordFailure(fmt.Errorf("probe %s %s: %w", def.Surface, host, err))
+						targetFailure(host, discovery.BaseURLForHost(host, port, false), def.Surface, fmt.Errorf("probe: %w", err))
 						continue
 					}
 					if !probe.Matched {
+						if matchedSurface[def.Surface] {
+							continue
+						}
 						if probe.Reachable || s.cfg.Scan.RecordUnmatched {
 							baseURL := probe.BaseURL
 							if baseURL == "" {
@@ -1201,12 +1304,15 @@ targetLoop:
 						continue
 					}
 					matchedHostPort[hostPortKey] = true
+					matchedSurface[def.Surface] = true
 					baseURL := probe.BaseURL
 					if baseURL == "" {
 						baseURL = discovery.BaseURLForHost(host, port, probe.Scheme == "https")
 					}
 					if err := cols.collect(ctx, def.Surface, host, baseURL, port, probe, journal, record); err != nil {
-						recordFailure(err)
+						targetFailure(host, baseURL, def.Surface, err)
+					} else {
+						servicesFound.Add(1)
 					}
 				}
 			}
@@ -1231,6 +1337,7 @@ endpointLoop:
 		wg.Add(1)
 		go func(endpoint targets.EndpointTarget) {
 			defer wg.Done()
+			defer hostsDone.Add(1)
 			defer func() { <-sem }()
 
 			cache := discovery.NewPortProbeCache()
@@ -1245,7 +1352,7 @@ endpointLoop:
 				}
 				probe, err := discovery.ProbeWithScheme(ctx, probeClient, endpoint.Host, endpoint.Port, mode, def, cache)
 				if err != nil {
-					recordFailure(fmt.Errorf("probe %s %s: %w", def.Surface, endpoint.String(), err))
+					targetFailure(endpoint.Host, discovery.BaseURLForHost(endpoint.Host, endpoint.Port, false), def.Surface, fmt.Errorf("probe: %w", err))
 					continue
 				}
 				if !probe.Matched {
@@ -1257,7 +1364,9 @@ endpointLoop:
 					baseURL = discovery.BaseURLForHost(endpoint.Host, endpoint.Port, probe.Scheme == "https")
 				}
 				if err := cols.collect(ctx, def.Surface, endpoint.Host, baseURL, endpoint.Port, probe, journal, record); err != nil {
-					recordFailure(err)
+					targetFailure(endpoint.Host, baseURL, def.Surface, err)
+				} else {
+					servicesFound.Add(1)
 				}
 			}
 		}(epCopy)
@@ -1265,8 +1374,8 @@ endpointLoop:
 
 	wg.Wait()
 
-	if firstRecordErr == nil {
-		firstRecordErr = ctx.Err()
+	if firstRecordErr == nil && ctx.Err() != nil {
+		firstRecordErr = fmt.Errorf("scan interrupted; completed targets are saved, continue with `llmhound resume --journal %s`: %w", journalPath, ctx.Err())
 	}
 	if firstRecordErr != nil {
 		_ = journal.Close()
@@ -1335,7 +1444,19 @@ endpointLoop:
 		ruleObs.EvidenceID = "ev-rules"
 		ruleObs.Source = "path_qualification"
 		ruleObs.Surface = "rules"
-		ruleEdges, ruleEv, err := rules.EvaluateWithResolver(s.cfg.PathQualification, nodes, edges, evRecords, ruleObs, resolver)
+		inputTargets := make(map[string]bool, len(orderedTargets))
+		for _, t := range orderedTargets {
+			if pt, perr := graph.ParseTarget(t); perr == nil {
+				inputTargets[pt.Value()] = true
+			}
+		}
+		ruleEdges, ruleEv, err := rules.EvaluateWithOptions(s.cfg.PathQualification, nodes, edges, evRecords, ruleObs, rules.Options{
+			Resolver: resolver,
+			InFanoutScope: func(host string) bool {
+				pt, perr := graph.ParseTarget(host)
+				return perr == nil && inputTargets[pt.Value()]
+			},
+		})
 		if err != nil {
 			return nil, fmt.Errorf("evaluate path-qualification rules: %w", err)
 		}
@@ -1375,6 +1496,9 @@ endpointLoop:
 		Artifacts:    artifacts,
 		TargetsCount: len(orderedTargets) + len(s.endpoints),
 		State:        state,
+
+		TargetErrors:     targetErrs,
+		TargetErrorCount: targetErrCount,
 	}, nil
 }
 
@@ -1414,6 +1538,12 @@ func (c *collectorSet) collect(
 			return baseURL
 		}
 		return host
+	}
+
+	if c.scanner.collectFault != nil {
+		if err := c.scanner.collectFault(surface, host); err != nil {
+			return err
+		}
 	}
 
 	var res checkpoint.Result
@@ -1521,6 +1651,13 @@ type uaTransport struct {
 	userAgent string
 }
 
+// CloseIdleConnections forwards to the wrapped transport.
+func (u uaTransport) CloseIdleConnections() {
+	if c, ok := u.base.(interface{ CloseIdleConnections() }); ok {
+		c.CloseIdleConnections()
+	}
+}
+
 func (u uaTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if u.userAgent != "" && req.Header.Get("User-Agent") == "" {
 		req = req.Clone(req.Context())
@@ -1529,9 +1666,13 @@ func (u uaTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	return u.base.RoundTrip(req)
 }
 
-func (s *Scanner) probeHTTPClient() *http.Client {
+// probeHTTPClient builds the discovery client. Probes share the scan-wide
+// per-host limiter and the explicit proxy policy; environment proxy variables
+// are ignored. TLS verification uses the platform trust store (the Windows
+// certificate store on Windows) unless --insecure is set.
+func (s *Scanner) probeHTTPClient(limiter *transport.HostRateLimiter) (*http.Client, error) {
 	if s.httpClient != nil {
-		return s.httpClient
+		return s.httpClient, nil
 	}
 	connectTimeout := s.cfg.Bounds.ConnectTimeout
 	if connectTimeout <= 0 {
@@ -1545,8 +1686,12 @@ func (s *Scanner) probeHTTPClient() *http.Client {
 	if maxIdle < 64 {
 		maxIdle = 64
 	}
+	proxy, err := transport.ProxyFunc(s.cfg.Proxy)
+	if err != nil {
+		return nil, fmt.Errorf("discovery client: %w", err)
+	}
 	tr := &http.Transport{
-		Proxy:                 http.ProxyFromEnvironment,
+		Proxy:                 proxy,
 		DialContext:           (&net.Dialer{Timeout: connectTimeout, KeepAlive: 30 * time.Second}).DialContext,
 		TLSHandshakeTimeout:   connectTimeout,
 		ResponseHeaderTimeout: responseTimeout,
@@ -1558,14 +1703,85 @@ func (s *Scanner) probeHTTPClient() *http.Client {
 		},
 	}
 	return &http.Client{
-		Transport: uaTransport{base: tr, userAgent: s.cfg.UserAgent},
+		Transport: uaTransport{base: transport.RateLimitRoundTripper(tr, limiter), userAgent: s.cfg.UserAgent},
 		Timeout:   responseTimeout,
+	}, nil
+}
+
+// collectorErrorResult journals an unexpected per-target error as failed
+// coverage so the target is reported honestly and retried on resume.
+func collectorErrorResult(host, baseURL string, surface discovery.Surface, err error, scope, vantageKey, scanID, collectorVersion string, now time.Time) checkpoint.Result {
+	reason := "collection error: " + err.Error()
+	sum := sha256.Sum256([]byte(scanID + "|" + host + "|" + string(surface) + "|error"))
+	return checkpoint.Result{
+		Target:  host,
+		Surface: string(surface),
+		Observation: graph.Observation{
+			SchemaVersion:    "1",
+			ScanID:           scanID,
+			CollectorVersion: collectorVersion,
+			EvidenceID:       "ev-" + string(surface) + "-err-" + hex.EncodeToString(sum[:8]),
+			Source:           baseURL,
+			Surface:          string(surface),
+			ObservedAt:       now,
+			DeploymentScope:  scope,
+			VantageKey:       vantageKey,
+			Coverage:         graph.CoverageFailed,
+			CoverageReason:   reason,
+		},
+		Status:  checkpoint.TargetStatusFailed,
+		Error:   reason,
+		Details: map[string]any{"endpoint": baseURL},
+	}
+}
+
+// startProgress prints a periodic progress line when WithProgress is set and
+// returns a function that stops it and prints a final line.
+func (s *Scanner) startProgress(ctx context.Context, total int, done, services *atomic.Int64, errs func() int) func() {
+	if s.progress == nil {
+		return func() {}
+	}
+	interval := s.progressInterval
+	if interval <= 0 {
+		interval = 30 * time.Second
+	}
+	start := time.Now()
+	line := func() {
+		fmt.Fprintf(s.progress, "progress: %d/%d targets done, %d services collected, %d target errors, elapsed %s\n",
+			done.Load(), total, services.Load(), errs(), time.Since(start).Round(time.Second))
+	}
+	stop := make(chan struct{})
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		for {
+			select {
+			case <-t.C:
+				line()
+			case <-stop:
+				return
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return func() {
+		close(stop)
+		<-finished
+		line()
 	}
 }
 
 func unmatchedResult(host, baseURL string, surface discovery.Surface, probe discovery.ProbeResult, scope, vantageKey, scanID, collectorVersion string, now time.Time) checkpoint.Result {
 	reason := "target not identified as " + string(surface) + ": " + probe.Reason
-	if !probe.Reachable {
+	switch {
+	case probe.TLSFailed:
+		// Invariant 2: a certificate failure stops collection and is recorded
+		// as such, never as "unreachable".
+		reason = "collection stopped, " + probe.Reason + " (trust the issuing CA on the collection host, or pass --insecure explicitly)"
+	case !probe.Reachable:
 		reason = "target unreachable: " + probe.Reason
 	}
 	sum := sha256.Sum256([]byte(scanID + "|" + host + "|" + string(surface)))

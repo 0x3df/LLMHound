@@ -390,7 +390,21 @@ func TestEvaluate_NewTraversalExtensions(t *testing.T) {
 			EnabledRules:           []string{"ray-anonymous-jobs"},
 			AssumedReachPrincipals: globalPrincipals,
 		}
-		out, _, err := rules.EvaluateWithResolver(cfg, rNodes, rEdges, rEvs, rObs, resolver)
+		inScope := func(h string) bool { return h == "10.0.1.11" || h == "10.0.1.99" }
+
+		// Default: declared workers are ignored entirely.
+		out, _, err := rules.EvaluateWithOptions(cfg, rNodes, rEdges, rEvs, rObs, rules.Options{Resolver: resolver, InFanoutScope: inScope})
+		if err != nil || len(out) != 1 {
+			t.Fatalf("without cluster_fanout expect only principal->head, got %d (%v)", len(out), err)
+		}
+
+		cfg.ClusterFanout = true
+		// A resolver alone (no scope) still fails closed.
+		if out, _, err = rules.EvaluateWithResolver(cfg, rNodes, rEdges, rEvs, rObs, resolver); err != nil || len(out) != 1 {
+			t.Fatalf("fan-out without a scope must fail closed, got %d (%v)", len(out), err)
+		}
+
+		out, _, err = rules.EvaluateWithOptions(cfg, rNodes, rEdges, rEvs, rObs, rules.Options{Resolver: resolver, InFanoutScope: inScope})
 		if err != nil || len(out) != 3 {
 			t.Fatalf("expected 3 edges (principal->head, principal->worker11, head->worker11), got %d (%v)", len(out), err)
 		}
@@ -398,6 +412,17 @@ func TestEvaluate_NewTraversalExtensions(t *testing.T) {
 			if e.End().ID() == "10.0.1.99" || !e.End().IsNative() {
 				t.Errorf("unmapped worker leaked into CanExecuteOn: %+v", e.End())
 			}
+			prov, _ := e.RuleProvenance()
+			if e.End().ID() == "S-1-5-21-1-2-3-2001" && prov.Confidence != "low" {
+				t.Errorf("declared-worker edge confidence = %q, want low", prov.Confidence)
+			}
+		}
+
+		// A mapped worker outside the operator's scan targets (for example a
+		// domain controller named by a spoofed dashboard) is never a target.
+		out, _, err = rules.EvaluateWithOptions(cfg, rNodes, rEdges, rEvs, rObs, rules.Options{Resolver: resolver, InFanoutScope: func(string) bool { return false }})
+		if err != nil || len(out) != 1 {
+			t.Fatalf("out-of-scope worker must not receive edges, got %d (%v)", len(out), err)
 		}
 	})
 

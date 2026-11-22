@@ -1192,3 +1192,36 @@ func TestClosedJournal(t *testing.T) {
 		t.Fatalf("expected ErrClosedJournal, got: %v", err)
 	}
 }
+
+// A killed process (no Close) must not lose completed target records: each
+// RecordResult is handed to the OS before returning, so the journal on disk
+// replays it even though the bufio buffer was never explicitly flushed.
+func TestFileJournalResultVisibleWithoutClose(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "killed.journal.jsonl")
+	header := sampleHeader()
+	fj, err := checkpoint.CreateFile(path, header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = fj.Close() })
+
+	vantage := sampleVantage(t, header.DeploymentScope, header.VantageKey)
+	node := sampleServiceNode(t, header.DeploymentScope, vantage, "http://host-kill.lab:11434")
+	obs := sampleObservation(t, vantage, "ev-kill-01", time.Date(2026, 9, 30, 11, 0, 0, 0, time.UTC))
+	if err := fj.RecordResult(checkpoint.Result{
+		Target:      "http://host-kill.lab:11434",
+		Surface:     "ollama",
+		Observation: obs,
+		Nodes:       []emitter.NodeItem{node},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	state, err := checkpoint.ReplayFile(path) // journal still open, never closed
+	if err != nil {
+		t.Fatalf("replay of unclosed journal: %v", err)
+	}
+	if !state.IsCompleted("http://host-kill.lab:11434", "ollama") || len(state.Nodes()) != 1 {
+		t.Fatalf("completed result must be on disk before Close: targets=%v nodes=%d", state.Targets(), len(state.Nodes()))
+	}
+}

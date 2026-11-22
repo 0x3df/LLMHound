@@ -14,6 +14,8 @@ import (
 	"github.com/0x3df/LLMHound/internal/emitter"
 	"github.com/0x3df/LLMHound/internal/evidence"
 	"github.com/0x3df/LLMHound/internal/graph"
+
+	"github.com/0x3df/LLMHound/internal/securefile"
 )
 
 var (
@@ -141,10 +143,27 @@ func (j *WriterJournal) RecordResult(res Result) error {
 	}
 
 	rec := toResultRecord(res, j.opts.maxStringSize)
-	return j.writeEntryLocked(JournalEntry{
+	if err := j.writeEntryLocked(JournalEntry{
 		EntryType: EntryResult,
 		Result:    &rec,
-	})
+	}); err != nil {
+		return err
+	}
+	return j.flushLocked()
+}
+
+// flushLocked hands buffered entries to the operating system after every
+// target-level record, so a killed process loses at most the record in
+// flight (fsync still happens on Flush/Close).
+func (j *WriterJournal) flushLocked() error {
+	if flusher, ok := j.w.(interface{ Flush() error }); ok {
+		if err := flusher.Flush(); err != nil {
+			j.failed = fmt.Errorf("journal flush failed, journal is unusable: %w", err)
+			return err
+		}
+	}
+	j.pending = 0
+	return nil
 }
 
 // RecordTarget records target-level progress.
@@ -172,10 +191,13 @@ func (j *WriterJournal) RecordTarget(target TargetRecord) error {
 	target.Error = sanitizeText(target.Error, j.opts.maxStringSize)
 	target.Details = SanitizeMap(target.Details, j.opts.maxStringSize)
 
-	return j.writeEntryLocked(JournalEntry{
+	if err := j.writeEntryLocked(JournalEntry{
 		EntryType: EntryTarget,
 		Target:    &target,
-	})
+	}); err != nil {
+		return err
+	}
+	return j.flushLocked()
 }
 
 // RecordNode records an individual OpenGraph node with its properties.
@@ -425,7 +447,7 @@ func CreateFile(path string, header Header, opts ...Option) (*FileJournal, error
 		return nil, fmt.Errorf("create journal directory: %w", err)
 	}
 
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	f, err := securefile.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY)
 	if err != nil {
 		return nil, fmt.Errorf("open journal file: %w", err)
 	}
@@ -477,7 +499,7 @@ func OpenFile(path string, opts ...Option) (*FileJournal, error) {
 		return nil, fmt.Errorf("invalid journal header: %w", err)
 	}
 
-	fAppend, err := os.OpenFile(path, os.O_RDWR|os.O_APPEND, 0600)
+	fAppend, err := securefile.OpenFile(path, os.O_RDWR|os.O_APPEND)
 	if err != nil {
 		return nil, fmt.Errorf("open journal file for appending: %w", err)
 	}

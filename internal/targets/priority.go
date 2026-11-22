@@ -1,5 +1,7 @@
 package targets
 
+import "strings"
+
 // PrioritizeTargets reorders canonical target hosts into deterministic waves so
 // highest-attack-path-value assets are scanned first:
 //  1. Targets for which resolveObjectID returns a mapped ObjectID present in
@@ -7,13 +9,22 @@ package targets
 //  2. All other targets for which resolveObjectID returns mapped=true.
 //  3. Unmapped targets (omitted if mappedOnly is true).
 //
-// Relative lexical order within each tier is preserved.
+// Relative lexical order within each tier is preserved. ObjectIDs are compared
+// case-insensitively: BloodHound CE upper-cases objectids, while mapping files
+// may carry them verbatim (for example lowercase Entra/Azure GUIDs).
 func PrioritizeTargets(targets []string, resolveObjectID func(target string) (string, bool), priorityObjectIDs map[string]bool, mappedOnly bool) []string {
 	if len(targets) == 0 {
 		return nil
 	}
 	if resolveObjectID == nil && !mappedOnly {
 		return append([]string(nil), targets...)
+	}
+
+	priority := make(map[string]bool, len(priorityObjectIDs))
+	for id, ok := range priorityObjectIDs {
+		if ok {
+			priority[strings.ToUpper(strings.TrimSpace(id))] = true
+		}
 	}
 
 	var tier1Priority []string
@@ -26,7 +37,7 @@ func PrioritizeTargets(targets []string, resolveObjectID func(target string) (st
 			objID, mapped = resolveObjectID(t)
 		}
 		if mapped {
-			if len(priorityObjectIDs) > 0 && priorityObjectIDs[objID] {
+			if priority[strings.ToUpper(strings.TrimSpace(objID))] {
 				tier1Priority = append(tier1Priority, t)
 			} else {
 				tier2Mapped = append(tier2Mapped, t)

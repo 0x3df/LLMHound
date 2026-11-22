@@ -120,12 +120,29 @@ sidecar is emitted.
 - `llmhound scan`: discovers and enumerates those surfaces, writes
   `<prefix>.journal.jsonl`, `<prefix>.json` (or `<prefix>-base.json` and
   `<prefix>-linking.json` when native mapping correlation applies),
-  `<prefix>.evidence.jsonl`, and `<prefix>.content.jsonl` (mode `0600`, written
-  lazily only when bounded content records are collected).
+  `<prefix>.evidence.jsonl`, and `<prefix>.content.jsonl` (written lazily only
+  when bounded content records are collected). Every artifact is readable only
+  by the account running the scan: mode `0600` on Unix; on Windows a protected
+  DACL granting only the running user (for example the collection service
+  account) and `SYSTEM`, with inherited directory ACEs removed.
   Flags: `--output-dir`, `--prefix`, `--discovery-file` (optional JSON fingerprint
-  port/path overrides that inherit builtin matchers). Only surfaces present in
-  the active definitions are scanned, so `plan` and `scan` agree. See
+  port/path overrides that inherit builtin matchers; each probe path must start
+  with a single `/` and may not contain `@`, `\`, `#`, `..`, whitespace, or a
+  generation/mutation prefix), `--progress-interval` (stderr progress line, default
+  `30s`, `0` disables). Only surfaces present in the active definitions are
+  scanned, so `plan` and `scan` agree; `plan` is tested against the check tables
+  in [the collector pages](../collectors/README.md). See
   [scan coverage](../internals/scan-coverage.md) for probe and coverage behavior.
+- Interruption: Ctrl-C or SIGTERM (on Windows also console close, logoff, and
+  shutdown) stops collection, closes the journal, and prints the
+  `llmhound resume --journal ...` command; a second signal exits immediately.
+  Each completed target is handed to the OS as it is journaled, so even a killed
+  process loses at most the target in flight.
+- Target errors: an unexpected error on one target is journaled as a failed
+  result for that target (so `resume` retries it) and the scan continues; the
+  artifacts for every other target are still written, the errors are listed on
+  stderr, and the command exits non-zero. Only journal write failures and
+  interruption abort a run.
 
 ### Bounds
 
@@ -185,7 +202,9 @@ are not an authorization system for future DNS connections or redirects.
 - `scan` and `targets` also accept `--prioritize-from-bh` (`--bh-url`,
   `--bh-token-id`, `--bh-token-key`, `--bh-bearer-token`, `--bh-hops`) to query
   BloodHound CE read-only for `Tag_Tier_Zero`-adjacent nodes and scan mapped
-  crown-jewel targets first.
+  crown-jewel targets first. Objectids are matched case-insensitively. If a seed
+  query reaches CE's ~1,000-node result cap a warning says the priority set is
+  partial (ordering only; every target is still scanned).
 
 ### Collection and correlation policy
 
@@ -193,9 +212,25 @@ These values are parsed/validated. Scan collectors apply TLS, User-Agent, the
 `content.*` content-tier policy, and mapping-file attachment:
 
 - `insecure` (`--insecure`): default false; explicit TLS verification bypass.
-  Verification failure must never silently retry unverified.
-- `user_agent` (`--user-agent`): default `LLMHound/dev`; nonblank printable ASCII
-  up to 256 bytes. Add non-secret operator contact information if desired.
+  Verification failure must never silently retry unverified. Certificates are
+  verified against the platform trust store: on Windows, the machine/user
+  certificate store, so a target certificate issued by an internal CA verifies
+  once that CA is trusted on the collection host. A certificate that fails
+  verification is journaled as `TLS certificate verification failed: ...`
+  (reachable, collection stopped), never as "unreachable".
+- `proxy` (`--proxy`): default empty (direct connections). An explicit
+  `http://`, `https://`, or `socks5://` proxy for all scan traffic (discovery
+  and collection). `HTTP_PROXY`/`HTTPS_PROXY` are **ignored** for scan traffic,
+  because an unannounced proxy changes the vantage the evidence claims. The
+  `upload` command's connection to BloodHound CE still honors the environment
+  proxy.
+- `user_agent` (`--user-agent`): default `LLMHound/<build version>`; nonblank
+  printable ASCII up to 256 bytes. Add non-secret operator contact information
+  if desired.
+- Rate and scope: `bounds.per_host_rate` is enforced by one limiter shared by
+  discovery probes and every collector, so it is the rate a target actually
+  sees. Collectors may contact only the prepared targets and the hosts listed in
+  `--endpoints-file`; a request to any other host fails closed.
 - `content.enabled` (`--content`): default `true`; `content.mode` (`--content-mode`):
   `secrets-only` *(default)* scans high-secret-yield surfaces (`jupyter`,
   `litellm`, `langflow`, `flowise`, `ray`, `open_webui`) in memory with zero
@@ -270,6 +305,12 @@ Top-level YAML key `path_qualification` (disabled by default):
   BloodHound principals (e.g. Domain Users `S-1-5-21-...-513`) used as rule start nodes.
 - `vantage_principals`: optional map of `vantage_key -> [{object_id, kind}]`
   overriding `assumed_reach_principals` per scanner network vantage.
+- `cluster_fanout` (default `false`): lets `ray-anonymous-jobs` also emit edges
+  to the Ray worker hosts the dashboard *declares* in `worker_hosts`. Off by
+  default because that list is reported by the target itself and a spoofed
+  dashboard could name any mapped host (for example a domain controller). When
+  enabled, a worker must both resolve through the mapping file and be one of
+  the scan's own input targets, and its edges carry `confidence: low`.
   Host execution rules always fail closed when target is unmapped
   (`NetworkEndpoint`), version is unknown/out-of-range (where checked), or
   required check evidence is missing.
@@ -287,6 +328,18 @@ Top-level YAML key `path_qualification` (disabled by default):
 
 `upload` flags fall back to `BLOODHOUND_URL`, `BLOODHOUND_TOKEN_ID`, `BLOODHOUND_TOKEN_KEY`,
 `BLOODHOUND_BEARER_TOKEN`, `BLOODHOUND_USERNAME`, and `BLOODHOUND_PASSWORD`.
+Prefer the environment variables for secrets: a `--token-key`, `--bearer-token`,
+or `--password` flag (and the `--bh-*` equivalents) prints a warning, since
+arguments are visible in process listings, shell history, and scheduled-task
+definitions.
+Upload waits for each CE ingest job by id (`?id=eq:<job>`, falling back to a
+bounded `skip`/`limit` scan of the job list) and never treats a job missing
+from the listing as complete. A base payload containing an edge to a node that
+is not in that payload is refused before upload.
+`--import-queries` replaces only LLMHound's shipped queries (names matching
+`LLMHound <ID>: ...`, for example `LLMHound P1: ...`) plus exact-name matches;
+analyst queries are never deleted, and if the import fails the replaced
+queries are recreated.
 Payloads are automatically ZIP-compressed (`--no-zip` disables) and chunked at
 2,500 items (`--chunk-size`).
 Pass `--enable-rules-schema` with `--register-schema` (and `--include-can-execute-on`

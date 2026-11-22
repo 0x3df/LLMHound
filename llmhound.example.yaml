@@ -27,7 +27,11 @@ bounds:
   max_redirects: 0
 
 insecure: false
-user_agent: "LLMHound/dev (+operator@example.test)"
+# Explicit proxy for scan traffic (http://, https://, socks5://). Empty = direct.
+# HTTP_PROXY/HTTPS_PROXY are ignored for scan traffic.
+proxy: ""
+# Omit user_agent to send "LLMHound/<build version>".
+user_agent: "LLMHound/v1 (+operator@example.test)"
 
 # Bounded, anonymous, read-only content-tier collection (written to <prefix>.content.jsonl,
 # mode 0600, never shipped to BloodHound). Enabled by default; disable globally or per surface.
@@ -58,3 +62,6 @@ path_qualification:
   enabled_rules: []
   assumed_reach_principals: []
   vantage_principals: {}
+  # Ray worker fan-out uses worker IPs the dashboard itself reports; keep off
+  # unless you trust the cluster. Workers must also be scan input targets.
+  cluster_fanout: false

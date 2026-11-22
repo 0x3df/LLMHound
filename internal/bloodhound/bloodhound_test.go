@@ -56,6 +56,7 @@ func newMockCE(t *testing.T) (*mockCEServer, *httptest.Server) {
 		savedQueries: []bloodhound.SavedQueryRecord{
 			{ID: 10, Name: "LLMHound P1: stale"},
 			{ID: 11, Name: "Custom AD Query"},
+			{ID: 12, Name: "LLMHound analyst follow-up"},
 		},
 	}
 

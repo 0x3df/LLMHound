@@ -186,39 +186,23 @@ func (c *Client) startUploadJob(ctx context.Context) (int64, error) {
 func (c *Client) pollUploadJob(ctx context.Context, jobID int64, interval, timeout time.Duration) (int, bool, error) {
 	deadline := time.Now().Add(timeout)
 	for {
-		status, body, err := c.doRaw(ctx, http.MethodGet, "/api/v2/file-upload", "", nil, nil)
+		jobStatus, found, err := c.findUploadJob(ctx, jobID)
 		if err != nil {
 			return 0, false, err
 		}
-		if status != http.StatusOK {
-			return 0, false, fmt.Errorf("GET /api/v2/file-upload returned HTTP %d: %s", status, truncateBody(body))
-		}
-		var env struct {
-			Data []struct {
-				ID     int64 `json:"id"`
-				Status int   `json:"status"`
-			} `json:"data"`
-		}
-		if err := json.Unmarshal(body, &env); err != nil {
-			return 0, false, fmt.Errorf("decode file-upload list: %w", err)
-		}
-		found := false
-		jobStatus := 0
-		for _, job := range env.Data {
-			if job.ID == jobID {
-				found = true
-				jobStatus = job.Status
-				break
+		// A job missing from the listing is NOT complete: on a long-lived CE
+		// instance it may simply be outside the page returned. Treating absence
+		// as success would let the linking payload race ahead of base ingest.
+		if found {
+			switch jobStatus {
+			case jobStatusComplete, jobStatusCanceled, jobStatusTimedOut, jobStatusFailed, jobStatusPartial:
+				return jobStatus, false, nil
 			}
 		}
-		if !found {
-			return jobStatusComplete, true, nil
-		}
-		switch jobStatus {
-		case jobStatusComplete, jobStatusCanceled, jobStatusTimedOut, jobStatusFailed, jobStatusPartial:
-			return jobStatus, false, nil
-		}
 		if time.Now().After(deadline) {
+			if !found {
+				return 0, false, fmt.Errorf("timed out waiting for upload job %d: job not visible in GET /api/v2/file-upload", jobID)
+			}
 			return jobStatus, false, fmt.Errorf("timed out waiting for upload job %d (last status=%d)", jobID, jobStatus)
 		}
 		select {
@@ -227,6 +211,87 @@ func (c *Client) pollUploadJob(ctx context.Context, jobID int64, interval, timeo
 		case <-time.After(interval):
 		}
 	}
+}
+
+// uploadListPageSize and uploadListMaxPages bound the fallback scan of
+// GET /api/v2/file-upload when the server does not honor an id filter.
+const (
+	uploadListPageSize = 100
+	uploadListMaxPages = 500
+)
+
+type uploadJobRow struct {
+	ID     int64 `json:"id"`
+	Status int   `json:"status"`
+}
+
+// findUploadJob locates one job without assuming it is on the first page of
+// the (paginated) job listing. It first asks CE to filter by id; if the filter
+// is rejected or ignored it pages through the listing with skip/limit.
+func (c *Client) findUploadJob(ctx context.Context, jobID int64) (int, bool, error) {
+	if !c.uploadIDFilterUnsupported() {
+		rows, status, err := c.listUploadJobs(ctx, fmt.Sprintf("?id=eq:%d", jobID))
+		if err != nil {
+			return 0, false, err
+		}
+		switch {
+		case status == http.StatusOK:
+			for _, r := range rows {
+				if r.ID == jobID {
+					return r.Status, true, nil
+				}
+			}
+			// Filter ignored or job not yet listed; confirm by paging.
+		case status == http.StatusBadRequest:
+			c.setUploadIDFilterUnsupported()
+		default:
+			return 0, false, fmt.Errorf("GET /api/v2/file-upload returned HTTP %d", status)
+		}
+	}
+
+	seen := make(map[int64]bool)
+	for page := 0; page < uploadListMaxPages; page++ {
+		rows, status, err := c.listUploadJobs(ctx, fmt.Sprintf("?skip=%d&limit=%d", page*uploadListPageSize, uploadListPageSize))
+		if err != nil {
+			return 0, false, err
+		}
+		if status != http.StatusOK {
+			return 0, false, fmt.Errorf("GET /api/v2/file-upload returned HTTP %d", status)
+		}
+		newRows := 0
+		for _, r := range rows {
+			if r.ID == jobID {
+				return r.Status, true, nil
+			}
+			if !seen[r.ID] {
+				seen[r.ID] = true
+				newRows++
+			}
+		}
+		// Stop at the last page, or when the server ignores skip/limit and
+		// keeps returning rows already seen.
+		if len(rows) < uploadListPageSize || newRows == 0 {
+			break
+		}
+	}
+	return 0, false, nil
+}
+
+func (c *Client) listUploadJobs(ctx context.Context, query string) ([]uploadJobRow, int, error) {
+	status, body, err := c.doRaw(ctx, http.MethodGet, "/api/v2/file-upload"+query, "", nil, nil)
+	if err != nil {
+		return nil, 0, err
+	}
+	if status != http.StatusOK {
+		return nil, status, nil
+	}
+	var env struct {
+		Data []uploadJobRow `json:"data"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil {
+		return nil, status, fmt.Errorf("decode file-upload list: %w", err)
+	}
+	return env.Data, status, nil
 }
 
 func (c *Client) completedTaskErrors(ctx context.Context, jobID int64) ([]TaskErrorInfo, error) {
@@ -293,6 +358,16 @@ func (c *Client) UploadScan(ctx context.Context, opts UploadOptions) (*UploadRep
 		for _, n := range base.Graph.Nodes {
 			if id := strings.ToUpper(strings.TrimSpace(n.ID)); id != "" {
 				baseNodeIDs[id] = true
+			}
+		}
+		// M0 Q5: a base-payload edge whose endpoint is not a base node would
+		// make CE create a stub node and tag it with source_kind, and source
+		// cleanup would later delete it. Refuse rather than upload.
+		for _, e := range base.Graph.Edges {
+			for _, end := range []emitter.EndpointPayload{e.Start, e.End} {
+				if !baseNodeIDs[strings.ToUpper(strings.TrimSpace(end.Value))] {
+					return nil, fmt.Errorf("base payload edge %s references %q, which is not a node in the base payload (would create a source-tagged stub in CE; edges to existing BloodHound nodes belong in the linking payload)", e.Kind, end.Value)
+				}
 			}
 		}
 

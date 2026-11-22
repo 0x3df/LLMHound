@@ -595,10 +595,8 @@ func (c *Collector) Collect(
 		budget := content.NewBudget(c.cfg.Content, secrets.NewRedactor(c.cfg.Secrets))
 		var cfgErrors []string
 		cfgDenied := 0
-		cfgAttempts := 0
 
 		if len(modelInfoBody) > 0 && !content.LooksBinary(modelInfoBody) {
-			cfgAttempts++
 			if ok, _ := budget.ClaimResourceItem("model_info"); ok {
 				rec, added, addErr := budget.Add(content.RecordInput{
 					DeploymentScope: scope,
@@ -641,7 +639,6 @@ func (c *Collector) Collect(
 					budget.MarkTruncated("settings response truncated at max_response_bytes")
 					cfgErrors = append(cfgErrors, "settings: truncated at max_response_bytes")
 				} else if len(trimmed) > 0 && json.Valid(trimmed) && !content.LooksBinary(trimmed) {
-					cfgAttempts++
 					if ok, _ := budget.ClaimResourceItem("settings"); ok {
 						rec, added, addErr := budget.Add(content.RecordInput{
 							DeploymentScope: scope,

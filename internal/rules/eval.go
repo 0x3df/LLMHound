@@ -28,9 +28,18 @@ func Evaluate(
 	return EvaluateWithResolver(cfg, nodes, edges, evRecords, obs, nil)
 }
 
-// EvaluateWithResolver behaves identically to Evaluate and also resolves
-// secondary cluster worker hosts (such as Ray worker IPs in worker_hosts)
-// through resolver when a rule specifies FanoutHostProperty.
+// Options carries scan context that some rules need beyond the graph itself.
+type Options struct {
+	// Resolver maps declared worker hosts to existing native nodes.
+	Resolver *correlate.Resolver
+	// InFanoutScope reports whether a declared worker host is one of the scan's
+	// own input targets. Nil means no host is in scope, so cluster fan-out
+	// fails closed.
+	InFanoutScope func(host string) bool
+}
+
+// EvaluateWithResolver is EvaluateWithOptions with only a resolver. Cluster
+// fan-out never fires through it because no fan-out scope is supplied.
 func EvaluateWithResolver(
 	cfg config.PathQualification,
 	nodes []emitter.NodeItem,
@@ -39,6 +48,23 @@ func EvaluateWithResolver(
 	obs graph.Observation,
 	resolver *correlate.Resolver,
 ) ([]graph.Edge, []evidence.Record, error) {
+	return EvaluateWithOptions(cfg, nodes, edges, evRecords, obs, Options{Resolver: resolver})
+}
+
+// EvaluateWithOptions behaves like Evaluate and, when cfg.ClusterFanout is set,
+// also emits edges toward secondary cluster worker hosts a service declares
+// (rule FanoutHostProperty). Declared workers are untrusted input (invariant
+// 4): each must resolve through the mapping to an existing native node AND be
+// within opts.InFanoutScope, and such edges carry confidence "low".
+func EvaluateWithOptions(
+	cfg config.PathQualification,
+	nodes []emitter.NodeItem,
+	edges []graph.Edge,
+	evRecords []evidence.Record,
+	obs graph.Observation,
+	opts Options,
+) ([]graph.Edge, []evidence.Record, error) {
+	resolver := opts.Resolver
 	if len(cfg.EnabledRules) == 0 || (len(cfg.AssumedReachPrincipals) == 0 && len(cfg.VantagePrincipals) == 0) {
 		return nil, nil, nil
 	}
@@ -168,11 +194,16 @@ func EvaluateWithResolver(
 				sum := sha256.Sum256([]byte(edgeKey))
 				perEdgeObs.EvidenceID = "ev-rule-" + hex.EncodeToString(sum[:8])
 
+				confidence := rule.Confidence
+				if reachBasis == "ray_cluster_fanout" || reachBasis == "ray_head_to_worker" {
+					// Worker membership is declared by the target, not observed.
+					confidence = "low"
+				}
 				prov := graph.RuleProvenance{
 					RuleID:          rule.ID,
 					RuleVersion:     rule.Version,
 					Basis:           graph.BasisInferred,
-					Confidence:      rule.Confidence,
+					Confidence:      confidence,
 					CapabilityClass: rule.CapabilityClass,
 					ReachBasis:      reachBasis,
 					ExecIdentity:    rule.ExecIdentity,
@@ -253,8 +284,11 @@ func EvaluateWithResolver(
 			}
 
 			// Variant C: Cluster worker fan-out (e.g. Ray worker IPs -> resolved native worker nodes).
-			if rule.FanoutHostProperty != "" && resolver != nil {
+			if rule.FanoutHostProperty != "" && cfg.ClusterFanout && resolver != nil && opts.InFanoutScope != nil {
 				for _, workerTarget := range stringSliceProp(props[rule.FanoutHostProperty]) {
+					if !opts.InFanoutScope(workerTarget) {
+						continue
+					}
 					cr, rErr := resolver.Resolve(item.Node.Identity().Scope(), workerTarget)
 					if rErr != nil || !cr.Target().IsNative() {
 						continue

@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1284,5 +1285,49 @@ func TestMCPCollector_SSERejectsCrossOriginEndpointEvent(t *testing.T) {
 	}
 	if got := trapHits.Load(); got != 0 {
 		t.Fatalf("malicious SSE endpoint event caused %d SSRF requests to trap server", got)
+	}
+}
+
+// The SDK terminates a stateful Streamable HTTP session with HTTP DELETE on
+// Close. Collection is GET/POST only, so that request must never be sent.
+func TestMCPCollector_NeverSendsNonReadMethods(t *testing.T) {
+	srv := setupTestMCPServer(t)
+	handler := mcpsdk.NewStreamableHTTPHandler(func(req *http.Request) *mcpsdk.Server {
+		return srv
+	}, nil)
+	var mu sync.Mutex
+	methods := map[string]int{}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		methods[r.Method]++
+		mu.Unlock()
+		handler.ServeHTTP(w, r)
+	}))
+	defer ts.Close()
+
+	collector, err := collectormcp.New(testConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := collector.Collect(context.Background(), collectormcp.Target{
+		URL:            ts.URL + "/mcp",
+		OriginalTarget: ts.Listener.Addr().String(),
+		Transport:      "streamable",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Observation.Coverage != graph.CoverageComplete {
+		t.Fatalf("collection should still complete: %s", res.Observation.CoverageReason)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for m, n := range methods {
+		if m != http.MethodGet && m != http.MethodPost {
+			t.Fatalf("server received %d %s request(s); only GET/POST are allowed (all: %v)", n, m, methods)
+		}
+	}
+	if methods[http.MethodPost] == 0 {
+		t.Fatalf("expected POST traffic, got %v", methods)
 	}
 }

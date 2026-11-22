@@ -23,6 +23,7 @@ import (
 	"github.com/0x3df/LLMHound/internal/evidence"
 	"github.com/0x3df/LLMHound/internal/graph"
 	"github.com/0x3df/LLMHound/internal/secrets"
+	"github.com/0x3df/LLMHound/internal/transport"
 )
 
 // Config configures the Jupyter collector.
@@ -40,6 +41,11 @@ type Config struct {
 	Resolver         *correlate.Resolver // nil attaches nothing: every target falls back
 	Now              func() time.Time
 	HTTPClient       *http.Client // Optional override for testing
+	// Proxy is an explicit proxy URL for scan traffic; empty means direct.
+	Proxy string
+	// RateLimiter is the scan-wide per-host limiter; nil derives one from
+	// Bounds.PerHostRate.
+	RateLimiter *transport.HostRateLimiter
 }
 
 // Collector performs read-only enumeration of Jupyter notebook servers.
@@ -66,6 +72,11 @@ func New(cfg Config) (*Collector, error) {
 		cfg.Now = func() time.Time { return time.Now().UTC() }
 	}
 
+	limiter := cfg.RateLimiter
+	if limiter == nil {
+		limiter = transport.NewHostRateLimiter(cfg.Bounds.PerHostRate)
+	}
+
 	var client *httpClient
 	if cfg.HTTPClient != nil {
 		maxBytes := cfg.Bounds.MaxResponseBytes
@@ -78,6 +89,7 @@ func New(cfg Config) (*Collector, error) {
 		}
 		copyClient := *cfg.HTTPClient
 		copyClient.CheckRedirect = makeCheckRedirect(cfg.Bounds.MaxRedirects)
+		copyClient.Transport = transport.RateLimitRoundTripper(copyClient.Transport, limiter)
 		client = &httpClient{
 			client:           &copyClient,
 			maxResponseBytes: maxBytes,
@@ -85,7 +97,11 @@ func New(cfg Config) (*Collector, error) {
 			insecure:         cfg.Insecure,
 		}
 	} else {
-		client = newHTTPClient(cfg.Bounds, cfg.Insecure, cfg.UserAgent)
+		proxy, err := transport.ProxyFunc(cfg.Proxy)
+		if err != nil {
+			return nil, fmt.Errorf("jupyter collector: %w", err)
+		}
+		client = newHTTPClient(cfg.Bounds, cfg.Insecure, cfg.UserAgent, proxy, limiter)
 	}
 
 	return &Collector{

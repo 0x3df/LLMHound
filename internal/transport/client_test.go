@@ -23,6 +23,7 @@ import (
 
 func TestTransport_SafetyEnforcement(t *testing.T) {
 	client := transport.NewClient(transport.Config{
+		AuthorizedHosts: []string{"127.0.0.1"},
 		Bounds: config.Bounds{
 			MaxResponseBytes: 1024,
 		},
@@ -89,6 +90,7 @@ func TestTransport_GetAndLimits(t *testing.T) {
 	defer ts.Close()
 
 	client := transport.NewClient(transport.Config{
+		AuthorizedHosts: []string{"127.0.0.1"},
 		Bounds: config.Bounds{
 			MaxResponseBytes: 50,
 			ResponseTimeout:  5 * time.Second,
@@ -136,8 +138,9 @@ func TestTransport_TLSInspection(t *testing.T) {
 
 	// 1. Insecure = false: self-signed httptest cert should fail verification, but record TLS info
 	clientStrict := transport.NewClient(transport.Config{
-		Bounds:   config.Bounds{MaxResponseBytes: 1024},
-		Insecure: false,
+		AuthorizedHosts: []string{"127.0.0.1"},
+		Bounds:          config.Bounds{MaxResponseBytes: 1024},
+		Insecure:        false,
 	})
 
 	resp, err := clientStrict.Get(ctx, ts.URL+"/api/version")
@@ -156,8 +159,9 @@ func TestTransport_TLSInspection(t *testing.T) {
 
 	// 2. Insecure = true: override allows connection and records unverified_override
 	clientInsecure := transport.NewClient(transport.Config{
-		Bounds:   config.Bounds{MaxResponseBytes: 1024},
-		Insecure: true,
+		AuthorizedHosts: []string{"127.0.0.1"},
+		Bounds:          config.Bounds{MaxResponseBytes: 1024},
+		Insecure:        true,
 	})
 
 	resp, err = clientInsecure.Get(ctx, ts.URL+"/api/version")
@@ -185,8 +189,7 @@ func TestTransport_TLSInspection(t *testing.T) {
 }
 
 func TestTransport_Redirects(t *testing.T) {
-	var ts *httptest.Server
-	ts = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/origin":
 			http.Redirect(w, r, "/target", http.StatusFound)
@@ -203,12 +206,13 @@ func TestTransport_Redirects(t *testing.T) {
 
 	// 1. MaxRedirects = 0 (default): should NOT follow redirect
 	clientNoRedirect := transport.NewClient(transport.Config{
+		AuthorizedHosts: []string{"127.0.0.1"},
 		Bounds: config.Bounds{
 			MaxRedirects:     0,
 			MaxResponseBytes: 1024,
 		},
 	})
-	resp, err := clientNoRedirect.Get(ctx, ts.URL+"/origin")
+	_, err := clientNoRedirect.Get(ctx, ts.URL+"/origin")
 	if err == nil {
 		t.Fatalf("expected error when MaxRedirects=0 and redirect encountered")
 	}
@@ -224,7 +228,7 @@ func TestTransport_Redirects(t *testing.T) {
 		},
 		AuthorizedHosts: []string{ts.Listener.Addr().String()},
 	})
-	resp, err = clientRedirect.Get(ctx, ts.URL+"/origin")
+	resp, err := clientRedirect.Get(ctx, ts.URL+"/origin")
 	if err != nil {
 		t.Fatalf("unexpected redirect error: %v", err)
 	}
@@ -239,7 +243,7 @@ func TestTransport_Redirects(t *testing.T) {
 	}
 
 	// 3. Redirect to unauthorized destination
-	resp, err = clientRedirect.Get(ctx, ts.URL+"/external")
+	_, err = clientRedirect.Get(ctx, ts.URL+"/external")
 	if err == nil {
 		t.Fatalf("expected redirect to unauthorized destination to fail")
 	}
@@ -264,7 +268,8 @@ func TestTransport_RedirectToBannedPathRefused(t *testing.T) {
 	defer ts.Close()
 
 	client := transport.NewClient(transport.Config{
-		Bounds: config.Bounds{MaxResponseBytes: 1024, MaxRedirects: 3},
+		AuthorizedHosts: []string{"127.0.0.1"},
+		Bounds:          config.Bounds{MaxResponseBytes: 1024, MaxRedirects: 3},
 	})
 	ctx := context.Background()
 
@@ -304,8 +309,9 @@ func TestTransport_ConcurrentRequestsKeepTLSAndRedirectsPerRequest(t *testing.T)
 	defer plainSrv.Close()
 
 	client := transport.NewClient(transport.Config{
-		Bounds:   config.Bounds{MaxResponseBytes: 1024, MaxRedirects: 3},
-		Insecure: true,
+		AuthorizedHosts: []string{"127.0.0.1"},
+		Bounds:          config.Bounds{MaxResponseBytes: 1024, MaxRedirects: 3},
+		Insecure:        true,
 	})
 
 	var wg sync.WaitGroup
@@ -329,13 +335,15 @@ func TestTransport_ConcurrentRequestsKeepTLSAndRedirectsPerRequest(t *testing.T)
 	wg.Wait()
 }
 
-func TestTransport_CrossHostRedirectRefusedWithoutAllowlist(t *testing.T) {
+func TestTransport_CrossHostRedirectRefusedOutsideAllowlist(t *testing.T) {
 	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	defer other.Close()
+	// Same listener, different (unauthorized) hostname.
+	otherURL := strings.Replace(other.URL, "127.0.0.1", "localhost", 1)
 	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/cross":
-			http.Redirect(w, r, other.URL+"/api/tags", http.StatusFound)
+			http.Redirect(w, r, otherURL+"/api/tags", http.StatusFound)
 		case "/same":
 			http.Redirect(w, r, "/api/tags", http.StatusFound)
 		}
@@ -343,7 +351,8 @@ func TestTransport_CrossHostRedirectRefusedWithoutAllowlist(t *testing.T) {
 	defer origin.Close()
 
 	client := transport.NewClient(transport.Config{
-		Bounds: config.Bounds{MaxResponseBytes: 1024, MaxRedirects: 3},
+		AuthorizedHosts: []string{"127.0.0.1"},
+		Bounds:          config.Bounds{MaxResponseBytes: 1024, MaxRedirects: 3},
 	})
 	if _, err := client.Get(context.Background(), origin.URL+"/cross"); !errors.Is(err, transport.ErrRedirectNotAuthorized) {
 		t.Errorf("expected ErrRedirectNotAuthorized for cross-host redirect, got %v", err)
@@ -410,9 +419,10 @@ func TestTLSRejectsWrongIPCertOnIPLiteral(t *testing.T) {
 	defer ts.Close()
 
 	client := transport.NewClient(transport.Config{
-		Bounds:     config.Bounds{MaxResponseBytes: 1024},
-		Insecure:   false,
-		TLSRootCAs: pool,
+		AuthorizedHosts: []string{"127.0.0.1"},
+		Bounds:          config.Bounds{MaxResponseBytes: 1024},
+		Insecure:        false,
+		TLSRootCAs:      pool,
 	})
 	resp, err := client.Get(context.Background(), ts.URL+"/api/version")
 	if err == nil {
@@ -438,7 +448,7 @@ func TestDoRejectsUserinfoAndUnauthorizedInitialHost(t *testing.T) {
 	if _, err := client.Get(context.Background(), strings.Replace(ts.URL, "http://", "http://user:pass@", 1)+"/api/tags"); err == nil {
 		t.Fatal("expected error when URL contains embedded userinfo")
 	}
-	if _, err := client.Get(context.Background(), ts.URL+"/api/tags"); !errors.Is(err, transport.ErrRedirectNotAuthorized) {
+	if _, err := client.Get(context.Background(), ts.URL+"/api/tags"); !errors.Is(err, transport.ErrHostNotAuthorized) {
 		t.Fatalf("expected unauthorized initial host rejection, got %v", err)
 	}
 	if hit {
@@ -464,5 +474,76 @@ func TestRedirectRejectsHTTPSDowngrade(t *testing.T) {
 	})
 	if _, err := client.Get(context.Background(), tlsSrv.URL+"/start"); !errors.Is(err, transport.ErrRedirectNotAuthorized) {
 		t.Fatalf("expected https->http downgrade redirect rejection, got %v", err)
+	}
+}
+
+func TestDoFailsClosedWithoutAuthorizedHosts(t *testing.T) {
+	var hit bool
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hit = true }))
+	defer ts.Close()
+	client := transport.NewClient(transport.Config{Bounds: config.Bounds{MaxResponseBytes: 1024}})
+	if _, err := client.Get(context.Background(), ts.URL+"/api/version"); !errors.Is(err, transport.ErrHostNotAuthorized) {
+		t.Fatalf("expected ErrHostNotAuthorized with an empty allowlist, got %v", err)
+	}
+	if hit {
+		t.Fatal("request with no authorized hosts must not be sent")
+	}
+}
+
+func TestDoIgnoresEnvironmentProxy(t *testing.T) {
+	var proxied bool
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { proxied = true }))
+	defer proxy.Close()
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) }))
+	defer target.Close()
+	t.Setenv("HTTP_PROXY", proxy.URL)
+	t.Setenv("http_proxy", proxy.URL)
+	client := transport.NewClient(transport.Config{
+		Bounds:          config.Bounds{MaxResponseBytes: 1024},
+		AuthorizedHosts: []string{"127.0.0.1"},
+	})
+	if _, err := client.Get(context.Background(), target.URL+"/api/version"); err != nil {
+		t.Fatal(err)
+	}
+	if proxied {
+		t.Fatal("environment proxy must not be used without explicit --proxy")
+	}
+}
+
+func TestInvalidProxyFailsClosed(t *testing.T) {
+	client := transport.NewClient(transport.Config{
+		Bounds:          config.Bounds{MaxResponseBytes: 1024},
+		AuthorizedHosts: []string{"127.0.0.1"},
+		Proxy:           "ftp://proxy.example.test",
+	})
+	if _, err := client.Get(context.Background(), "http://127.0.0.1:1/api/version"); err == nil {
+		t.Fatal("invalid proxy configuration must fail every request")
+	}
+}
+
+func TestHostRateLimiterSharedAcrossClients(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) }))
+	defer ts.Close()
+	lim := transport.NewHostRateLimiter(20) // 50ms spacing
+	mk := func() *transport.Client {
+		return transport.NewClient(transport.Config{
+			Bounds:          config.Bounds{MaxResponseBytes: 1024, PerHostRate: 1000},
+			AuthorizedHosts: []string{"127.0.0.1"},
+			RateLimiter:     lim,
+		})
+	}
+	a, b := mk(), mk()
+	start := time.Now()
+	for i := 0; i < 3; i++ {
+		if _, err := a.Get(context.Background(), ts.URL+"/x"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := b.Get(context.Background(), ts.URL+"/x"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Six requests to one host through one shared limiter: at least 5 intervals.
+	if elapsed := time.Since(start); elapsed < 240*time.Millisecond {
+		t.Fatalf("shared limiter not enforced across clients: 6 requests took %s", elapsed)
 	}
 }

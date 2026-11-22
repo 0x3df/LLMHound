@@ -22,8 +22,6 @@ import (
 	"github.com/spf13/pflag"
 )
 
-var version = "dev"
-
 func newRootCommand() *cobra.Command {
 	root := &cobra.Command{
 		Use: "llmhound", Short: "LLMHound — AI infrastructure inventory for BloodHound",
@@ -67,6 +65,7 @@ func newRootCommand() *cobra.Command {
 	flags.BoolVar(&overrides.Scan.MappedOnlyTargets, "mapped-only-targets", overrides.Scan.MappedOnlyTargets, "Restrict scan targets strictly to hosts in correlation.mapping_file")
 	flags.IntSliceVar(&overrides.Scan.ExtraPorts, "extra-ports", nil, "Additional TCP ports to sweep/probe across active surfaces")
 	flags.BoolVar(&overrides.Insecure, "insecure", false, "Explicit TLS verification bypass (off by default)")
+	flags.StringVar(&overrides.Proxy, "proxy", "", "Explicit http://, https://, or socks5:// proxy for scan traffic (HTTP_PROXY/HTTPS_PROXY are ignored)")
 	flags.StringVar(&overrides.UserAgent, "user-agent", overrides.UserAgent, "Identifiable request User-Agent")
 	flags.BoolVar(&overrides.Content.Enabled, "content", overrides.Content.Enabled, "Enable bounded allowlisted content-tier reads")
 	flags.StringVar(&overrides.Content.Mode, "content-mode", overrides.Content.Mode, "Content-tier mode: secrets-only, metadata, or full")
@@ -113,6 +112,10 @@ func newRootCommand() *cobra.Command {
 		c, err = config.Apply(c, overrides, changed)
 		if err != nil {
 			return err
+		}
+		// An unset User-Agent identifies the actual build, not "dev".
+		if c.UserAgent == config.DefaultUserAgent {
+			c.UserAgent = "LLMHound/" + version
 		}
 		if err = c.Validate(); err != nil {
 			return err
@@ -206,6 +209,14 @@ func newRootCommand() *cobra.Command {
 		},
 	})
 
+	var progressInterval time.Duration
+	withProgress := func(cmd *cobra.Command, opts []scanner.Option) []scanner.Option {
+		if progressInterval > 0 {
+			opts = append(opts, scanner.WithProgress(cmd.ErrOrStderr(), progressInterval))
+		}
+		return opts
+	}
+
 	var outputDir string
 	var artifactPrefix string
 	var discoveryFile string
@@ -237,7 +248,7 @@ func newRootCommand() *cobra.Command {
 				}
 				scanOpts = append(scanOpts, scanner.WithPriorityObjectIDs(ids))
 			}
-			s, err := scanner.New(effectiveConfig, scanOpts...)
+			s, err := scanner.New(effectiveConfig, withProgress(cmd, scanOpts)...)
 			if err != nil {
 				return err
 			}
@@ -245,13 +256,13 @@ func newRootCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			printScanSummary(cmd, "Scan", res)
-			return nil
+			return printScanSummary(cmd, "Scan", res)
 		},
 	}
 	scanCmd.Flags().StringVar(&outputDir, "output-dir", "", "Directory to write emitted scan artifacts (default: current directory)")
 	scanCmd.Flags().StringVar(&artifactPrefix, "prefix", "", "Filename prefix for emitted scan artifacts (default: llmhound-<timestamp>)")
 	scanCmd.Flags().StringVar(&discoveryFile, "discovery-file", "", "Optional custom discovery fingerprint definitions file")
+	scanCmd.Flags().DurationVar(&progressInterval, "progress-interval", 30*time.Second, "Print a progress line to stderr at this interval (0 disables)")
 	bindBHSeedFlags(scanCmd, &scanBHOpts)
 	root.AddCommand(scanCmd)
 
@@ -282,7 +293,7 @@ func newRootCommand() *cobra.Command {
 			if len(preparedEndpoints) > 0 {
 				scanOpts = append(scanOpts, scanner.WithEndpoints(preparedEndpoints))
 			}
-			s, err := scanner.New(effectiveConfig, scanOpts...)
+			s, err := scanner.New(effectiveConfig, withProgress(cmd, scanOpts)...)
 			if err != nil {
 				return err
 			}
@@ -290,14 +301,14 @@ func newRootCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			printScanSummary(cmd, "Resume", res)
-			return nil
+			return printScanSummary(cmd, "Resume", res)
 		},
 	}
 	resumeCmd.Flags().StringVar(&resumeJournalPath, "journal", "", "Path to existing .journal.jsonl file (required)")
 	resumeCmd.Flags().StringVar(&resumeOutputDir, "output-dir", "", "Directory to write resumed scan artifacts (default: journal directory)")
 	resumeCmd.Flags().StringVar(&resumePrefix, "prefix", "", "Filename prefix for resumed artifacts (default: derived from journal filename)")
 	resumeCmd.Flags().StringVar(&resumeDiscoveryFile, "discovery-file", "", "Optional custom discovery fingerprint definitions file")
+	resumeCmd.Flags().DurationVar(&progressInterval, "progress-interval", 30*time.Second, "Print a progress line to stderr at this interval (0 disables)")
 	root.AddCommand(resumeCmd)
 
 	var (
@@ -330,6 +341,9 @@ func newRootCommand() *cobra.Command {
 		Long:  "Runs the M3 BloodHound CE validation gate, registers the LLMHound extension schema,\nperforms M0 Q5 two-step upload (with read-only Cypher existence pre-flight for linking\npayloads), and imports saved searches into BloodHound CE.",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			warnSecretFlags(cmd, map[string]string{
+				"token-key": "BLOODHOUND_TOKEN_KEY", "bearer-token": "BLOODHOUND_BEARER_TOKEN", "password": "BLOODHOUND_PASSWORD",
+			})
 			resolvedURL := firstNonEmpty(bhURL, os.Getenv("BLOODHOUND_URL"))
 			auth := bloodhound.AuthConfig{
 				TokenID:     firstNonEmpty(bhTokenID, os.Getenv("BLOODHOUND_TOKEN_ID")),
@@ -505,6 +519,9 @@ func bindBHSeedFlags(cmd *cobra.Command, opts *bhSeedOptions) {
 }
 
 func fetchTier0PriorityIDs(cmd *cobra.Command, opts bhSeedOptions) (map[string]bool, error) {
+	warnSecretFlags(cmd, map[string]string{
+		"bh-token-key": "BLOODHOUND_TOKEN_KEY", "bh-bearer-token": "BLOODHOUND_BEARER_TOKEN", "bh-password": "BLOODHOUND_PASSWORD",
+	})
 	resolvedURL := firstNonEmpty(opts.url, os.Getenv("BLOODHOUND_URL"))
 	auth := bloodhound.AuthConfig{
 		TokenID:     firstNonEmpty(opts.tokenID, os.Getenv("BLOODHOUND_TOKEN_ID")),
@@ -523,10 +540,20 @@ func fetchTier0PriorityIDs(cmd *cobra.Command, opts bhSeedOptions) (map[string]b
 	if err != nil {
 		return nil, fmt.Errorf("bloodhound priority lookup: %w", err)
 	}
-	return client.Tier0AdjacentObjectIDs(cmd.Context(), opts.hops, 10000)
+	ids, capped, err := client.Tier0AdjacentObjectIDsWithCap(cmd.Context(), opts.hops, bloodhound.CEResultCap)
+	if err != nil {
+		return nil, err
+	}
+	if capped {
+		fmt.Fprintf(cmd.ErrOrStderr(), "WARNING: a Tier-0 seed query reached BloodHound CE's ~%d-node result cap; only part of the Tier-0-adjacent set is prioritized (every target is still scanned).\n", bloodhound.CEResultCap)
+	}
+	return ids, nil
 }
 
-func printScanSummary(cmd *cobra.Command, verb string, res *scanner.ScanResult) {
+// printScanSummary reports the artifacts written and returns an error (non-zero
+// exit) when any target failed with a collection error, after the artifacts
+// for every other target were still emitted.
+func printScanSummary(cmd *cobra.Command, verb string, res *scanner.ScanResult) error {
 	fmt.Fprintf(cmd.OutOrStdout(), "%s completed for %d target(s)\n", verb, res.TargetsCount)
 	fmt.Fprintf(cmd.OutOrStdout(), "  Base payload: %s\n", res.Artifacts.BasePayloadPath)
 	if res.Artifacts.LinkingPayloadPath != "" {
@@ -536,6 +563,34 @@ func printScanSummary(cmd *cobra.Command, verb string, res *scanner.ScanResult) 
 	fmt.Fprintf(cmd.OutOrStdout(), "  Checkpoint journal: %s\n", res.JournalPath)
 	if res.ContentPath != "" {
 		fmt.Fprintf(cmd.OutOrStdout(), "  Content file: %s\n", res.ContentPath)
+	}
+	if res.TargetErrorCount == 0 {
+		return nil
+	}
+	fmt.Fprintf(cmd.ErrOrStderr(), "%d target(s) failed with collection errors (journaled as failed; `llmhound resume --journal %s` retries them):\n", res.TargetErrorCount, res.JournalPath)
+	for _, e := range res.TargetErrors {
+		fmt.Fprintf(cmd.ErrOrStderr(), "  %s\n", e)
+	}
+	if extra := res.TargetErrorCount - len(res.TargetErrors); extra > 0 {
+		fmt.Fprintf(cmd.ErrOrStderr(), "  ... and %d more (see the journal)\n", extra)
+	}
+	return fmt.Errorf("%s finished with %d target error(s); all other artifacts were written", strings.ToLower(verb), res.TargetErrorCount)
+}
+
+// warnSecretFlags warns when a credential was passed as a command-line flag:
+// arguments are visible to other users in process listings and are kept in
+// shell history and (on Windows) task scheduler definitions. The environment
+// variable equivalent is preferred.
+func warnSecretFlags(cmd *cobra.Command, flagToEnv map[string]string) {
+	names := make([]string, 0, len(flagToEnv))
+	for name := range flagToEnv {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if f := cmd.Flags().Lookup(name); f != nil && f.Changed {
+			fmt.Fprintf(cmd.ErrOrStderr(), "WARNING: --%s exposes a credential in process listings and shell history; set %s instead.\n", name, flagToEnv[name])
+		}
 	}
 }
 

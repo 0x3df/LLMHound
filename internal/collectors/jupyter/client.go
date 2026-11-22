@@ -11,10 +11,12 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
 	"github.com/0x3df/LLMHound/internal/config"
+	"github.com/0x3df/LLMHound/internal/transport"
 )
 
 var (
@@ -37,7 +39,7 @@ type httpResponse struct {
 	RedirectURL string
 }
 
-func newHTTPClient(bounds config.Bounds, insecure bool, userAgent string) *httpClient {
+func newHTTPClient(bounds config.Bounds, insecure bool, userAgent string, proxy func(*http.Request) (*url.URL, error), limiter *transport.HostRateLimiter) *httpClient {
 	connectTimeout := bounds.ConnectTimeout
 	if connectTimeout <= 0 {
 		connectTimeout = 3 * time.Second
@@ -59,8 +61,8 @@ func newHTTPClient(bounds config.Bounds, insecure bool, userAgent string) *httpC
 		ua = "LLMHound/dev"
 	}
 
-	transport := &http.Transport{
-		Proxy: http.ProxyFromEnvironment,
+	tr := &http.Transport{
+		Proxy: proxy,
 		DialContext: (&net.Dialer{
 			Timeout:   connectTimeout,
 			KeepAlive: 30 * time.Second,
@@ -74,7 +76,7 @@ func newHTTPClient(bounds config.Bounds, insecure bool, userAgent string) *httpC
 	}
 
 	client := &http.Client{
-		Transport:     transport,
+		Transport:     transport.RateLimitRoundTripper(tr, limiter),
 		Timeout:       responseTimeout,
 		CheckRedirect: makeCheckRedirect(maxRedirects),
 	}

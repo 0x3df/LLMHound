@@ -19,6 +19,8 @@ type cachedHTTPResponse struct {
 	reachable  bool
 	dialFailed bool
 	needsTLS   bool
+	tlsFailed  bool
+	tlsReason  string
 	status     int
 	headers    http.Header
 	body       []byte
@@ -33,6 +35,7 @@ type PortProbeCache struct {
 	entries map[probeCacheKey]cachedHTTPResponse
 	dialBad map[string]bool
 	needTLS map[string]bool
+	tlsBad  map[string]string
 }
 
 // NewPortProbeCache allocates an empty PortProbeCache.
@@ -41,7 +44,18 @@ func NewPortProbeCache() *PortProbeCache {
 		entries: make(map[probeCacheKey]cachedHTTPResponse),
 		dialBad: make(map[string]bool),
 		needTLS: make(map[string]bool),
+		tlsBad:  make(map[string]string),
 	}
+}
+
+func (c *PortProbeCache) tlsFailure(baseURL string) (string, bool) {
+	if c == nil {
+		return "", false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	reason, ok := c.tlsBad[baseURL]
+	return reason, ok
 }
 
 func (c *PortProbeCache) isDialBad(baseURL string) bool {
@@ -85,6 +99,9 @@ func (c *PortProbeCache) put(baseURL, path string, resp cachedHTTPResponse) {
 	if resp.needsTLS {
 		c.needTLS[baseURL] = true
 	}
+	if resp.tlsFailed {
+		c.tlsBad[baseURL] = resp.tlsReason
+	}
 }
 
 // ProbeWithScheme probes host:port according to schemeMode ("auto", "http", or
@@ -115,6 +132,7 @@ func ProbeWithScheme(
 	}
 
 	var last ProbeResult
+	var tlsFailure *ProbeResult
 	for i := 0; i < len(attempts); i++ {
 		secure := attempts[i]
 		baseURL := BaseURLForHost(host, port, secure)
@@ -126,10 +144,19 @@ func ProbeWithScheme(
 		if res.Matched {
 			return res, nil
 		}
+		if res.TLSFailed && tlsFailure == nil {
+			r := res
+			tlsFailure = &r
+		}
 		// Auto mode: upgrade from HTTP to HTTPS if HTTP-to-HTTPS mismatch was seen.
 		if mode != "http" && mode != "https" && !secure && res.NeedsTLS {
 			attempts = append(attempts, true)
 		}
+	}
+	// A certificate failure is the most specific explanation available; do not
+	// let a later plaintext fallback overwrite it with "unreachable".
+	if tlsFailure != nil {
+		return *tlsFailure, nil
 	}
 	return last, nil
 }
@@ -152,6 +179,17 @@ func probeCachedOne(ctx context.Context, client *http.Client, baseURL string, de
 				Reason:    "target unreachable on all probed paths",
 			}, nil
 		}
+		if reason, ok := cache.tlsFailure(baseURL); ok {
+			return ProbeResult{
+				Matched:   false,
+				Surface:   def.Surface,
+				BaseURL:   baseURL,
+				Scheme:    scheme,
+				Reachable: true,
+				TLSFailed: true,
+				Reason:    reason,
+			}, nil
+		}
 		if scheme == "http" && cache.needsTLS(baseURL) {
 			return ProbeResult{
 				Matched:   false,
@@ -165,24 +203,20 @@ func probeCachedOne(ctx context.Context, client *http.Client, baseURL string, de
 		}
 	}
 
-	probeClient := http.DefaultClient
+	noRedirects := func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	var probeClient *http.Client
 	if client != nil {
 		copyClient := *client
-		copyClient.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse
-		}
+		copyClient.CheckRedirect = noRedirects
 		probeClient = &copyClient
 	} else {
-		probeClient = &http.Client{
-			Timeout: 10 * time.Second,
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
-		}
+		probeClient = &http.Client{Timeout: 10 * time.Second, CheckRedirect: noRedirects}
 	}
 
 	reachable := false
 	needsTLS := false
+	tlsFailed := false
+	tlsReason := ""
 
 	for _, p := range def.ProbePaths {
 		var entry cachedHTTPResponse
@@ -211,6 +245,16 @@ func probeCachedOne(ctx context.Context, client *http.Client, baseURL string, de
 					cache.put(baseURL, p, entry)
 					needsTLS = true
 					reachable = true
+					break
+				}
+				if reason, isTLS := tlsFailureReason(err); isTLS {
+					// The server completed enough of a handshake to present a
+					// certificate: reachable, but collection stops (invariant 2).
+					entry = cachedHTTPResponse{reachable: true, tlsFailed: true, tlsReason: reason}
+					cache.put(baseURL, p, entry)
+					reachable = true
+					tlsFailed = true
+					tlsReason = reason
 					break
 				}
 				entry = cachedHTTPResponse{
@@ -264,9 +308,12 @@ func probeCachedOne(ctx context.Context, client *http.Client, baseURL string, de
 	}
 
 	reason := "no " + string(def.Surface) + "-specific evidence on probed paths"
-	if !reachable {
+	switch {
+	case tlsFailed:
+		reason = tlsReason
+	case !reachable:
 		reason = "target unreachable on all probed paths"
-	} else if needsTLS {
+	case needsTLS:
 		reason = "endpoint requires HTTPS"
 	}
 	return ProbeResult{
@@ -276,6 +323,7 @@ func probeCachedOne(ctx context.Context, client *http.Client, baseURL string, de
 		Scheme:    scheme,
 		Reachable: reachable,
 		NeedsTLS:  needsTLS,
+		TLSFailed: tlsFailed,
 		Reason:    reason,
 	}, nil
 }

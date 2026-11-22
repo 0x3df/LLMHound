@@ -86,6 +86,23 @@ func TestFilterAttackPathGraph(t *testing.T) {
 	if len(mappedEdges) != 2 { // eHighTool + eObsNative
 		t.Fatalf("mappedEdges = %d, want 2", len(mappedEdges))
 	}
+
+	// Full graph mode keeps every node, but an edge to an owned node that is
+	// not emitted (here: the model node is withheld) must still be dropped so
+	// CE never creates a source-tagged stub for it.
+	fullNodes := []emitter.NodeItem{srvItem, highToolItem, lowToolItem, nepItem}
+	gotNodes, gotEdges := emitter.FilterAttackPathGraph(fullNodes, edges, emitter.FilterOptions{})
+	if len(gotNodes) != 4 {
+		t.Fatalf("full mode nodes = %d, want 4", len(gotNodes))
+	}
+	for _, e := range gotEdges {
+		if e.Kind() == graph.ProvidesModel {
+			t.Fatal("dangling edge to a non-emitted owned node survived full mode")
+		}
+	}
+	if len(gotEdges) != 4 { // eHighTool + eLowTool + eObsNep + eObsNative
+		t.Fatalf("full mode edges = %d, want 4", len(gotEdges))
+	}
 }
 
 func TestEmitCompactOmitsIndentation(t *testing.T) {

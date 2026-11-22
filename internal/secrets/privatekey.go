@@ -218,11 +218,11 @@ func (p sshPublicKey) cryptoPublic() crypto.PublicKey {
 		if !ok || !supported {
 			return nil
 		}
-		x, y := elliptic.Unmarshal(curve, p.point)
-		if x == nil || y == nil {
+		pk, err := ecdsa.ParseUncompressedPublicKey(curve, p.point)
+		if err != nil {
 			return nil
 		}
-		return &ecdsa.PublicKey{Curve: curve, X: x, Y: y}
+		return pk
 	}
 	return nil
 }
@@ -265,7 +265,7 @@ func parseSSHPublicKey(blob []byte) (sshPublicKey, bool) {
 		if !supported || !curveMatches {
 			return sshPublicKey{}, false
 		}
-		if x, y := elliptic.Unmarshal(curve, point); x == nil || y == nil {
+		if _, err := ecdsa.ParseUncompressedPublicKey(curve, point); err != nil {
 			return sshPublicKey{}, false
 		}
 	default:
@@ -353,8 +353,14 @@ func parseSSHPrivateBlock(pb []byte, pub sshPublicKey) bool {
 		if !supported || !matches || d.Sign() <= 0 || d.Cmp(curve.Params().N) >= 0 {
 			return false
 		}
-		x, y := curve.ScalarBaseMult(d.Bytes())
-		if x == nil || y == nil || !bytes.Equal(elliptic.Marshal(curve, x, y), point) {
+		// The private scalar must derive exactly the embedded public point.
+		scalar := d.FillBytes(make([]byte, (curve.Params().BitSize+7)/8))
+		priv, err := ecdsa.ParseRawPrivateKey(curve, scalar)
+		if err != nil {
+			return false
+		}
+		derived, err := priv.PublicKey.Bytes()
+		if err != nil || !bytes.Equal(derived, point) {
 			return false
 		}
 	default:

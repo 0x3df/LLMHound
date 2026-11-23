@@ -47,6 +47,7 @@ bounded content-tier records + 0600 writer · `internal/secrets` high-precision
 secret detectors over content bodies · `internal/correlate` mapping → existing
 native node or `NetworkEndpoint` · `internal/graph` identity, kinds, observations, edges,
 access summary · `internal/rules` & `extension/rules` opt-in traversable rule engine ·
+`internal/runresult` machine-readable lifecycle result files ·
 `internal/evidence` sidecar records · `internal/emitter` base + linking payloads ·
 `internal/bloodhound` CE API client, pre-flight, two-step uploader & gate ·
 `internal/checkpoint` journal/replay · `internal/savedsearch` CE saved queries

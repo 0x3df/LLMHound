@@ -1407,3 +1407,58 @@ func TestScanner_MCPMatchedPathPreserved(t *testing.T) {
 		t.Fatalf("expected MCP server strictly mounted at /mcp to complete, got nodes=%d", len(res.State.Nodes()))
 	}
 }
+
+func TestScanner_OnStartPartialResultAndEmittedCounts(t *testing.T) {
+	ollamaSrv := setupMockOllama(t)
+	defer ollamaSrv.Close()
+
+	def := discovery.OllamaDefinition()
+	def.DefaultPort = parsePort(ollamaSrv.URL)
+
+	cfg := config.Defaults()
+	cfg.Scope = "corp"
+	cfg.VantageKey = "v1"
+	cfg.Targets = []string{"127.0.0.1"}
+	cfg.Content.Enabled = false
+
+	// 1. Completed scan reports OnStart and exact emitted counts.
+	var starts []scanner.ScanStart
+	s, err := scanner.New(cfg,
+		scanner.WithDefinitions([]discovery.Definition{def}),
+		scanner.WithOnStart(func(st scanner.ScanStart) error {
+			starts = append(starts, st)
+			return nil
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outDir := t.TempDir()
+	res, err := s.Scan(context.Background(), []string{"127.0.0.1"}, outDir, "counts")
+	if err != nil {
+		t.Fatalf("Scan failed: %v", err)
+	}
+	if len(starts) != 1 || starts[0].JournalPath != res.JournalPath || starts[0].TargetsCount != 1 {
+		t.Fatalf("unexpected OnStart events: %+v", starts)
+	}
+	if !res.Emitted {
+		t.Fatal("expected Emitted=true on completed scan")
+	}
+	if res.ServicesCount != 1 || res.BaseNodesCount != 2 || res.BaseEdgesCount != 1 || res.LinkingEdgesCount != 0 || res.EvidenceRecordsCount == 0 {
+		t.Fatalf("unexpected emitted counts: %+v", res)
+	}
+
+	// 2. Canceled scan still returns partial ScanResult with JournalPath and Emitted=false.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	partialRes, err := s.Scan(ctx, []string{"127.0.0.1"}, t.TempDir(), "canceled")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if partialRes == nil || partialRes.JournalPath == "" || partialRes.Emitted {
+		t.Fatalf("expected non-nil partial ScanResult with JournalPath and Emitted=false, got %+v", partialRes)
+	}
+	if _, statErr := os.Stat(partialRes.JournalPath); statErr != nil {
+		t.Fatalf("expected journal file on disk after cancel: %v", statErr)
+	}
+}

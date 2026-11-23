@@ -58,12 +58,15 @@ type UploadOptions struct {
 
 // UploadReport summarizes a two-step upload including existence pre-flight.
 type UploadReport struct {
-	BaseJob      *JobResult    `json:"base_job,omitempty"`
-	BaseJobs     []JobResult   `json:"base_jobs,omitempty"`
-	LinkingJob   *JobResult    `json:"linking_job,omitempty"`
-	LinkingJobs  []JobResult   `json:"linking_jobs,omitempty"`
-	SkippedEdges []SkippedEdge `json:"skipped_edges,omitempty"`
-	KeptEdges    int           `json:"kept_edges"`
+	BaseJob         *JobResult    `json:"base_job,omitempty"`
+	BaseJobs        []JobResult   `json:"base_jobs,omitempty"`
+	LinkingJob      *JobResult    `json:"linking_job,omitempty"`
+	LinkingJobs     []JobResult   `json:"linking_jobs,omitempty"`
+	SkippedEdges    []SkippedEdge `json:"skipped_edges,omitempty"`
+	KeptEdges       int           `json:"kept_edges"`
+	BaseUploaded    bool          `json:"-"`
+	PreflightRan    bool          `json:"-"`
+	LinkingUploaded bool          `json:"-"`
 }
 
 // UploadFileJob runs the CE 9.7.1 job upload lifecycle:
@@ -385,6 +388,7 @@ func (c *Client) UploadScan(ctx context.Context, opts UploadOptions) (*UploadRep
 				return report, fmt.Errorf("upload base payload: %w", err)
 			}
 		}
+		report.BaseUploaded = true
 	}
 
 	if len(opts.LinkingPayloadBytes) > 0 {
@@ -400,6 +404,7 @@ func (c *Client) UploadScan(ctx context.Context, opts UploadOptions) (*UploadRep
 		if err != nil {
 			return report, fmt.Errorf("linking existence pre-flight: %w", err)
 		}
+		report.PreflightRan = true
 		report.SkippedEdges = skipped
 		report.KeptEdges = len(filtered.Graph.Edges)
 
@@ -418,6 +423,7 @@ func (c *Client) UploadScan(ctx context.Context, opts UploadOptions) (*UploadRep
 					return report, fmt.Errorf("upload linking payload: %w", err)
 				}
 			}
+			report.LinkingUploaded = true
 		}
 	}
 

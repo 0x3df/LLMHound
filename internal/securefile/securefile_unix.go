@@ -18,3 +18,7 @@ func openRestricted(name string, flag int) (*os.File, error) {
 	}
 	return f, nil
 }
+
+func replaceFile(tmpPath, destPath string) error {
+	return os.Rename(tmpPath, destPath)
+}

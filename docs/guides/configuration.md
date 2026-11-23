@@ -129,7 +129,8 @@ sidecar is emitted.
   port/path overrides that inherit builtin matchers; each probe path must start
   with a single `/` and may not contain `@`, `\`, `#`, `..`, whitespace, or a
   generation/mutation prefix), `--progress-interval` (stderr progress line, default
-  `30s`, `0` disables). Only surfaces present in the active definitions are
+  `30s`, `0` disables), `--result-file` (optional path for a machine-readable JSON
+  lifecycle result file; see [Machine-readable result file](#machine-readable-result-file---result-file)). Only surfaces present in the active definitions are
   scanned, so `plan` and `scan` agree; `plan` is tested against the check tables
   in [the collector pages](../collectors/README.md). See
   [scan coverage](../internals/scan-coverage.md) for probe and coverage behavior.
@@ -344,6 +345,33 @@ Payloads are automatically ZIP-compressed (`--no-zip` disables) and chunked at
 2,500 items (`--chunk-size`).
 Pass `--enable-rules-schema` with `--register-schema` (and `--include-can-execute-on`
 with `--import-queries`) only when opt-in path-qualification rules are active.
+`scan`, `resume`, and `upload` all accept `--result-file <path>` to track run status in JSON.
+
+#### Machine-readable result file (`--result-file`)
+
+Downstream orchestrators can pass `--result-file <path>` to `llmhound scan`,
+`llmhound resume`, or `llmhound upload` instead of parsing stdout/stderr. The file
+uses `schema_version: "1"` and is written atomically via a restricted temp file
+(`0600` on Unix; protected owner+SYSTEM DACL on Windows).
+
+- **Lifecycle transitions:** every run writes `"status": "pending"` (with
+  `exit_code`, `finished_at`, and `duration_ms` omitted) before configuration or
+  upload work begins, overwriting any earlier file at that path, then transitions
+  once to a terminal state:
+  - `pending` -> `complete` (`exit_code: 0`)
+  - `pending` -> `failed` (`exit_code: 1`, including configuration/validation
+    errors, upload/gate failures, and scans where `target_error_count > 0` even
+    though healthy-target artifacts were still emitted)
+  - `pending` -> `interrupted` (`exit_code: 1`, when canceled via Ctrl-C,
+    `SIGTERM`, or Windows shutdown/logoff)
+- **Quarantine contract:** any status other than `"complete"` (`pending`,
+  `failed`, `interrupted`, or a hard-killed process leaving `"pending"`) signals
+  that the run must be quarantined rather than treated as healthy.
+- **Safety and bounds:** `upload.url` strips userinfo, query strings, and
+  fragments; secrets and credentials are never written; `scan.target_errors` and
+  `upload.skipped_edges` are capped at `1000` entries with `*_truncated` flags;
+  and `--result-file` refuses to collide with scan artifacts, `--journal`,
+  `--base-file`, or `--linking-file`.
 
 ## Verification
 

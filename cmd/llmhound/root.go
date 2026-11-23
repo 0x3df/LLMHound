@@ -15,6 +15,7 @@ import (
 	"github.com/0x3df/LLMHound/internal/correlate"
 	"github.com/0x3df/LLMHound/internal/discovery"
 	"github.com/0x3df/LLMHound/internal/rules"
+	"github.com/0x3df/LLMHound/internal/runresult"
 	"github.com/0x3df/LLMHound/internal/savedsearch"
 	"github.com/0x3df/LLMHound/internal/scanner"
 	"github.com/0x3df/LLMHound/internal/targets"
@@ -220,21 +221,51 @@ func newRootCommand() *cobra.Command {
 	var outputDir string
 	var artifactPrefix string
 	var discoveryFile string
+	var scanResultFile string
 	var scanBHOpts bhSeedOptions
 
 	scanCmd := &cobra.Command{
-		Use:     "scan",
-		Short:   "Remotely enumerate AI infrastructure across configured targets",
-		Long:    "Discovers and enumerates AI services (Jupyter, MCP, Ollama, A2A, vLLM, Qdrant, LiteLLM,\nMLflow, Open WebUI, LangServe, Generic OpenAI-compatible, Ray, Langflow, Flowise, ChromaDB)\non prepared targets, writing through a checkpoint journal and emitting OpenGraph JSON\nand evidence sidecar files.",
-		Args:    cobra.NoArgs,
-		PreRunE: prepare,
-		RunE: func(cmd *cobra.Command, _ []string) error {
+		Use:   "scan",
+		Short: "Remotely enumerate AI infrastructure across configured targets",
+		Long:  "Discovers and enumerates AI services (Jupyter, MCP, Ollama, A2A, vLLM, Qdrant, LiteLLM,\nMLflow, Open WebUI, LangServe, Generic OpenAI-compatible, Ray, Langflow, Flowise, ChromaDB)\non prepared targets, writing through a checkpoint journal and emitting OpenGraph JSON\nand evidence sidecar files.",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := checkScanResultCollisions(scanResultFile, outputDir, artifactPrefix, ""); err != nil {
+				return err
+			}
+			scanSec := runresult.ScanSection{
+				Prefix:    artifactPrefix,
+				OutputDir: outputDir,
+			}
+			tracker, err := startResultTracker(cmd, runresult.CommandScan, scanResultFile, func(r *runresult.Result) {
+				cp := scanSec
+				r.Scan = &cp
+			})
+			if err != nil {
+				return err
+			}
+			fail := func(runErr error) error {
+				return finishTracker(tracker, cmd.Context().Err(), runErr, func(r *runresult.Result) {
+					cp := scanSec
+					r.Scan = &cp
+				})
+			}
+
+			if err := prepare(cmd, args); err != nil {
+				return fail(err)
+			}
+			scanSec.Scope = effectiveConfig.Scope
+			scanSec.VantageKey = effectiveConfig.VantageKey
+			scanSec.Profile = effectiveConfig.Scan.Profile
+			scanSec.GraphMode = effectiveConfig.Scan.GraphMode
+			scanSec.ContentMode = effectiveContentMode(effectiveConfig)
+
 			var scanOpts []scanner.Option
 			scanOpts = append(scanOpts, scanner.WithCollectorVersion(version))
 			if discoveryFile != "" {
 				defs, err := discovery.LoadDefinitionsFile(discoveryFile)
 				if err != nil {
-					return fmt.Errorf("load discovery definitions: %w", err)
+					return fail(fmt.Errorf("load discovery definitions: %w", err))
 				}
 				scanOpts = append(scanOpts, scanner.WithDefinitions(defs))
 			}
@@ -244,25 +275,55 @@ func newRootCommand() *cobra.Command {
 			if scanBHOpts.enabled {
 				ids, err := fetchTier0PriorityIDs(cmd, scanBHOpts)
 				if err != nil {
-					return err
+					return fail(err)
 				}
 				scanOpts = append(scanOpts, scanner.WithPriorityObjectIDs(ids))
 			}
+			if tracker != nil {
+				scanOpts = append(scanOpts, scanner.WithOnStart(func(st scanner.ScanStart) error {
+					if err := checkScanResultCollisions(scanResultFile, st.OutputDir, st.Prefix, st.JournalPath); err != nil {
+						return err
+					}
+					tc := st.TargetsCount
+					scanSec.ScanID = st.ScanID
+					scanSec.Prefix = st.Prefix
+					scanSec.OutputDir = st.OutputDir
+					scanSec.TargetsCount = &tc
+					scanSec.Artifacts.JournalPath = st.JournalPath
+					return tracker.UpdatePending(func(r *runresult.Result) {
+						cp := scanSec
+						r.Scan = &cp
+					})
+				}))
+			}
 			s, err := scanner.New(effectiveConfig, withProgress(cmd, scanOpts)...)
 			if err != nil {
-				return err
+				return fail(err)
 			}
 			res, err := s.Scan(cmd.Context(), prepared, outputDir, artifactPrefix)
-			if err != nil {
-				return err
+			if res != nil {
+				populateScanSection(&scanSec, res)
 			}
-			return printScanSummary(cmd, "Scan", res)
+			if err != nil {
+				scanSec.Resumable = journalExists(scanSec.Artifacts.JournalPath)
+				return fail(err)
+			}
+			if sumErr := printScanSummary(cmd, "Scan", res); sumErr != nil {
+				scanSec.Resumable = journalExists(scanSec.Artifacts.JournalPath)
+				return fail(sumErr)
+			}
+			scanSec.Resumable = false
+			return finishTracker(tracker, cmd.Context().Err(), nil, func(r *runresult.Result) {
+				cp := scanSec
+				r.Scan = &cp
+			})
 		},
 	}
 	scanCmd.Flags().StringVar(&outputDir, "output-dir", "", "Directory to write emitted scan artifacts (default: current directory)")
 	scanCmd.Flags().StringVar(&artifactPrefix, "prefix", "", "Filename prefix for emitted scan artifacts (default: llmhound-<timestamp>)")
 	scanCmd.Flags().StringVar(&discoveryFile, "discovery-file", "", "Optional custom discovery fingerprint definitions file")
 	scanCmd.Flags().DurationVar(&progressInterval, "progress-interval", 30*time.Second, "Print a progress line to stderr at this interval (0 disables)")
+	scanCmd.Flags().StringVar(&scanResultFile, "result-file", "", "Optional path to write a machine-readable JSON lifecycle result file")
 	bindBHSeedFlags(scanCmd, &scanBHOpts)
 	root.AddCommand(scanCmd)
 
@@ -270,38 +331,100 @@ func newRootCommand() *cobra.Command {
 	var resumeOutputDir string
 	var resumePrefix string
 	var resumeDiscoveryFile string
+	var resumeResultFile string
 
 	resumeCmd := &cobra.Command{
-		Use:     "resume",
-		Short:   "Resume an interrupted scan from a checkpoint journal",
-		Long:    "Replays an existing checkpoint journal, repairs any torn tail line, skips\nalready-completed (target, surface) pairs, collects remaining work, and\nre-emits OpenGraph JSON, evidence sidecar, and content artifacts.",
-		Args:    cobra.NoArgs,
-		PreRunE: prepare,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			if strings.TrimSpace(resumeJournalPath) == "" {
-				return fmt.Errorf("--journal is required")
+		Use:   "resume",
+		Short: "Resume an interrupted scan from a checkpoint journal",
+		Long:  "Replays an existing checkpoint journal, repairs any torn tail line, skips\nalready-completed (target, surface) pairs, collects remaining work, and\nre-emits OpenGraph JSON, evidence sidecar, and content artifacts.",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := checkScanResultCollisions(resumeResultFile, resumeOutputDir, resumePrefix, resumeJournalPath); err != nil {
+				return err
 			}
+			scanSec := runresult.ScanSection{
+				Prefix:    resumePrefix,
+				OutputDir: resumeOutputDir,
+				Artifacts: runresult.ScanArtifacts{
+					JournalPath: resumeJournalPath,
+				},
+			}
+			tracker, err := startResultTracker(cmd, runresult.CommandResume, resumeResultFile, func(r *runresult.Result) {
+				cp := scanSec
+				r.Scan = &cp
+			})
+			if err != nil {
+				return err
+			}
+			fail := func(runErr error) error {
+				return finishTracker(tracker, cmd.Context().Err(), runErr, func(r *runresult.Result) {
+					cp := scanSec
+					r.Scan = &cp
+				})
+			}
+
+			if strings.TrimSpace(resumeJournalPath) == "" {
+				return fail(fmt.Errorf("--journal is required"))
+			}
+			if err := prepare(cmd, args); err != nil {
+				return fail(err)
+			}
+			scanSec.Scope = effectiveConfig.Scope
+			scanSec.VantageKey = effectiveConfig.VantageKey
+			scanSec.Profile = effectiveConfig.Scan.Profile
+			scanSec.GraphMode = effectiveConfig.Scan.GraphMode
+			scanSec.ContentMode = effectiveContentMode(effectiveConfig)
+
 			var scanOpts []scanner.Option
 			scanOpts = append(scanOpts, scanner.WithCollectorVersion(version))
 			if resumeDiscoveryFile != "" {
 				defs, err := discovery.LoadDefinitionsFile(resumeDiscoveryFile)
 				if err != nil {
-					return fmt.Errorf("load discovery definitions: %w", err)
+					return fail(fmt.Errorf("load discovery definitions: %w", err))
 				}
 				scanOpts = append(scanOpts, scanner.WithDefinitions(defs))
 			}
 			if len(preparedEndpoints) > 0 {
 				scanOpts = append(scanOpts, scanner.WithEndpoints(preparedEndpoints))
 			}
+			if tracker != nil {
+				scanOpts = append(scanOpts, scanner.WithOnStart(func(st scanner.ScanStart) error {
+					if err := checkScanResultCollisions(resumeResultFile, st.OutputDir, st.Prefix, st.JournalPath); err != nil {
+						return err
+					}
+					tc := st.TargetsCount
+					scanSec.ScanID = st.ScanID
+					scanSec.Prefix = st.Prefix
+					scanSec.OutputDir = st.OutputDir
+					scanSec.TargetsCount = &tc
+					scanSec.Artifacts.JournalPath = st.JournalPath
+					return tracker.UpdatePending(func(r *runresult.Result) {
+						cp := scanSec
+						r.Scan = &cp
+					})
+				}))
+			}
 			s, err := scanner.New(effectiveConfig, withProgress(cmd, scanOpts)...)
 			if err != nil {
-				return err
+				return fail(err)
 			}
 			res, err := s.Resume(cmd.Context(), resumeJournalPath, prepared, resumeOutputDir, resumePrefix)
-			if err != nil {
-				return err
+			if res != nil {
+				populateScanSection(&scanSec, res)
 			}
-			return printScanSummary(cmd, "Resume", res)
+			if err != nil {
+				scanSec.Resumable = journalExists(scanSec.Artifacts.JournalPath)
+				return fail(err)
+			}
+			if sumErr := printScanSummary(cmd, "Resume", res); sumErr != nil {
+				scanSec.Resumable = journalExists(scanSec.Artifacts.JournalPath)
+				return fail(sumErr)
+			}
+			scanSec.Resumable = false
+			return finishTracker(tracker, cmd.Context().Err(), nil, func(r *runresult.Result) {
+				cp := scanSec
+				r.Scan = &cp
+			})
 		},
 	}
 	resumeCmd.Flags().StringVar(&resumeJournalPath, "journal", "", "Path to existing .journal.jsonl file (required)")
@@ -309,6 +432,7 @@ func newRootCommand() *cobra.Command {
 	resumeCmd.Flags().StringVar(&resumePrefix, "prefix", "", "Filename prefix for resumed artifacts (default: derived from journal filename)")
 	resumeCmd.Flags().StringVar(&resumeDiscoveryFile, "discovery-file", "", "Optional custom discovery fingerprint definitions file")
 	resumeCmd.Flags().DurationVar(&progressInterval, "progress-interval", 30*time.Second, "Print a progress line to stderr at this interval (0 disables)")
+	resumeCmd.Flags().StringVar(&resumeResultFile, "result-file", "", "Optional path to write a machine-readable JSON lifecycle result file")
 	root.AddCommand(resumeCmd)
 
 	var (
@@ -333,6 +457,7 @@ func newRootCommand() *cobra.Command {
 		insecureCE        bool
 		noZIP             bool
 		chunkSize         int
+		uploadResultFile  string
 	)
 
 	uploadCmd := &cobra.Command{
@@ -341,10 +466,39 @@ func newRootCommand() *cobra.Command {
 		Long:  "Runs the M3 BloodHound CE validation gate, registers the LLMHound extension schema,\nperforms M0 Q5 two-step upload (with read-only Cypher existence pre-flight for linking\npayloads), and imports saved searches into BloodHound CE.",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := checkUploadResultCollisions(uploadResultFile, baseFile, linkingFile); err != nil {
+				return err
+			}
 			warnSecretFlags(cmd, map[string]string{
 				"token-key": "BLOODHOUND_TOKEN_KEY", "bearer-token": "BLOODHOUND_BEARER_TOKEN", "password": "BLOODHOUND_PASSWORD",
 			})
 			resolvedURL := firstNonEmpty(bhURL, os.Getenv("BLOODHOUND_URL"))
+			uploadSec := runresult.UploadSection{
+				URL:                 runresult.SanitizeURL(resolvedURL),
+				ValidateOnly:        validateOnly,
+				RegisterSchema:      registerSchema,
+				EnableRulesSchema:   enableRulesSchema,
+				ImportQueries:       importQueries,
+				IncludeCanExecuteOn: includeCanExec,
+				AllowUnvalidatedCE:  allowUnvalidated,
+				BaseFile:            baseFile,
+				LinkingFile:         linkingFile,
+				QueriesDir:          queriesDir,
+			}
+			tracker, err := startResultTracker(cmd, runresult.CommandUpload, uploadResultFile, func(r *runresult.Result) {
+				cp := uploadSec
+				r.Upload = &cp
+			})
+			if err != nil {
+				return err
+			}
+			fail := func(runErr error) error {
+				return finishTracker(tracker, cmd.Context().Err(), runErr, func(r *runresult.Result) {
+					cp := uploadSec
+					r.Upload = &cp
+				})
+			}
+
 			auth := bloodhound.AuthConfig{
 				TokenID:     firstNonEmpty(bhTokenID, os.Getenv("BLOODHOUND_TOKEN_ID")),
 				TokenKey:    firstNonEmpty(bhTokenKey, os.Getenv("BLOODHOUND_TOKEN_KEY")),
@@ -361,17 +515,19 @@ func newRootCommand() *cobra.Command {
 				UserAgent: "LLMHound/" + version,
 			})
 			if err != nil {
-				return err
+				return fail(err)
 			}
+			defer client.CloseIdleConnections()
 
 			if !validateOnly && !registerSchema && baseFile == "" && linkingFile == "" && !importQueries {
-				return fmt.Errorf("nothing to do: specify at least one of --validate-only, --register-schema, --base-file, --linking-file, or --import-queries")
+				return fail(fmt.Errorf("nothing to do: specify at least one of --validate-only, --register-schema, --base-file, --linking-file, or --import-queries"))
 			}
 
 			ctx := cmd.Context()
 			gate, err := client.ValidateAdapter(ctx, allowUnvalidated)
+			uploadSec.Gate = gate
 			if err != nil {
-				return err
+				return fail(err)
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "BloodHound CE %s (%s) adapter gate passed\n", gate.ServerVersion, gate.Edition)
 			for _, chk := range gate.Checks {
@@ -381,7 +537,10 @@ func newRootCommand() *cobra.Command {
 			}
 
 			if validateOnly {
-				return nil
+				return finishTracker(tracker, ctx.Err(), nil, func(r *runresult.Result) {
+					cp := uploadSec
+					r.Upload = &cp
+				})
 			}
 
 			if registerSchema {
@@ -389,12 +548,13 @@ func newRootCommand() *cobra.Command {
 				if enableRulesSchema {
 					schemaBytes, err = rules.SchemaWithCanExecuteOn(schemaBytes)
 					if err != nil {
-						return fmt.Errorf("build rules schema extension: %w", err)
+						return fail(fmt.Errorf("build rules schema extension: %w", err))
 					}
 				}
 				if err := client.RegisterExtension(ctx, schemaBytes); err != nil {
-					return fmt.Errorf("register extension schema: %w", err)
+					return fail(fmt.Errorf("register extension schema: %w", err))
 				}
+				uploadSec.SchemaRegistered = true
 				fmt.Fprintf(cmd.OutOrStdout(), "Extension schema registered (rules_schema=%v)\n", enableRulesSchema)
 			}
 
@@ -408,7 +568,7 @@ func newRootCommand() *cobra.Command {
 				if baseFile != "" {
 					b, err := os.ReadFile(baseFile)
 					if err != nil {
-						return fmt.Errorf("read base file %q: %w", baseFile, err)
+						return fail(fmt.Errorf("read base file %q: %w", baseFile, err))
 					}
 					opts.BasePayloadBytes = b
 					opts.BaseFileName = filepath.Base(baseFile)
@@ -416,14 +576,17 @@ func newRootCommand() *cobra.Command {
 				if linkingFile != "" {
 					b, err := os.ReadFile(linkingFile)
 					if err != nil {
-						return fmt.Errorf("read linking file %q: %w", linkingFile, err)
+						return fail(fmt.Errorf("read linking file %q: %w", linkingFile, err))
 					}
 					opts.LinkingPayloadBytes = b
 					opts.LinkingFileName = filepath.Base(linkingFile)
 				}
 				rep, err := client.UploadScan(ctx, opts)
+				if rep != nil {
+					runresult.ApplyUploadReport(&uploadSec, rep)
+				}
 				if err != nil {
-					return err
+					return fail(err)
 				}
 				if rep.BaseJob != nil {
 					fmt.Fprintf(cmd.OutOrStdout(), "  Base payload uploaded: job=%d status=%d attempts=%d\n", rep.BaseJob.JobID, rep.BaseJob.Status, rep.BaseJob.Attempts)
@@ -444,15 +607,15 @@ func newRootCommand() *cobra.Command {
 				if queriesDir != "" {
 					queries, err = loadQueriesDir(queriesDir)
 					if err != nil {
-						return err
+						return fail(err)
 					}
 				} else {
 					kinds, err := client.TraversablePathKinds(ctx, includeCanExec)
 					if err != nil {
-						return fmt.Errorf("discover traversable path kinds: %w", err)
+						return fail(fmt.Errorf("discover traversable path kinds: %w", err))
 					}
 					if len(kinds) == 0 {
-						return fmt.Errorf("no traversable path kinds reported by BloodHound CE; pass --queries-dir or register extension edges first")
+						return fail(fmt.Errorf("no traversable path kinds reported by BloodHound CE; pass --queries-dir or register extension edges first"))
 					}
 					queries = savedsearch.GenerateWithOptions(kinds, savedsearch.GenerateOptions{
 						IncludeCanExecuteOn: includeCanExec,
@@ -460,12 +623,16 @@ func newRootCommand() *cobra.Command {
 				}
 				n, err := client.ImportSavedQueries(ctx, queries)
 				if err != nil {
-					return fmt.Errorf("import saved queries: %w", err)
+					return fail(fmt.Errorf("import saved queries: %w", err))
 				}
+				uploadSec.QueriesImported = n
 				fmt.Fprintf(cmd.OutOrStdout(), "  Imported %d saved queries into BloodHound CE\n", n)
 			}
 
-			return nil
+			return finishTracker(tracker, ctx.Err(), nil, func(r *runresult.Result) {
+				cp := uploadSec
+				r.Upload = &cp
+			})
 		},
 	}
 	uploadCmd.Flags().StringVar(&bhURL, "url", "", "BloodHound CE base URL (or BLOODHOUND_URL)")
@@ -489,6 +656,7 @@ func newRootCommand() *cobra.Command {
 	uploadCmd.Flags().BoolVar(&insecureCE, "insecure-ce", false, "Bypass TLS verification for BloodHound CE API (explicit opt-in; off by default)")
 	uploadCmd.Flags().BoolVar(&noZIP, "no-zip", false, "Upload raw uncompressed JSON instead of application/zip")
 	uploadCmd.Flags().IntVar(&chunkSize, "chunk-size", bloodhound.DefaultMaxChunkItems, "Maximum nodes+edges per BloodHound upload job")
+	uploadCmd.Flags().StringVar(&uploadResultFile, "result-file", "", "Optional path to write a machine-readable JSON lifecycle result file")
 	root.AddCommand(uploadCmd)
 	return root
 }

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/0x3df/LLMHound/internal/securefile"
@@ -75,5 +76,72 @@ func TestOpenFileAppendCreatesThenAppends(t *testing.T) {
 	}
 	if string(b) != "line\nline\n" {
 		t.Fatalf("content = %q", b)
+	}
+}
+
+func TestWriteFileAtomicCreatesAndReplaces(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "result.json")
+
+	if err := securefile.WriteFileAtomic(path, []byte(`{"status":"pending"}`)); err != nil {
+		t.Fatalf("initial WriteFileAtomic: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != `{"status":"pending"}` {
+		t.Fatalf("got %q", got)
+	}
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if perm := info.Mode().Perm(); perm != 0o600 {
+			t.Fatalf("mode = %o, want 0600", perm)
+		}
+	}
+
+	// Replacing an existing looser file must tighten permissions back to 0600 on Unix.
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(path, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := securefile.WriteFileAtomic(path, []byte(`{"status":"complete"}`)); err != nil {
+		t.Fatalf("overwrite WriteFileAtomic: %v", err)
+	}
+	got, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != `{"status":"complete"}` {
+		t.Fatalf("got %q after overwrite", got)
+	}
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if perm := info.Mode().Perm(); perm != 0o600 {
+			t.Fatalf("mode after overwrite = %o, want 0600", perm)
+		}
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "result.json" {
+		t.Fatalf("unexpected leftover files in dir: %v", entries)
+	}
+
+	// Reject directory path and blank path.
+	if err := securefile.WriteFileAtomic(dir, []byte("x")); err == nil || !strings.Contains(err.Error(), "directory") {
+		t.Fatalf("expected directory error, got %v", err)
+	}
+	if err := securefile.WriteFileAtomic("   ", []byte("x")); err == nil {
+		t.Fatalf("expected error for blank path")
 	}
 }

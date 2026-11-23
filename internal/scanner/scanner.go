@@ -69,6 +69,16 @@ type TargetPlan struct {
 	Surfaces []SurfacePlan `json:"surfaces"`
 }
 
+// ScanStart describes an initialized scan or resume run right after the
+// checkpoint journal is created or opened and before target probing begins.
+type ScanStart struct {
+	ScanID       string
+	Prefix       string
+	OutputDir    string
+	JournalPath  string
+	TargetsCount int
+}
+
 // ScanResult contains the metadata, paths, and replayed graph state from a scan run.
 type ScanResult struct {
 	ScanID       string
@@ -86,6 +96,14 @@ type ScanResult struct {
 	// TargetErrorCount is the total number of target errors, including any
 	// beyond the retained TargetErrors list.
 	TargetErrorCount int
+
+	Emitted                    bool
+	ServicesCount              int
+	BaseNodesCount             int
+	BaseEdgesCount             int
+	LinkingEdgesCount          int
+	EvidenceRecordsCount       int
+	ExposedSecretServicesCount int
 }
 
 // maxRetainedTargetErrors bounds ScanResult.TargetErrors.
@@ -172,6 +190,14 @@ func WithCollectorVersion(version string) Option {
 	}
 }
 
+// WithOnStart registers a hook called once the scan or resume journal has been
+// initialized and target priorities are resolved, before probing begins.
+func WithOnStart(fn func(ScanStart) error) Option {
+	return func(s *Scanner) {
+		s.onStart = fn
+	}
+}
+
 // Scanner coordinates discovery, collectors, checkpointing, and emission for a scan.
 type Scanner struct {
 	cfg               config.Config
@@ -186,6 +212,7 @@ type Scanner struct {
 	collectorVersion  string
 	progress          io.Writer
 	progressInterval  time.Duration
+	onStart           func(ScanStart) error
 	// collectFault is a test seam (see export_test.go) that injects a
 	// collector error for chosen targets.
 	collectFault func(surface discovery.Surface, host string) error
@@ -972,6 +999,49 @@ func (s *Scanner) runAndEmit(
 	}
 	orderedTargets := targets.PrioritizeTargets(targetHosts, lookupObjID, s.priorityObjectIDs, s.cfg.Scan.MappedOnlyTargets)
 
+	var targetErrMu sync.Mutex
+	var targetErrs []string
+	targetErrCount := 0
+	makePartial := func() *ScanResult {
+		targetErrMu.Lock()
+		errsCopy := append([]string(nil), targetErrs...)
+		errCount := targetErrCount
+		targetErrMu.Unlock()
+
+		cp := ""
+		if !secretsOnlyMode && contentWriter.Count() > 0 {
+			cp = contentPath
+		} else if !secretsOnlyMode && priorState != nil {
+			if _, statErr := os.Stat(contentPath); statErr == nil {
+				cp = contentPath
+			}
+		}
+		return &ScanResult{
+			ScanID:           scanID,
+			Prefix:           prefix,
+			OutputDir:        outputDir,
+			JournalPath:      journalPath,
+			ContentPath:      cp,
+			TargetsCount:     len(orderedTargets) + len(s.endpoints),
+			TargetErrors:     errsCopy,
+			TargetErrorCount: errCount,
+		}
+	}
+
+	if s.onStart != nil {
+		if err := s.onStart(ScanStart{
+			ScanID:       scanID,
+			Prefix:       prefix,
+			OutputDir:    outputDir,
+			JournalPath:  journalPath,
+			TargetsCount: len(orderedTargets) + len(s.endpoints),
+		}); err != nil {
+			_ = journal.Close()
+			_ = closeContent()
+			return makePartial(), err
+		}
+	}
+
 	// 3. Initialize collectors. Every collector shares one transport: one
 	// authorized-host list (prepared targets plus explicit endpoints, so
 	// nothing outside the operator's input is ever contacted), one per-host
@@ -1013,7 +1083,7 @@ func (s *Scanner) runAndEmit(
 	if err != nil {
 		_ = journal.Close()
 		_ = closeContent()
-		return nil, fmt.Errorf("initialize jupyter collector: %w", err)
+		return makePartial(), fmt.Errorf("initialize jupyter collector: %w", err)
 	}
 
 	surfCfg := s.cfg
@@ -1054,7 +1124,7 @@ func (s *Scanner) runAndEmit(
 	if err != nil {
 		_ = journal.Close()
 		_ = closeContent()
-		return nil, fmt.Errorf("initialize mcp collector: %w", err)
+		return makePartial(), fmt.Errorf("initialize mcp collector: %w", err)
 	}
 	cols.mcp = mcpCol
 
@@ -1062,7 +1132,7 @@ func (s *Scanner) runAndEmit(
 	if err != nil {
 		_ = journal.Close()
 		_ = closeContent()
-		return nil, err
+		return makePartial(), err
 	}
 	defer probeClient.CloseIdleConnections()
 
@@ -1144,9 +1214,6 @@ func (s *Scanner) runAndEmit(
 	// continues; only journal failures and interruption abort the run. One bad
 	// host must never discard the output of every other host, and because the
 	// result is "failed", resume retries it.
-	var targetErrMu sync.Mutex
-	var targetErrs []string
-	targetErrCount := 0
 	targetFailure := func(host, baseURL string, surface discovery.Surface, err error) {
 		if ctx.Err() != nil {
 			return // interruption is reported once, with a resume hint
@@ -1380,26 +1447,26 @@ endpointLoop:
 	if firstRecordErr != nil {
 		_ = journal.Close()
 		_ = closeContent()
-		return nil, firstRecordErr
+		return makePartial(), firstRecordErr
 	}
 
 	// 6. Close journal and content writer to flush writes to disk
 	if closeErr := journal.Close(); closeErr != nil {
 		_ = closeContent()
-		return nil, fmt.Errorf("close checkpoint journal: %w", closeErr)
+		return makePartial(), fmt.Errorf("close checkpoint journal: %w", closeErr)
 	}
 	writtenContentCount := contentWriter.Count()
 	if secretsOnlyMode {
 		writtenContentCount = 0
 	}
 	if closeErr := closeContent(); closeErr != nil {
-		return nil, fmt.Errorf("close content file: %w", closeErr)
+		return makePartial(), fmt.Errorf("close content file: %w", closeErr)
 	}
 
 	// 7. Replay journal file to reconstruct accumulated state
 	state, err := checkpoint.ReplayFile(journalPath)
 	if err != nil {
-		return nil, fmt.Errorf("replay checkpoint journal: %w", err)
+		return makePartial(), fmt.Errorf("replay checkpoint journal: %w", err)
 	}
 
 	nodes := state.Nodes()
@@ -1428,7 +1495,7 @@ endpointLoop:
 	// 7a2. Link exposed credentials and Entra SSO identities to native AZApp nodes (populates P11/P12).
 	idEdges, idEvs, err := ResolveIdentityEdges(s.cfg.Scope, nodes, evalObs)
 	if err != nil {
-		return nil, fmt.Errorf("resolve identity edges: %w", err)
+		return makePartial(), fmt.Errorf("resolve identity edges: %w", err)
 	}
 	if len(idEdges) > 0 {
 		edges = append(edges, idEdges...)
@@ -1458,7 +1525,7 @@ endpointLoop:
 			},
 		})
 		if err != nil {
-			return nil, fmt.Errorf("evaluate path-qualification rules: %w", err)
+			return makePartial(), fmt.Errorf("evaluate path-qualification rules: %w", err)
 		}
 		edges = append(edges, ruleEdges...)
 		evRecords = append(evRecords, ruleEv...)
@@ -1475,7 +1542,34 @@ endpointLoop:
 		CompactJSON: s.cfg.Scan.CompactJSON,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("emit scan artifacts: %w", err)
+		return makePartial(), fmt.Errorf("emit scan artifacts: %w", err)
+	}
+
+	servicesCount := 0
+	exposedSecretServicesCount := 0
+	for _, n := range emitNodes {
+		isService := false
+		for _, k := range n.Node.Kinds() {
+			if k == graph.AIService {
+				isService = true
+				break
+			}
+		}
+		if isService {
+			servicesCount++
+			if exposed, ok := n.Properties["has_exposed_secret"].(bool); ok && exposed {
+				exposedSecretServicesCount++
+			}
+		}
+	}
+	baseEdgesCount := 0
+	linkingEdgesCount := 0
+	for _, e := range emitEdges {
+		if e.TouchesNative() {
+			linkingEdgesCount++
+		} else {
+			baseEdgesCount++
+		}
 	}
 
 	recordedContentPath := ""
@@ -1488,17 +1582,23 @@ endpointLoop:
 	}
 
 	return &ScanResult{
-		ScanID:       scanID,
-		Prefix:       prefix,
-		OutputDir:    outputDir,
-		JournalPath:  journalPath,
-		ContentPath:  recordedContentPath,
-		Artifacts:    artifacts,
-		TargetsCount: len(orderedTargets) + len(s.endpoints),
-		State:        state,
-
-		TargetErrors:     targetErrs,
-		TargetErrorCount: targetErrCount,
+		ScanID:                     scanID,
+		Prefix:                     prefix,
+		OutputDir:                  outputDir,
+		JournalPath:                journalPath,
+		ContentPath:                recordedContentPath,
+		Artifacts:                  artifacts,
+		TargetsCount:               len(orderedTargets) + len(s.endpoints),
+		State:                      state,
+		TargetErrors:               targetErrs,
+		TargetErrorCount:           targetErrCount,
+		Emitted:                    true,
+		ServicesCount:              servicesCount,
+		BaseNodesCount:             len(emitNodes),
+		BaseEdgesCount:             baseEdgesCount,
+		LinkingEdgesCount:          linkingEdgesCount,
+		EvidenceRecordsCount:       len(evRecords),
+		ExposedSecretServicesCount: exposedSecretServicesCount,
 	}, nil
 }
 

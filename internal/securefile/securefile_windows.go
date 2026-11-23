@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -80,4 +81,33 @@ func applyDescriptor(name string, sd *windows.SECURITY_DESCRIPTOR) error {
 		return fmt.Errorf("restrict permissions on %s: %w", name, err)
 	}
 	return nil
+}
+
+func replaceFile(tmpPath, destPath string) error {
+	from, err := windows.UTF16PtrFromString(tmpPath)
+	if err != nil {
+		return &os.PathError{Op: "rename", Path: tmpPath, Err: err}
+	}
+	to, err := windows.UTF16PtrFromString(destPath)
+	if err != nil {
+		return &os.PathError{Op: "rename", Path: destPath, Err: err}
+	}
+	const flags = windows.MOVEFILE_REPLACE_EXISTING | windows.MOVEFILE_WRITE_THROUGH
+	backoffs := []time.Duration{
+		10 * time.Millisecond,
+		20 * time.Millisecond,
+		40 * time.Millisecond,
+		80 * time.Millisecond,
+		100 * time.Millisecond,
+	}
+	for attempt := 0; ; attempt++ {
+		err = windows.MoveFileEx(from, to, flags)
+		if err == nil {
+			return nil
+		}
+		if (!errors.Is(err, windows.ERROR_SHARING_VIOLATION) && !errors.Is(err, windows.ERROR_ACCESS_DENIED)) || attempt >= len(backoffs) {
+			return &os.LinkError{Op: "rename", Old: tmpPath, New: destPath, Err: err}
+		}
+		time.Sleep(backoffs[attempt])
+	}
 }

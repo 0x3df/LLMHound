@@ -70,3 +70,75 @@ func TestOpenFileWindowsDACLIsOwnerAndSystemOnly(t *testing.T) {
 		t.Fatalf("DACL must grant the current user and SYSTEM: %s", sd.String())
 	}
 }
+
+func TestWriteFileAtomicWindowsDACLIsOwnerAndSystemOnly(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "result.json")
+
+	// Initial atomic write, then atomic overwrite.
+	for _, body := range []string{`{"status":"pending"}`, `{"status":"complete"}`} {
+		if err := securefile.WriteFileAtomic(path, []byte(body)); err != nil {
+			t.Fatalf("WriteFileAtomic(%q): %v", body, err)
+		}
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != body {
+			t.Fatalf("content = %q, want %q", got, body)
+		}
+
+		sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.HasPrefix(sd.String(), "D:P") {
+			t.Fatalf("DACL must be protected from inheritance: %s", sd.String())
+		}
+		dacl, _, err := sd.DACL()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if dacl.AceCount != 2 {
+			t.Fatalf("DACL has %d ACEs, want 2: %s", dacl.AceCount, sd.String())
+		}
+		user, err := windows.GetCurrentProcessToken().GetTokenUser()
+		if err != nil {
+			t.Fatal(err)
+		}
+		system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var sawUser, sawSystem bool
+		for i := uint32(0); i < uint32(dacl.AceCount); i++ {
+			var ace *windows.ACCESS_ALLOWED_ACE
+			if err := windows.GetAce(dacl, i, &ace); err != nil {
+				t.Fatal(err)
+			}
+			if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE {
+				t.Fatalf("unexpected ACE type %d: %s", ace.Header.AceType, sd.String())
+			}
+			sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+			switch {
+			case sid.Equals(user.User.Sid):
+				sawUser = true
+			case sid.Equals(system):
+				sawSystem = true
+			default:
+				t.Fatalf("DACL grants an unexpected principal %s: %s", sid.String(), sd.String())
+			}
+		}
+		if !sawUser || !sawSystem {
+			t.Fatalf("DACL must grant the current user and SYSTEM: %s", sd.String())
+		}
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "result.json" {
+		t.Fatalf("unexpected directory entries after WriteFileAtomic: %v", entries)
+	}
+}

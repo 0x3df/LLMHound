@@ -21,6 +21,7 @@ others link rather than restate.
 | Folder | Contents |
 |---|---|
 | [`guides/`](guides/) | [Configuration](guides/configuration.md) (flags, YAML, mapping file) and the [development guide](guides/development.md) (build, test, lab, CI) |
+| [`assets/`](assets/) | [Sample cross-collector attack path](assets/attack-path-sample.html) (standalone interactive HTML diagram) |
 | [`collectors/`](collectors/README.md) | One page per implemented collector |
 | [`internals/`](internals/) | [Checkpoint journal](internals/checkpoint-journal.md) and [scan coverage](internals/scan-coverage.md) |
 | [Future ideas](future-ideas.md) | Parked, explicitly out of scope |

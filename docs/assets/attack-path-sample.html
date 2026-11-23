@@ -1,0 +1,138 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<title>Sample Attack Path</title>
+<style>
+  /* Standalone defaults. :where() has zero specificity, so a host theme (e.g. T3) that sets
+     these variables on :root overrides them; opened directly in a browser, these apply. */
+  :where(:root) {
+    --background: #0b0b0c; --foreground: #ececee; --muted-foreground: #9a9aa2; --card: #141416;
+    --destructive: #f05252; --font-sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+    --chart-1: #4f7df3; --chart-2: #2dd4bf; --chart-3: #f5b82e; --chart-4: #b48cf2; --chart-5: #f2727f; --chart-6: #a3e635;
+  }
+  @media (prefers-color-scheme: light) {
+    :where(:root) {
+      --background: #ffffff; --foreground: #17171a; --muted-foreground: #5f5f68; --card: #f6f6f7;
+      --destructive: #d42f2f; --chart-1: #2f5fd8; --chart-2: #0f9488; --chart-3: #c78a06; --chart-4: #8b5cd6; --chart-5: #d9475a; --chart-6: #5f9e0a;
+    }
+  }
+  :where(body) { background: var(--background); padding: 16px; }
+  :root { --g-ad: var(--chart-1); --g-pam: var(--chart-2); --g-virt: var(--chart-3);
+          --g-cloud: var(--chart-4); --g-dev: var(--chart-5); --g-llm: var(--chart-6); }
+  body { margin: 0; font-family: var(--font-sans); color: var(--foreground); }
+  .wrap { max-width: 712px; margin: 0 auto; }
+  .note { font-size: 12.5px; color: var(--muted-foreground); margin: 2px 0 10px; line-height: 1.45; }
+  .legend { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 11.5px; margin-bottom: 8px; }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; color: var(--muted-foreground); }
+  .sw { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+  .dash { width: 22px; height: 0; border-top: 2px dashed var(--destructive); display: inline-block; }
+  svg { width: 100%; height: auto; display: block; overflow: visible; }
+  .box { fill: var(--card); stroke-width: 1.5; }
+  .stripe { stroke: none; }
+  .tag { font-size: 8.6px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
+  .lbl { font-size: 11.6px; font-weight: 650; fill: var(--foreground); }
+  .sub { font-size: 9.6px; fill: var(--muted-foreground); }
+  .edge { stroke: var(--muted-foreground); stroke-width: 1.4; fill: none; opacity: .85; }
+  .edge.gap { stroke: var(--destructive); stroke-dasharray: 5 4; stroke-width: 1.8; opacity: 1; }
+  .elbl { font-size: 9.4px; fill: var(--muted-foreground); paint-order: stroke; stroke: var(--background); stroke-width: 4px; stroke-linejoin: round; }
+  .elbl.gap { fill: var(--destructive); font-weight: 650; }
+  .start .box { stroke-dasharray: 3 3; }
+  .stage { font-size: 9px; letter-spacing: .08em; text-transform: uppercase; fill: var(--muted-foreground); opacity: .7; }
+</style></head>
+<body><div class="wrap">
+<p class="note">A made-up path through all 12 collectors: an anonymous attacker on the network ends up holding the domain, Entra, GitHub, npm, GCP and OCI. Red dashed hops are links <b>no collector emits today</b>, so BloodHound can't find this path yet.</p>
+<div class="legend" id="legend"></div>
+<svg id="g" viewBox="0 0 712 1000" role="img" aria-label="Sample cross-collector attack path"></svg>
+</div>
+<script>
+const groups = {
+  llm:  ['LLMHound', '--g-llm'],
+  ad:   ['AD: SharpHound, ShareHound, MSSQLHound, ConfigManBearPig', '--g-ad'],
+  pam:  ['CyberArkHound', '--g-pam'],
+  virt: ['vCenterHound', '--g-virt'],
+  cloud:['AzureHound, GCP-Hound, OCInferno', '--g-cloud'],
+  dev:  ['GitHound, npmHound', '--g-dev'],
+};
+const W = 168, H = 54, COLS = [92, 356, 620], Y0 = 52, DY = 106;
+const N = [
+  ['att',   0,0,null,  '',                 'Anonymous attacker', 'on the corp network'],
+  ['jup',   0,1,'llm', 'LLMHound',         'Jupyter, auth off',  'ml-gpu-07:8888'],
+  ['gpu',   0,2,'ad',  'SharpHound',       'ML-GPU-07',          'Computer'],
+  ['svc',   1,2,'ad',  'SharpHound',       'svc_mlops',          'User, session on ML-GPU-07'],
+  ['sql',   1,1,'ad',  'MSSQLHound',       'SQL-ML01',           'login for svc_mlops'],
+  ['sdb',   1,0,'ad',  'MSSQLHound',       'SCCM-DB01',          'site database server'],
+  ['shr',   2,2,'ad',  'ShareHound',       'SCCMContentLib$',    'SMB share on SCCM01'],
+  ['site',  2,1,'ad',  'ConfigManBearPig', 'Site P01',           'SCCM site'],
+  ['paw',   3,1,'ad',  'ConfigManBearPig', 'PAW-03',             'SCCM client'],
+  ['t1',    3,2,'ad',  'SharpHound',       't1.admin',           'User, session on PAW-03'],
+  ['safe',  4,2,'pam', 'CyberArkHound',    'Safe Tier0-Infra',   't1.admin is a member'],
+  ['vac',   4,1,'pam', 'CyberArkHound',    'CORP\\svc_vcadmin',  'vaulted account'],
+  ['vcu',   4,0,'virt','vCenterHound',     'CORP\\svc_vcadmin',  'vCenter_User, Administrator'],
+  ['vm',    5,0,'virt','vCenterHound',     'VM dc01',            'vCenter_VM'],
+  ['dc',    5,1,'ad',  'SharpHound',       'DC01',               'Domain controller'],
+  ['dom',   5,2,'ad',  'SharpHound',       'CORP.LOCAL',         'Domain, tier 0'],
+  ['oga',   6,2,'ad',  'SharpHound',       'ops.ga',             'AD user'],
+  ['ga',    6,1,'cloud','AzureHound',      'ops.ga@corp.com',    'Global Administrator'],
+  ['gh',    7,0,'dev', 'GitHound',         'corp enterprise',    'GitHub enterprise owner'],
+  ['gcp',   7,1,'cloud','GCP-Hound',       'corp.com org',       'Organization Admin'],
+  ['oci',   7,2,'cloud','OCInferno',       'corp tenancy',       'Administrators group'],
+  ['repo',  8,0,'dev', 'GitHound',         'corp/build-utils',   'repository, publishes to npm'],
+  ['npm',   8,1,'dev', 'npmHound',         '@corp/build-utils',  'npm package'],
+  ['deps',  8,2,'dev', 'npmHound',         'Downstream',         'every package depending on it'],
+];
+const E = [
+  ['att','jup',['no auth']], ['jup','gpu',['CanExecuteOn']], ['gpu','svc',['HasSession']],
+  ['svc','sql',['SQL login']], ['sql','sdb',['linked server,','sysadmin']],
+  ['svc','shr',['write access']], ['sdb','site',['site DB','takeover']], ['shr','site',['tamper','app content']],
+  ['site','paw',['deploys app to']], ['paw','t1',['HasSession']],
+  ['t1','safe',['safe member']], ['safe','vac',['retrieve']],
+  ['vac','vcu',['same identity'],1], ['vcu','vm',['snapshot, console']],
+  ['vm','dc',['same host'],1], ['dc','dom',['DCSync']],
+  ['dom','oga',['reset password']], ['oga','ga',['SyncedTo','EntraUser']],
+  ['ga','gh',['SAML SSO']], ['ga','gcp',['federated SSO'],1], ['ga','oci',['federated','SSO'],1],
+  ['gh','repo',['admin']], ['repo','npm',['publishes']], ['npm','deps',['dependency of']],
+];
+const NS = 'http://www.w3.org/2000/svg', svg = document.getElementById('g');
+const el = (t, a, p = svg) => { const e = document.createElementNS(NS, t); for (const k in a) e.setAttribute(k, a[k]); p.appendChild(e); return e; };
+const pos = {}; N.forEach(n => pos[n[0]] = { x: COLS[n[2]], y: Y0 + n[1] * DY });
+
+// legend
+const lg = document.getElementById('legend');
+for (const k in groups) lg.insertAdjacentHTML('beforeend', `<span><i class="sw" style="background:var(${groups[k][1]})"></i>${groups[k][0]}</span>`);
+lg.insertAdjacentHTML('beforeend', `<span><i class="dash"></i>missing link today</span>`);
+
+// arrowheads
+const defs = el('defs', {});
+[['a', 'var(--muted-foreground)'], ['ag', 'var(--destructive)']].forEach(([id, c]) => {
+  const m = el('marker', { id, viewBox: '0 0 10 10', refX: 9, refY: 5, markerWidth: 7, markerHeight: 7, orient: 'auto-start-reverse' }, defs);
+  el('path', { d: 'M0,0 L10,5 L0,10 z', style: `fill:${c}` }, m);
+});
+
+// edges
+const clip = (c, dx, dy) => { const t = Math.min((W/2 + 3) / Math.abs(dx || 1e-9), (H/2 + 3) / Math.abs(dy || 1e-9)); return [c.x + dx*t, c.y + dy*t]; };
+E.forEach(([f, t, lab, gap]) => {
+  const a = pos[f], b = pos[t]; let dx = b.x - a.x, dy = b.y - a.y; const L = Math.hypot(dx, dy); dx /= L; dy /= L;
+  const [x1, y1] = clip(a, dx, dy), [x2, y2] = clip(b, -dx, -dy);
+  el('line', { x1, y1, x2, y2, class: 'edge' + (gap ? ' gap' : ''), 'marker-end': `url(#${gap ? 'ag' : 'a'})` });
+  let mx = (x1 + x2) / 2, my = (y1 + y2) / 2, anchor = 'middle';
+  if (Math.abs(dx) < 0.01) { mx += 7; anchor = 'start'; my += 3 - (lab.length - 1) * 5; }      // vertical: label right of line
+  else if (Math.abs(dy) < 0.01) { my -= 6 + (lab.length - 1) * 10.5; }                          // horizontal: label above line
+  else { my -= (lab.length - 1) * 5; }
+  const tx = el('text', { x: mx, y: my, 'text-anchor': anchor, class: 'elbl' + (gap ? ' gap' : '') });
+  lab.forEach((s, i) => el('tspan', { x: mx, dy: i ? 10.5 : 0 }, tx).textContent = s);
+});
+
+// nodes
+N.forEach(([id, r, c, g, tag, lbl, sub]) => {
+  const { x, y } = pos[id], col = g ? `var(${groups[g][1]})` : 'var(--muted-foreground)';
+  const grp = el('g', { class: g ? '' : 'start' });
+  el('rect', { x: x - W/2, y: y - H/2, width: W, height: H, rx: 8, class: 'box', style: `stroke:${col}` }, grp);
+  el('rect', { x: x - W/2, y: y - H/2 + 6, width: 4, height: H - 12, rx: 2, class: 'stripe', style: `fill:${col}` }, grp);
+  const tx = x - W/2 + 13;
+  if (tag) el('text', { x: tx, y: y - 11, class: 'tag', style: `fill:${col}` }, grp).textContent = tag;
+  el('text', { x: tx, y: tag ? y + 4 : y - 2, class: 'lbl' }, grp).textContent = lbl;
+  el('text', { x: tx, y: tag ? y + 18 : y + 13, class: 'sub' }, grp).textContent = sub;
+});
+const last = Y0 + 8 * DY + H/2 + 8;
+svg.setAttribute('viewBox', `0 0 712 ${last}`);
+</script>
+</body></html>

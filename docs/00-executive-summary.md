@@ -64,6 +64,10 @@ services, and which of those are open to anyone?*
 6. Which AI gateways or UIs depend on back-ends on other hosts?
 7. Which AI services are not yet attributed to a known asset?
 
+For a visual example of how LLMHound joins into Active Directory, PAM, virtualization, and
+cloud graphs, open the standalone [sample cross-collector attack path](assets/attack-path-sample.html)
+in a browser.
+
 ## What it deliberately does not do
 
 - **It never logs in, guesses passwords, or tries default credentials**, and it never uses
